@@ -1,0 +1,6 @@
+{
+  "name": "Ludo Emperor 4 Way",
+  "description": "Ludo Emperor 4 Way - 2-dice Ludo with Lucky Seven, 3D tilted board",
+  "permissions": [],
+  "capabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta name="theme-color" content="#0a0f26" />
+    <title>Ludo Emperor 4 Way</title>
+    <meta name="description" content="Ludo Emperor 4 Way - 2-dice Ludo with Lucky Seven, 3D tilted board" />
+    <meta property="og:title" content="Ludo Emperor 4 Way" />
+    <meta property="og:description" content="Ludo Emperor 4 Way - 2-dice Ludo with Lucky Seven, 3D tilted board" />
+    <style>
+        #boot-cover {
+            position: fixed;
+            inset: 0;
+            z-index: 9999;
+            background: #000;
+            opacity: 1;
+            transition: opacity 0.35s ease-out;
+            pointer-events: none;
+        }
+        #boot-cover.hidden { opacity: 0; }
+    </style>
+</head>
+<body>
+    <div id="boot-cover"></div>
+    <script>
+        setTimeout(function () {
+            var c = document.getElementById('boot-cover');
+            if (c && !c.classList.contains('hidden')) c.classList.add('hidden');
+        }, 4000);
+    </script>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+</body>
+</html>

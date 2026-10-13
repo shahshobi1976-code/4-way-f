@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <!-- WEB build: same game, tuned for a desktop browser window.
+         Resize the window and it re-lays out; a wide window gives the full
+         landscape board. Pinch-zoom and text selection are left enabled, and
+         no iOS fullscreen meta tags are needed here. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0a0f26" />
+
+    <title>Ludo Emperor 4 Way — Web</title>
+    <style>
+        #boot-cover {
+            position: fixed;
+            inset: 0;
+            z-index: 9999;
+            background: #000;
+            opacity: 1;
+            transition: opacity 0.35s ease-out;
+            pointer-events: none;
+        }
+        #boot-cover.hidden { opacity: 0; }
+    </style>
+</head>
+<body>
+    <script>window.__LUDO_TARGET__ = 'web';</script>
+    <div id="boot-cover"></div>
+    <script>
+        setTimeout(function () {
+            var c = document.getElementById('boot-cover');
+            if (c && !c.classList.contains('hidden')) c.classList.add('hidden');
+        }, 4000);
+    </script>
+    <div id="root"></div>
+    <script type="module" src="./src/main.tsx"></script>
+</body>
+</html>

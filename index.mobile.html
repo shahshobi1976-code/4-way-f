@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <!-- MOBILE build: locked viewport, fits under notches, no zoom/scroll.
+         Phones: portrait shows the board above the dice; turn the phone sideways
+         (or tap the fullscreen button) for the wider board-on-the-left layout. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="theme-color" content="#0a0f26" />
+    <meta name="format-detection" content="telephone=no" />
+
+    <title>Ludo Emperor 4 Way — Mobile</title>
+    <style>
+        #boot-cover {
+            position: fixed;
+            inset: 0;
+            z-index: 9999;
+            background: #000;
+            opacity: 1;
+            transition: opacity 0.35s ease-out;
+            pointer-events: none;
+        }
+        #boot-cover.hidden { opacity: 0; }
+        /* mobile build: never bounce or select while dragging on the board */
+        html, body {
+            overscroll-behavior: none;
+            -webkit-touch-callout: none;
+            -webkit-user-select: none;
+            user-select: none;
+        }
+    </style>
+</head>
+<body>
+    <script>window.__LUDO_TARGET__ = 'mobile';</script>
+    <div id="boot-cover"></div>
+    <script>
+        setTimeout(function () {
+            var c = document.getElementById('boot-cover');
+            if (c && !c.classList.contains('hidden')) c.classList.add('hidden');
+        }, 4000);
+    </script>
+    <div id="root"></div>
+    <script type="module" src="./src/main.tsx"></script>
+</body>
+</html>

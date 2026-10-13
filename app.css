@@ -1,0 +1,94 @@
+@import "tailwindcss";
+
+/* ADAPT: palette */
+@theme {
+    --color-ink: #070b1f;
+    --color-panel: #0e1530;
+    --color-neon: #18e0ff;
+    --color-gold: #ffc83a;
+    --color-ludo-red: #e53935;
+    --color-ludo-green: #43a047;
+    --color-ludo-yellow: #fdd835;
+    --color-ludo-cyan: #00bcd4;
+}
+
+html, body, #root {
+    height: 100%;
+    margin: 0;
+    background: #000;
+    overflow: hidden;
+    overscroll-behavior: none;
+    touch-action: manipulation;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+}
+
+/* Device frame: a 9:16 phone-shaped box centred on desktop; fills the screen in fullscreen. */
+#app-frame {
+    --u: 1px;
+    --colx: 14;
+    --colw: 692;
+    position: relative;
+    height: 100%;
+    width: min(100vw, calc(100vh * 9 / 16));
+    margin: 0 auto;
+    overflow: hidden;
+    background: #0a0f26;
+    color: #fff;
+}
+/* Wide viewport (desktop window, laptop, tablet, phone turned sideways): use the
+   wide landscape layout instead of a letterboxed portrait strip. The upper bound
+   keeps it a comfortable centred column on very wide desktops; the 1.45:1 lower
+   bound matters because the menu/setup screens are ~1450 design units wide and
+   the frame clips its overflow, so a narrower frame cuts their content off. */
+#app-frame.land { width: min(100vw, max(calc(100vh * 1.45), 820px)); }
+#app-frame.fs.land { width: 100vw; }
+/* fullscreen in portrait: fill the screen too */
+#app-frame.fs:not(.land) { width: 100vw; }
+/* The menu and setup screens are the original portrait column: the `land` class
+   is withheld while they are on screen (see App.tsx), so the frame keeps the 9:16
+   width and `--u` follows the frame. The playing board still uses the wide
+   layout. Nothing extra is needed here. */
+
+/* safe-area helpers for notches */
+.safe-top { padding-top: env(safe-area-inset-top); }
+.safe-bottom { padding-bottom: env(safe-area-inset-bottom); }
+
+/* progress bar (HUD) */
+.hud-bar {
+    position: absolute;
+    top: calc(var(--u) * 16);
+    left: calc(var(--u) * 14);
+    right: calc(var(--u) * 78);
+    pointer-events: none;
+}
+.hud-gear { position: absolute; top: calc(var(--u) * 20); right: calc(var(--u) * 16); }
+.land .hud-bar {
+    top: calc(var(--u) * 14);
+    left: calc(var(--u) * var(--colx));
+    right: auto;
+    width: calc(var(--u) * (var(--colw) - 66));
+}
+.land .hud-gear { right: calc(var(--u) * 16); top: calc(var(--u) * 18); }
+
+/* circuit-board backdrop for the menu */
+.circuit {
+    background-color: #050a1c;
+    background-image:
+        linear-gradient(rgba(24, 224, 255, 0.07) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(24, 224, 255, 0.07) 1px, transparent 1px),
+        radial-gradient(circle at 20% 15%, rgba(24, 224, 255, 0.18), transparent 40%),
+        radial-gradient(circle at 85% 80%, rgba(255, 60, 200, 0.14), transparent 45%);
+    background-size: 28px 28px, 28px 28px, auto, auto;
+}
+
+.glow-title {
+    text-shadow: 0 0 12px rgba(24, 224, 255, 0.8), 0 0 30px rgba(24, 224, 255, 0.45), 0 3px 0 #0a3a5a;
+}
+
+@keyframes pop { from { transform: scale(0.85); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+.pop { animation: pop 0.2s ease-out; }
+@keyframes pulse-wish { 0%, 100% { box-shadow: 0 0 0 0 rgba(255, 200, 58, 0.7); } 50% { box-shadow: 0 0 0 12px rgba(255, 200, 58, 0); } }
+.pulse-wish { animation: pulse-wish 1.2s infinite; }

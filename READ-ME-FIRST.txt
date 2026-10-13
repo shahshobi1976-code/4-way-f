@@ -1,0 +1,72 @@
+============================================================
+  LUDO EMPEROR 4 WAY  -  FINAL GAME
+============================================================
+
+Everything is in this folder. Nothing to install.
+
+
+------------------------------------------------------------
+  PLAY IT RIGHT NOW  (no setup, no internet, no Node.js)
+------------------------------------------------------------
+
+  On a PC / laptop      ->  double-click   PLAY-WEB.html
+  On a phone / tablet   ->  double-click   PLAY-MOBILE.html
+
+  Each file is the WHOLE game. Copy it to a phone, email it,
+  put it on a USB stick - it works on its own.
+
+  NOTE: leave index.web.html and index.mobile.html alone. Those
+  are developer files; double-clicking them does nothing.
+
+
+------------------------------------------------------------
+  PLAY ON SEVERAL DEVICES AT ONCE  (optional)
+------------------------------------------------------------
+
+  Double-click   PLAY.cmd
+  (needs Node.js from nodejs.org - only for this option)
+
+  The black console window prints two addresses:
+
+      this PC :  http://127.0.0.1:8080/
+      phone   :  http://<your-ip>:8080/
+
+  Keep that window open while playing; close it to stop.
+  Bookmark the link and you can come back any time.
+
+  Phone cannot connect?
+      Double-click ALLOW-PHONE-ACCESS.cmd and accept the
+      Administrator prompt. That opens the port for your own
+      Wi-Fi only - nothing is exposed to the internet.
+
+
+------------------------------------------------------------
+  WHAT IS IN HERE
+------------------------------------------------------------
+
+  PLAY-WEB.html ......... the whole game, tuned for PC browsers
+  PLAY-MOBILE.html ...... the whole game, tuned for phones
+  PLAY.cmd .............. starts the shared server (web + phone)
+  ALLOW-PHONE-ACCESS.cmd  one-time firewall helper for phones
+  START-HERE.md ......... full guide: rules, landscape, fixes
+  src/ .................. the source code
+  dist/ ................. served build (used by PLAY.cmd)
+  dist-web/ dist-mobile/  the two single-file builds
+  Run with local server/  the server and its own launcher
+
+
+
+------------------------------------------------------------
+  QUICK TIPS
+------------------------------------------------------------
+
+  * Turn a phone sideways for the wide board layout.
+  * Your turn is two taps: tap a NUMBER, then tap a glowing
+    PIECE. A hand points down at what to tap next.
+  * You must take EVERY capture your roll allows - with 5 + 5
+    you can take two opponents in one turn.
+  * Black screen? You opened a developer file. Use PLAY-WEB.html
+    or PLAY-MOBILE.html.
+
+  Full details, including the capture rule and troubleshooting,
+  are in START-HERE.md
