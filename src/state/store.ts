@@ -22,6 +22,8 @@ export interface Settings {
     bg: number; // 0..9
     lang: string;
     songName: string | null;
+    timerEnabled: boolean; // Turn timer optional
+    timerSec: 60 | 90 | 120; // 60s, 90s, 120s
 }
 
 export interface PlayerCfg {
@@ -47,7 +49,7 @@ export interface AppState {
     loadProgress: number;
     paused: boolean;
     settings: Settings;
-    players: PlayerCfg[]; // indexed by colour: 0 red, 1 green, 2 yellow, 3 cyan
+    players: PlayerCfg[]; // indexed by colour: 0 red, 1 green, 2 yellow, 3 blue
     mode: 4 | 2;
     gender: 'male' | 'female';
     gameId: number;
@@ -62,6 +64,9 @@ export interface AppState {
     wishUsable: boolean;
     fullscreen: boolean;
     landscape: boolean;
+    turnSecondsLeft: number;
+    turnTotalSec: number;
+    timerActive: boolean;
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -73,6 +78,8 @@ const DEFAULT_SETTINGS: Settings = {
     bg: 0,
     lang: 'en',
     songName: null,
+    timerEnabled: true,
+    timerSec: 90,
 };
 
 function loadSettings(): Settings {
@@ -89,7 +96,7 @@ export const DEFAULT_PLAYERS: PlayerCfg[] = [
     { name: 'Red', ai: true, avatar: '🔥', wish: null },
     { name: 'Green', ai: true, avatar: '🍀', wish: null },
     { name: 'Yellow', ai: true, avatar: '🌟', wish: null },
-    { name: 'Cyan', ai: false, avatar: '🤴', wish: null },
+    { name: 'Blue', ai: false, avatar: '🤴', wish: null },
 ];
 
 let state: AppState = {
@@ -111,6 +118,9 @@ let state: AppState = {
     wishUsable: false,
     fullscreen: false,
     landscape: false,
+    turnSecondsLeft: 90,
+    turnTotalSec: 90,
+    timerActive: false,
 };
 
 const listeners = new Set<() => void>();

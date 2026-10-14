@@ -212,6 +212,25 @@ export function tap() {
     clack(a.c, a.out, a.c.currentTime, 0.25, 1800);
 }
 
+/** Subtle clock tick for urgent turn timer warnings (last 5 seconds). */
+export function tick() {
+    if (!soundOn()) return;
+    const a = audio();
+    if (!a) return;
+    const { c, out } = a;
+    const t = c.currentTime;
+    const o = c.createOscillator();
+    const g = c.createGain();
+    o.type = 'triangle';
+    o.frequency.setValueAtTime(880, t);
+    o.frequency.exponentialRampToValueAtTime(440, t + 0.04);
+    g.gain.setValueAtTime(0.18, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.04);
+    o.connect(g).connect(out);
+    o.start(t);
+    o.stop(t + 0.05);
+}
+
 function talkBleep(ms: number) {
     const a = audio();
     if (!a) return;

@@ -23,6 +23,10 @@ export function MultiplayerLobbyModal({ onClose, initialRoomCode }: Props) {
     const [tab, setTab] = useState<'create' | 'join'>('create');
     const [name, setName] = useState(() => safeStorage.getItem('ludo_player_name') || 'Player');
     const [avatar, setAvatar] = useState(() => safeStorage.getItem('ludo_player_avatar') || '🤴');
+    const [timerSec, setTimerSec] = useState<number>(() => {
+        const val = safeStorage.getItem('ludo_room_timer');
+        return val !== null ? Number(val) : 90;
+    });
     const [joinCode, setJoinCode] = useState(initialRoomCode || '');
     const [copied, setCopied] = useState(false);
     const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -44,6 +48,10 @@ export function MultiplayerLobbyModal({ onClose, initialRoomCode }: Props) {
     }, [avatar]);
 
     useEffect(() => {
+        safeStorage.setItem('ludo_room_timer', String(timerSec));
+    }, [timerSec]);
+
+    useEffect(() => {
         if (initialRoomCode) {
             setJoinCode(initialRoomCode);
             setTab('join');
@@ -58,7 +66,7 @@ export function MultiplayerLobbyModal({ onClose, initialRoomCode }: Props) {
     const handleCreateRoom = async () => {
         setLoading(true);
         setErrorMsg(null);
-        const res = await multiplayerClient.createRoom(name, avatar);
+        const res = await multiplayerClient.createRoom(name, avatar, timerSec);
         setLoading(false);
         if (!res.ok) {
             setErrorMsg(res.error || 'Failed to create room');
@@ -190,6 +198,44 @@ export function MultiplayerLobbyModal({ onClose, initialRoomCode }: Props) {
                             <p className="text-sm text-slate-300">
                                 Create an online room, share the 6-character code with friends, and battle in real time!
                             </p>
+
+                            {/* Room Turn Timer Selection */}
+                            <div className="bg-slate-900/60 p-3.5 rounded-xl border border-slate-700/60 flex flex-col gap-2">
+                                <div className="flex items-center justify-between">
+                                    <span className="text-xs uppercase tracking-wider text-slate-400 font-bold">Turn Timer</span>
+                                    <span className="text-xs font-black text-cyan-300">
+                                        {timerSec > 0 ? `⏳ ${timerSec}s Limit` : '♾️ Off (Unlimited)'}
+                                    </span>
+                                </div>
+                                <div className="grid grid-cols-4 gap-2">
+                                    <button
+                                        type="button"
+                                        onClick={() => setTimerSec(0)}
+                                        className={`py-1.5 px-2 text-xs font-bold rounded-lg border transition-all ${
+                                            timerSec === 0
+                                                ? 'bg-cyan-500/20 border-cyan-400 text-cyan-200 ring-1 ring-cyan-400'
+                                                : 'border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-700'
+                                        }`}
+                                    >
+                                        ♾️ Off
+                                    </button>
+                                    {([60, 90, 120] as const).map((sec) => (
+                                        <button
+                                            key={sec}
+                                            type="button"
+                                            onClick={() => setTimerSec(sec)}
+                                            className={`py-1.5 px-2 text-xs font-bold rounded-lg border transition-all ${
+                                                timerSec === sec
+                                                    ? 'bg-cyan-500/20 border-cyan-400 text-cyan-200 ring-1 ring-cyan-400'
+                                                    : 'border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-700'
+                                            }`}
+                                        >
+                                            ⏳ {sec}s
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+
                             <button
                                 onClick={handleCreateRoom}
                                 disabled={loading}
@@ -331,20 +377,66 @@ export function MultiplayerLobbyModal({ onClose, initialRoomCode }: Props) {
                     </div>
 
                     {/* Host Settings */}
-                    {isHost && (
-                        <div className="p-3 bg-slate-900/60 rounded-xl border border-slate-700/60 flex items-center justify-between">
-                            <span className="text-sm font-semibold text-slate-300">
-                                🤖 Fill empty slots with AI Bots
+                    {isHost ? (
+                        <div className="flex flex-col gap-2.5 p-3.5 bg-slate-900/60 rounded-xl border border-slate-700/60">
+                            <div className="flex items-center justify-between">
+                                <span className="text-sm font-semibold text-slate-300">
+                                    🤖 Fill empty slots with AI Bots
+                                </span>
+                                <button
+                                    type="button"
+                                    onClick={() => multiplayerClient.toggleFillBots(!roomState.fillBots)}
+                                    className={`w-12 h-6 rounded-full transition-colors p-0.5 flex items-center ${
+                                        roomState.fillBots ? 'bg-cyan-500 justify-end' : 'bg-slate-700 justify-start'
+                                    }`}
+                                >
+                                    <span className="w-5 h-5 bg-white rounded-full shadow-md" />
+                                </button>
+                            </div>
+
+                            {/* Host Room Turn Timer Controls */}
+                            <div className="pt-2 border-t border-slate-700/50 flex flex-col gap-1.5">
+                                <div className="flex items-center justify-between">
+                                    <span className="text-xs uppercase tracking-wider text-slate-400 font-bold">⏱️ Room Turn Timer</span>
+                                    <span className="text-xs font-black text-cyan-300">
+                                        {(roomState.turnTimeSec ?? 90) > 0 ? `⏳ ${roomState.turnTimeSec ?? 90}s Limit` : '♾️ Off (Unlimited)'}
+                                    </span>
+                                </div>
+                                <div className="grid grid-cols-4 gap-2">
+                                    <button
+                                        type="button"
+                                        onClick={() => multiplayerClient.setTurnTime(0)}
+                                        className={`py-1 px-2 text-xs font-bold rounded-lg border transition-all ${
+                                            (roomState.turnTimeSec ?? 90) === 0
+                                                ? 'bg-cyan-500/20 border-cyan-400 text-cyan-200 ring-1 ring-cyan-400'
+                                                : 'border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-700'
+                                        }`}
+                                    >
+                                        ♾️ Off
+                                    </button>
+                                    {([60, 90, 120] as const).map((sec) => (
+                                        <button
+                                            key={sec}
+                                            type="button"
+                                            onClick={() => multiplayerClient.setTurnTime(sec)}
+                                            className={`py-1 px-2 text-xs font-bold rounded-lg border transition-all ${
+                                                (roomState.turnTimeSec ?? 90) === sec
+                                                    ? 'bg-cyan-500/20 border-cyan-400 text-cyan-200 ring-1 ring-cyan-400'
+                                                    : 'border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-700'
+                                            }`}
+                                        >
+                                            ⏳ {sec}s
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                    ) : (
+                        <div className="p-3 bg-slate-900/60 rounded-xl border border-slate-700/60 flex items-center justify-between text-xs">
+                            <span className="text-slate-400 font-semibold">⏱️ Match Turn Timer</span>
+                            <span className="font-black text-cyan-300">
+                                {(roomState.turnTimeSec ?? 90) > 0 ? `⏳ ${roomState.turnTimeSec ?? 90}s per turn` : '♾️ Off (Unlimited time)'}
                             </span>
-                            <button
-                                type="button"
-                                onClick={() => multiplayerClient.toggleFillBots(!roomState.fillBots)}
-                                className={`w-12 h-6 rounded-full transition-colors p-0.5 flex items-center ${
-                                    roomState.fillBots ? 'bg-cyan-500 justify-end' : 'bg-slate-700 justify-start'
-                                }`}
-                            >
-                                <span className="w-5 h-5 bg-white rounded-full shadow-md" />
-                            </button>
                         </div>
                     )}
 

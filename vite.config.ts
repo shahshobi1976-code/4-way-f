@@ -17,6 +17,7 @@ export default defineConfig({
         host: '0.0.0.0',
         port: 3000,
         allowedHosts: true,
+        hmr: false,
         // Editors and tools write throwaway temp files next to real ones
         // (e.g. "App.tsx~RF10eb034.TMP"). Watching those races with the writer
         // and kills the dev server with EBUSY, so ignore the common shapes.

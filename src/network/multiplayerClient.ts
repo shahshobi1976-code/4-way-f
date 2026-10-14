@@ -236,10 +236,10 @@ class MultiplayerClient {
         return this.roomState.hostId === this.sessionToken;
     }
 
-    public createRoom(name: string, avatar: string): Promise<{ ok: boolean; roomCode?: string; error?: string }> {
+    public createRoom(name: string, avatar: string, turnTimeSec = 90): Promise<{ ok: boolean; roomCode?: string; error?: string }> {
         return new Promise((resolve) => {
             if (!this.socket) return resolve({ ok: false, error: 'Socket not initialized' });
-            this.socket.emit('create_room', { name, avatar, sessionToken: this.sessionToken }, (res: any) => {
+            this.socket.emit('create_room', { name, avatar, sessionToken: this.sessionToken, turnTimeSec }, (res: any) => {
                 if (res?.ok && res.roomCode) {
                     this.roomCode = res.roomCode;
                     this.myPlayerIndex = 0;
@@ -250,6 +250,11 @@ class MultiplayerClient {
                 resolve(res || { ok: false, error: 'Network timeout' });
             });
         });
+    }
+
+    public setTurnTime(turnTimeSec: number) {
+        if (!this.socket || !this.roomCode) return;
+        this.socket.emit('set_turn_time', { roomCode: this.roomCode, sessionToken: this.sessionToken, turnTimeSec });
     }
 
     public joinRoom(roomCode: string, name: string, avatar: string): Promise<{ ok: boolean; error?: string }> {

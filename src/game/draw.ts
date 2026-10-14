@@ -78,8 +78,8 @@ export function drawDie(g: Graphics, size: number, value: number, color: number,
 
 // ---------------------------------------------------------------- backgrounds
 
-export const BG_NAMES = ['Wood', 'Felt', 'Space', 'Ocean', 'Sunset', 'Marble', 'Grass', 'Neon', 'Desert', 'Ice'];
-export const BG_BASE = [0x6d4423, 0x0f4a28, 0x05071a, 0x083e75, 0x2b1146, 0x6e6a62, 0x2c6f2a, 0x07040f, 0xb98c4e, 0xa9cde3];
+export const BG_NAMES = ['Cyber Tech', 'Felt', 'Deep Space', 'Ocean', 'Sunset', 'Marble', 'Grass', 'Neon', 'Desert', 'Ice'];
+export const BG_BASE = [0x0a0d26, 0x0f4a28, 0x05071a, 0x083e75, 0x2b1146, 0x6e6a62, 0x2c6f2a, 0x07040f, 0xb98c4e, 0xa9cde3];
 
 const LO = -8;
 const HI = 23;
@@ -116,16 +116,60 @@ export function drawBackground(g: Graphics, P: Proj, idx: number, scale: number)
     quad(g, P, LO, LO, HI, HI, BG_BASE[idx]);
     const w = Math.max(1, scale * 0.06);
     switch (idx) {
-        case 0: // wood planks
-            for (let y = LO, i = 0; y < HI; y += 1.7, i++) {
-                quad(g, P, LO, y, HI, y + 1.7, i % 2 ? 0x7a4d28 : 0x8a5a30, 0.9);
-                line(g, P, [[LO, y], [HI, y]], w * 1.4, 0x3d2310, 0.8);
-                for (let k = 0; k < 4; k++) {
-                    const gx = LO + r() * (HI - LO);
-                    line(g, P, [[gx, y + 0.3 + r() * 1.1], [gx + 3 + r() * 5, y + 0.3 + r() * 1.1]], w, 0x4a2c14, 0.5);
+        case 0: { // Cyber Space Circuit (matches exact screenshot style)
+            // 1. Ambient corner & center glows
+            disc(g, P, LO + 2, LO + 2, 7, 0x6366f1, 0.2);
+            disc(g, P, HI - 2, LO + 2, 8, 0x7c3aed, 0.18);
+            disc(g, P, LO + 3, HI - 2, 7, 0x3b82f6, 0.2);
+            disc(g, P, HI - 2, HI - 2, 8, 0x6366f1, 0.22);
+            disc(g, P, 7.5, 7.5, 12, 0x1d4ed8, 0.15);
+
+            // 2. Tech dot matrix grid
+            for (let x = LO; x <= HI; x += 1.6) {
+                for (let y = LO; y <= HI; y += 1.6) {
+                    const isLit = Math.abs(Math.sin(x * 12.3 + y * 7.1)) > 0.82;
+                    disc(g, P, x, y, isLit ? 0.08 : 0.045, isLit ? 0x00f0ff : 0x2563eb, isLit ? 0.65 : 0.25);
                 }
             }
+
+            // 3. Glowing circuit lines with 90-degree elbows and terminal nodes
+            const circuits: [number, number][][] = [
+                // Top-left traces
+                [[LO, 2], [-2, 2], [-2, -2], [3, -2]],
+                [[-4, LO], [-4, 5], [-1, 5], [-1, 8]],
+                [[-2, -5], [-2, 0], [4, 0]],
+                // Top-right traces
+                [[12, -3], [12, 1], [18, 1], [18, LO]],
+                [[16, -1], [16, 4], [21, 4]],
+                [[HI, 6], [17, 6], [17, 9]],
+                // Bottom-left traces
+                [[LO, 12], [-3, 12], [-3, 16], [2, 16]],
+                [[-1, 10], [-1, 14], [-4, 14], [-4, HI]],
+                [[1, 18], [5, 18], [5, HI]],
+                // Bottom-right traces
+                [[13, HI], [13, 16], [19, 16], [19, 13]],
+                [[HI, 11], [17, 11], [17, 15], [21, 15]],
+                [[15, 18], [15, 20], [HI, 20]],
+                // Framing tech border traces
+                [[-5, -4], [20, -4]],
+                [[20, -4], [20, 19]],
+                [[20, 19], [-5, 19]],
+                [[-5, 19], [-5, -4]],
+            ];
+
+            // Render circuit traces with glowing edges and bright cores
+            for (const c of circuits) {
+                line(g, P, c, w * 2.2, 0x0284c7, 0.45);
+                line(g, P, c, w * 1.1, 0x00f0ff, 0.9);
+                const start = c[0];
+                const end = c[c.length - 1];
+                disc(g, P, start[0], start[1], 0.22, 0x0284c7, 0.7);
+                disc(g, P, start[0], start[1], 0.12, 0xffffff, 0.95);
+                disc(g, P, end[0], end[1], 0.22, 0x00f0ff, 0.75);
+                disc(g, P, end[0], end[1], 0.12, 0xffffff, 0.95);
+            }
             break;
+        }
         case 1: // casino felt with a gold border
             for (let i = 0; i < 40; i++) disc(g, P, LO + r() * (HI - LO), LO + r() * (HI - LO), 2 + r() * 3, 0x1b7a40, 0.12);
             line(g, P, [[-5, -5], [20, -5], [20, 20], [-5, 20], [-5, -5]], w * 2.4, 0xd9b44a, 0.95);

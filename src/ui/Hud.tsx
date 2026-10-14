@@ -12,62 +12,123 @@ const hex = (c: number) => `#${c.toString(16).padStart(6, '0')}`;
 const QUICK_EMOJIS = ['👍', '😂', '🎲', '😡', '🎯', '🔥', '👑', '👋'];
 const QUICK_PHRASES = ['Good move!', 'Unlucky!', 'Hurry up! ⏰', 'Nice roll! 🎲', 'GG! 🏆', 'Watch out! 👀'];
 
-/** One combined progress bar, split by colour according to each player's share, names underneath. */
-function ProgressBar() {
+/** Live Turn Timer matching the exact screenshot design */
+function TurnTimer() {
+    const turnSecondsLeft = useStore((s) => s.turnSecondsLeft);
+    const settings = useStore((s) => s.settings);
+    const isMultiplayer = !!multiplayerClient.roomCode;
+    const roomTurnTimeSec = multiplayerClient.roomState?.turnTimeSec;
+
+    const timerEnabled = isMultiplayer
+        ? (roomTurnTimeSec !== undefined ? roomTurnTimeSec > 0 : true)
+        : settings.timerEnabled;
+
+    if (!timerEnabled) {
+        return (
+            <div
+                className="relative overflow-hidden rounded-full border border-cyan-400/40 bg-[#0a0d26]/85 shadow-lg backdrop-blur-md flex items-center justify-center text-xs font-bold text-cyan-200"
+                style={{
+                    height: U(38),
+                    minWidth: U(120),
+                    padding: `0 ${U(14)}`,
+                }}
+            >
+                <div className="flex items-center gap-1.5 font-bold tracking-wide text-cyan-200">
+                    <span style={{ fontSize: U(18) }}>♾️</span>
+                    <span style={{ fontSize: U(16) }}>No Timer</span>
+                </div>
+            </div>
+        );
+    }
+
+    const total = isMultiplayer
+        ? (roomTurnTimeSec || 90)
+        : (settings.timerSec || 90);
+    const seconds = isMultiplayer ? multiplayerClient.turnSecondsLeft : turnSecondsLeft;
+    const pct = Math.max(0, Math.min(100, (seconds / Math.max(1, total)) * 100));
+
+    // Dynamic color: green/teal when calm, amber under 25s, pulsing red under 10s
+    const isCritical = seconds <= 10;
+    const isWarning = seconds <= 25;
+    const barGradient = isCritical
+        ? 'from-red-600 via-rose-500 to-red-400'
+        : isWarning
+        ? 'from-amber-600 via-amber-500 to-yellow-400'
+        : 'from-emerald-600 via-teal-500 to-emerald-400';
+
+    return (
+        <div
+            className={`relative overflow-hidden rounded-full border-2 transition-all duration-300 shadow-xl backdrop-blur-md flex items-center justify-center ${
+                isCritical
+                    ? 'border-red-400/80 bg-red-950/80 shadow-red-500/30'
+                    : 'border-emerald-400/60 bg-[#0a0d26]/90 shadow-emerald-500/20'
+            }`}
+            style={{
+                height: U(38),
+                minWidth: U(140),
+                maxWidth: U(200),
+                padding: `0 ${U(14)}`,
+            }}
+        >
+            {/* Smooth animated progress fill */}
+            <div
+                className={`absolute left-0 top-0 bottom-0 bg-gradient-to-r ${barGradient} opacity-60 transition-[width] duration-300 ease-linear`}
+                style={{ width: `${pct}%` }}
+            />
+            {/* Glowing gold timer text */}
+            <div className="relative z-10 flex items-center gap-1.5 font-black text-amber-300 tracking-wider drop-shadow-[0_0_8px_rgba(250,204,21,0.8)]">
+                <span style={{ fontSize: U(20) }}>⏳</span>
+                <span
+                    className={`font-mono ${isCritical ? 'text-red-200 animate-pulse' : 'text-amber-200'}`}
+                    style={{ fontSize: U(22) }}
+                >
+                    {seconds}s
+                </span>
+                <span className="text-[10px] text-white/60 font-semibold">/ {total}s</span>
+            </div>
+        </div>
+    );
+}
+
+/** Player cards row with solid player colors matching screenshot */
+function PlayerCardsRow({ compact = false }: { compact?: boolean }) {
     const progress = useStore((s) => s.progress);
     const active = useStore((s) => s.active);
     const players = useStore((s) => s.players);
     const lang = useStore((s) => s.settings.lang);
     const current = useStore((s) => s.current);
     const idxs = [0, 1, 2, 3].filter((i) => active[i]);
-    const total = idxs.reduce((a, i) => a + progress[i], 0);
 
     const nm = (i: number) => {
         const n = (players[i]?.name || '').trim();
-        return !n || ['red', 'green', 'yellow', 'cyan'].includes(n.toLowerCase()) ? colorName(lang, i) : n;
+        return !n || ['red', 'green', 'yellow', 'cyan', 'blue'].includes(n.toLowerCase()) ? colorName(lang, i) : n;
     };
 
     return (
-        <div>
-            <div className="flex overflow-hidden rounded-full border-2 border-white/40 bg-black/60 shadow-inner" style={{ height: U(44) }}>
-                {idxs.map((i) => (
+        <div className={`flex items-center gap-1.5 ${compact ? 'max-w-[420px]' : 'w-full'}`}>
+            {idxs.map((i) => {
+                const isTurn = current === i;
+                return (
                     <div
                         key={i}
-                        className="flex items-center justify-center font-black text-white transition-[flex-grow] duration-500"
+                        className={`flex-1 rounded-lg px-2 py-1 flex items-center justify-center font-black text-white text-center transition-all shadow-md ${
+                            isTurn
+                                ? 'ring-2 ring-white scale-102 brightness-110 drop-shadow-[0_0_10px_rgba(255,255,255,0.7)]'
+                                : 'opacity-90 hover:opacity-100'
+                        }`}
                         style={{
-                            flexGrow: total === 0 ? 1 : Math.max(progress[i], 0.001),
-                            flexBasis: 0,
                             background: hex(COLORS[i]),
-                            fontSize: U(22),
-                            textShadow: '0 1px 3px #000',
+                            height: U(38),
+                            fontSize: U(18),
+                            textShadow: '0 1px 3px rgba(0,0,0,0.8)',
                         }}
                     >
-                        {progress[i] > 0 ? `${progress[i]}%` : ''}
+                        <span className="truncate">
+                            {nm(i)}: {progress[i]}%
+                        </span>
                     </div>
-                ))}
-            </div>
-            <div className="flex" style={{ marginTop: U(4) }}>
-                {idxs.map((i) => {
-                    const isTurn = current === i;
-                    return (
-                        <div
-                            key={i}
-                            className={`truncate text-center font-bold transition-all ${
-                                isTurn ? 'scale-105 font-black drop-shadow-[0_0_8px_rgba(255,255,255,0.7)]' : 'opacity-85'
-                            }`}
-                            style={{
-                                flexGrow: total === 0 ? 1 : Math.max(progress[i], 6),
-                                flexBasis: 0,
-                                color: hex(COLORS[i]),
-                                fontSize: U(20),
-                                textShadow: '0 1px 3px #000',
-                            }}
-                        >
-                            {players[i]?.avatar} {nm(i)} {isTurn && '✨'}
-                        </div>
-                    );
-                })}
-            </div>
+                );
+            })}
         </div>
     );
 }
@@ -81,6 +142,7 @@ export function Hud() {
     const wishUsable = useStore((s) => s.wishUsable);
     const modal = useStore((s) => s.modal);
     const current = useStore((s) => s.current);
+    const landscape = useStore((s) => s.landscape);
 
     const [, setNetTick] = useState(0);
     const [chatOpen, setChatOpen] = useState(false);
@@ -101,7 +163,7 @@ export function Hud() {
 
     const nm = (i: number) => {
         const n = (players[i]?.name || '').trim();
-        return !n || ['red', 'green', 'yellow', 'cyan'].includes(n.toLowerCase()) ? colorName(lang, i) : n;
+        return !n || ['red', 'green', 'yellow', 'cyan', 'blue'].includes(n.toLowerCase()) ? colorName(lang, i) : n;
     };
 
     const handleCopyCode = () => {
@@ -140,9 +202,31 @@ export function Hud() {
 
     return (
         <>
-            {/* Top HUD: Progress bar */}
-            <div className="hud-bar z-20"><ProgressBar /></div>
-            <RoundBtn label="Settings" size={46} onClick={() => store.patch({ modal: 'settings' })} className="hud-gear z-20">⚙️</RoundBtn>
+            {/* Top HUD: Layout adapts to landscape vs portrait matching the screenshots */}
+            {landscape ? (
+                <>
+                    {/* Landscape Top-Left: Timer Pill */}
+                    <div className="absolute top-3 left-4 z-20 pointer-events-auto">
+                        <TurnTimer />
+                    </div>
+                    {/* Landscape Top-Right: Player Cards + Settings */}
+                    <div className="absolute top-3 right-4 z-20 flex items-center gap-2 pointer-events-auto">
+                        <PlayerCardsRow compact />
+                        <RoundBtn label="Settings" size={42} onClick={() => store.patch({ modal: 'settings' })}>⚙️</RoundBtn>
+                    </div>
+                </>
+            ) : (
+                <>
+                    {/* Portrait Top: Player Cards + Centered Timer below */}
+                    <div className="hud-bar z-20 pointer-events-auto">
+                        <PlayerCardsRow />
+                        <div className="flex justify-center mt-1.5">
+                            <TurnTimer />
+                        </div>
+                    </div>
+                    <RoundBtn label="Settings" size={46} onClick={() => store.patch({ modal: 'settings' })} className="hud-gear z-20">⚙️</RoundBtn>
+                </>
+            )}
 
             {/* Multiplayer Live Room & Turn Status Overlay */}
             {isMultiplayer && (

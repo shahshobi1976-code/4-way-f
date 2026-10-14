@@ -1,6 +1,7 @@
 import { store, useStore } from '../state/store';
 import { tr } from '../i18n';
 import { U } from './kit';
+import thumbnailImg from '../assets/thumbnail.jpg';
 
 export function MainMenu() {
     const lang = useStore((s) => s.settings.lang);
@@ -16,15 +17,29 @@ export function MainMenu() {
     ];
 
     return (
-        <div className="menu circuit absolute inset-0 flex flex-col items-center overflow-y-auto" style={{ padding: `${U(60)} ${U(30)} ${U(120)}` }}>
-            <h1 className="glow-title text-center font-black leading-none text-cyan-300" style={{ fontSize: U(74) }}>
+        <div className="menu circuit absolute inset-0 flex flex-col items-center overflow-y-auto" style={{ padding: `${U(40)} ${U(30)} ${U(120)}` }}>
+            {/* Game artwork badge matching #0a0d26 background */}
+            <div
+                className="game-image-wrap flex items-center justify-center relative border border-cyan-400/40"
+                style={{ width: U(140), height: U(140), marginBottom: U(12), borderRadius: U(24) }}
+            >
+                <img
+                    src={thumbnailImg}
+                    alt="Ludo Emperor Artwork"
+                    className="w-full h-full object-cover rounded-[inherit]"
+                />
+                <div className="game-image-vignette" />
+                <div className="absolute inset-0 rounded-[inherit] ring-1 ring-cyan-400/50 pointer-events-none" />
+            </div>
+
+            <h1 className="glow-title text-center font-black leading-none text-cyan-300" style={{ fontSize: U(68) }}>
                 LUDO<br />EMPEROR
             </h1>
-            <div className="font-black tracking-[0.35em] text-white" style={{ fontSize: U(34), marginTop: U(8) }}>4 WAY</div>
-            <div className="font-semibold text-cyan-100/90" style={{ fontSize: U(26), marginTop: U(14) }}>{T('subtitle')}</div>
-            <div className="text-center font-black text-red-500" style={{ fontSize: U(24), marginTop: U(8), textShadow: '0 0 12px rgba(255,40,40,0.8)' }}>{T('tagline')}</div>
+            <div className="font-black tracking-[0.35em] text-white" style={{ fontSize: U(32), marginTop: U(6) }}>4 WAY</div>
+            <div className="font-semibold text-cyan-100/90" style={{ fontSize: U(24), marginTop: U(10) }}>{T('subtitle')}</div>
+            <div className="text-center font-black text-red-500" style={{ fontSize: U(22), marginTop: U(6), textShadow: '0 0 12px rgba(255,40,40,0.8)' }}>{T('tagline')}</div>
 
-            <div className="flex flex-wrap justify-center" style={{ gap: U(10), marginTop: U(24) }}>
+            <div className="flex flex-wrap justify-center" style={{ gap: U(10), marginTop: U(20) }}>
                 {[`🎲🎲 ${T('badge2')}`, `👥 ${T('badge4')}`, `✨7 ${T('badge7')}`].map((b) => (
                     <span key={b} className="rounded-full border border-cyan-300/60 bg-cyan-400/10 font-bold text-cyan-100" style={{ padding: `${U(8)} ${U(16)}`, fontSize: U(21) }}>{b}</span>
                 ))}

@@ -3,6 +3,7 @@ import { store, useStore } from '../state/store';
 import { GameCanvas } from '../game/GameCanvas';
 import { audio } from '../game/sfx';
 import { startMusic } from '../game/music';
+import { BG_BASE } from '../game/draw';
 import { LoadingScreen } from './LoadingScreen';
 import { MainMenu } from './MainMenu';
 import { SetupScreen } from './SetupScreen';
@@ -13,6 +14,8 @@ import { FloatingControls, RotateHint } from './FloatingControls';
 /** Phase router: loading -> menu -> setup -> playing. React owns screens; Pixi owns the board. */
 export function App() {
     const phase = useStore((s) => s.phase);
+    const bgIdx = useStore((s) => s.settings.bg);
+    const currentBgHex = `#${(BG_BASE[bgIdx] ?? 0x0a0d26).toString(16).padStart(6, '0')}`;
 
     // keep the frame's design-unit size (--u), landscape flag and fullscreen class up to date
     useEffect(() => {
@@ -91,7 +94,7 @@ export function App() {
     }, []);
 
     return (
-        <div id="app-frame" className="safe-top">
+        <div id="app-frame" className="safe-top" style={{ backgroundColor: currentBgHex }}>
             {/* rotate nudge for phones; no-op on desktop and in landscape */}
             <RotateHint />
             {phase === 'loading' && <LoadingScreen />}

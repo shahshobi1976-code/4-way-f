@@ -1,3 +1,20 @@
+// Ensure window.fetch has both getter and setter so browser extensions/interceptors can patch it
+if (typeof window !== 'undefined') {
+    try {
+        let currentFetch = window.fetch ? window.fetch.bind(window) : undefined;
+        const desc = {
+            configurable: true,
+            enumerable: true,
+            get() { return currentFetch; },
+            set(fn: any) { currentFetch = fn; },
+        };
+        try { Object.defineProperty(window, 'fetch', desc); } catch (_) {}
+        if (typeof Window !== 'undefined' && Window.prototype) {
+            try { Object.defineProperty(Window.prototype, 'fetch', desc); } catch (_) {}
+        }
+    } catch (_) {}
+}
+
 // Boot sequence: the ORDER matters.
 //  1 SDK init  2 save load  3 React mount  4 lift boot cover  5 warm assets  6 go to menu  7 lifecycles  8 analytics
 import { StrictMode } from 'react';

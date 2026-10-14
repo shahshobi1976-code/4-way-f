@@ -10,6 +10,25 @@
     <meta name="theme-color" content="#0a0f26" />
 
     <title>Ludo Emperor 4 Way — Web</title>
+    <script>
+        (function() {
+            try {
+                if (typeof window !== 'undefined') {
+                    var currentFetch = window.fetch ? window.fetch.bind(window) : undefined;
+                    var desc = {
+                        configurable: true,
+                        enumerable: true,
+                        get: function() { return currentFetch; },
+                        set: function(fn) { currentFetch = fn; }
+                    };
+                    try { Object.defineProperty(window, 'fetch', desc); } catch (_) {}
+                    if (typeof Window !== 'undefined' && Window.prototype) {
+                        try { Object.defineProperty(Window.prototype, 'fetch', desc); } catch (_) {}
+                    }
+                }
+            } catch (_) {}
+        })();
+    </script>
     <style>
         #boot-cover {
             position: fixed;

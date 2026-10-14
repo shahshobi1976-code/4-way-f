@@ -1,8 +1,8 @@
 // Pure Ludo rules: board geometry, legal moves, progress and the computer-player brain.
 // No Pixi / React in here, so it is easy to reason about and test.
 
-export const COLORS = [0xe53935, 0x43a047, 0xfdd835, 0x00bcd4]; // red, green, yellow, cyan
-export const COLOR_NAMES = ['Red', 'Green', 'Yellow', 'Cyan'];
+export const COLORS = [0xef4444, 0x22c55e, 0xfacc15, 0x2563eb]; // Red, Green, Yellow, Blue (matching screenshot scheme)
+export const COLOR_NAMES = ['Red', 'Green', 'Yellow', 'Blue'];
 
 /** Token position values: -1 = base yard, 0..50 = main track (relative to own start),
  *  51..55 = own coloured home path, 56 = home. */

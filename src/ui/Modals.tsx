@@ -49,6 +49,29 @@ function Settings() {
                 <div className="flex justify-between text-white/50" style={{ fontSize: U(16) }}><span>low angle</span><span>top view</span></div>
             </div>
             <Toggle on={s.sound} onChange={(v) => store.patchSettings({ sound: v })} label="🔊 Sound effects & voices" />
+            <div className="flex items-center justify-between" style={{ margin: `${U(14)} 0 ${U(8)}` }}>
+                <span className="font-bold text-cyan-200">⏱️ Turn Timer (Optional)</span>
+                <span className="text-sm font-semibold text-cyan-300">
+                    {s.timerEnabled ? `⏳ ${s.timerSec}s` : '♾️ Off (Unlimited)'}
+                </span>
+            </div>
+            <div className="grid grid-cols-4" style={{ gap: U(6) }}>
+                <Chip
+                    active={!s.timerEnabled}
+                    onClick={() => store.patchSettings({ timerEnabled: false })}
+                >
+                    ♾️ Off
+                </Chip>
+                {([60, 90, 120] as const).map((sec) => (
+                    <Chip
+                        key={sec}
+                        active={s.timerEnabled && s.timerSec === sec}
+                        onClick={() => store.patchSettings({ timerEnabled: true, timerSec: sec })}
+                    >
+                        ⏳ {sec}s
+                    </Chip>
+                ))}
+            </div>
             <div className="font-bold text-cyan-200" style={{ margin: `${U(14)} 0 ${U(8)}` }}>🌐 Language</div>
             <select value={s.lang} onChange={(e) => store.patchSettings({ lang: e.target.value })} className="w-full rounded-lg border border-cyan-300/50 bg-[#0e1530] text-white" style={{ padding: U(10), fontSize: U(22) }}>
                 {LANGS.map((l) => <option key={l.code} value={l.code}>{l.label}</option>)}

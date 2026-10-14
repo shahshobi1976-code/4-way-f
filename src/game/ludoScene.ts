@@ -284,6 +284,8 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             [[6, 9], mid, [9, 9]], // cyan (bottom)
         ];
         for (let c = 0; c < 4; c++) poly(g, tri[c], 0.02, COLORS[c], 1, { w: 1, c: shade(COLORS[c], 0.5) });
+        // central HOME orange hub badge matching screenshot
+        poly(g, circlePts(7.5, 7.5, 0.88, 16), 0.03, 0xf97316, 0.98, { w: 2, c: 0xffffff });
         // active-player outline with a soft glow
         const flat: number[] = [];
         for (const [x, y] of [[0, 0], [15, 0], [15, 15], [0, 15]] as [number, number][]) {
@@ -457,6 +459,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     const dieC: Container[] = [];
     const dieG: Graphics[] = [];
     let turnTxt: Text;
+    let homeCenterTxt: Text | null = null;
     const chatTxt: Text[] = [];
     let adC: Container;
 
@@ -477,6 +480,21 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             dieC.push(c);
             dieG.push(g);
         }
+        // Central HOME badge text on board hub
+        homeCenterTxt = new Text({
+            text: 'HOME',
+            style: {
+                fontFamily: 'Arial Black, Impact, sans-serif',
+                fontSize: 14,
+                fontWeight: '900',
+                fill: 0xffffff,
+                stroke: { color: 0x111827, width: 3 },
+                letterSpacing: 1,
+            },
+        });
+        homeCenterTxt.anchor.set(0.5);
+        uiLayer.addChild(homeCenterTxt);
+
         // half-size text for the turn line and the AI chatter
         turnTxt = new Text({ text: '', style: { fontFamily: 'Arial, sans-serif', fontSize: 15, fontWeight: '800', fill: 0xffffff, stroke: { color: 0x000000, width: 3 } } });
         turnTxt.anchor.set(0.5);
@@ -981,51 +999,140 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         setStatus('');
         publish();
         syncWish();
-        await delay(900);
 
-        // --- roll
-        let forced: [number, number] | undefined;
-        if (multiplayerClient.roomCode && multiplayerClient.myPlayerIndex !== p) {
-            // Remote player's turn: wait for socket dice roll event
-            forced = await new Promise<[number, number]>((res) => {
-                waitRoll = (f) => res(f || [1, 1]);
+        const settings = store.get().settings;
+        const timerEnabled = settings.timerEnabled;
+        const timerSec = settings.timerSec || 90;
+        let turnTimerInterval: any = null;
+
+        if (timerEnabled) {
+            const turnDeadline = Date.now() + timerSec * 1000;
+            store.patch({
+                turnSecondsLeft: timerSec,
+                turnTotalSec: timerSec,
+                timerActive: true,
             });
-        } else if (isAI(p)) {
-            await delay(1200);
-            if (Math.random() < 0.18) anyAI('joke', p, undefined, 0.5);
+
+            let lastTickedSecond: number = timerSec;
+            turnTimerInterval = setInterval(() => {
+                if (dead) return;
+                const left = Math.max(0, Math.ceil((turnDeadline - Date.now()) / 1000));
+                store.patch({ turnSecondsLeft: left });
+                if (left > 0 && left <= 5 && left !== lastTickedSecond) {
+                    lastTickedSecond = left;
+                    sfx.tick();
+                }
+                if (left <= 0) {
+                    // Time's up! Auto roll or auto move for human
+                    if (waitRoll) {
+                        const r = waitRoll;
+                        waitRoll = null;
+                        sfx.tick();
+                        r();
+                    } else if (waitChoice && optionsNow.length > 0) {
+                        const r = waitChoice;
+                        waitChoice = null;
+                        const autoMove = pickMove(tokens, p, optionsNow, active);
+                        sfx.tick();
+                        r(autoMove);
+                    }
+                }
+            }, 250);
         } else {
-            forced = await new Promise<[number, number] | undefined>((res) => {
-                waitRoll = (f) => res(f);
-                syncWish();
+            store.patch({
+                turnSecondsLeft: 0,
+                turnTotalSec: 0,
+                timerActive: false,
             });
         }
-        syncWish();
-        const roll = await rollDice(p, forced);
-        const double6 = roll.a === 6 && roll.b === 6;
-        if (double6) {
-            sixStreak[p]++;
-            if (!roll.lucky) ai('sixes', p, undefined, 0.7);
-        } else sixStreak[p] = 0;
-        if (roll.a === 1 && roll.b === 1) anyAI('ones', p, undefined, 0.8);
-        // No limit on consecutive double sixes: every double 6 earns another turn.
-        let extra = double6;
 
-        // --- use each die
-        // Capture obligation: the player must take EVERY capture this roll allows
-        // (one per die, since each die is spent on its own move). The opening
-        // promise is measured once; the moves are then counted against it.
-        const capturePromise = maxCaptures(tokens, p, dice, active).taken;
-        let capturesTaken = 0;
-        for (let guard = 0; guard < 4 && (!diceUsed[0] || !diceUsed[1]); guard++) {
-            optionsNow = movesFor(p);
-            if (!optionsNow.length) {
-                setStatus(tr(lang, 'noMoves'));
-                await delay(1100);
-                setStatus('');
-                break;
-            }
+        try {
+            await delay(900);
+
+            // --- roll
+            let forced: [number, number] | undefined;
             if (multiplayerClient.roomCode && multiplayerClient.myPlayerIndex !== p) {
-                // Remote player's turn: wait for socket pawn move event
+                // Remote player's turn: wait for socket dice roll event
+                forced = await new Promise<[number, number]>((res) => {
+                    waitRoll = (f) => res(f || [1, 1]);
+                });
+            } else if (isAI(p)) {
+                await delay(1200);
+                if (Math.random() < 0.18) anyAI('joke', p, undefined, 0.5);
+            } else {
+                forced = await new Promise<[number, number] | undefined>((res) => {
+                    waitRoll = (f) => res(f);
+                    syncWish();
+                });
+            }
+            syncWish();
+            const roll = await rollDice(p, forced);
+            const double6 = roll.a === 6 && roll.b === 6;
+            if (double6) {
+                sixStreak[p]++;
+                if (!roll.lucky) ai('sixes', p, undefined, 0.7);
+            } else sixStreak[p] = 0;
+            if (roll.a === 1 && roll.b === 1) anyAI('ones', p, undefined, 0.8);
+            // No limit on consecutive double sixes: every double 6 earns another turn.
+            let extra = double6;
+
+            // --- use each die
+            // Capture obligation: the player must take EVERY capture this roll allows
+            // (one per die, since each die is spent on its own move). The opening
+            // promise is measured once; the moves are then counted against it.
+            const capturePromise = maxCaptures(tokens, p, dice, active).taken;
+            let capturesTaken = 0;
+            for (let guard = 0; guard < 4 && (!diceUsed[0] || !diceUsed[1]); guard++) {
+                optionsNow = movesFor(p);
+                if (!optionsNow.length) {
+                    setStatus(tr(lang, 'noMoves'));
+                    await delay(1100);
+                    setStatus('');
+                    break;
+                }
+                if (multiplayerClient.roomCode && multiplayerClient.myPlayerIndex !== p) {
+                    // Remote player's turn: wait for socket pawn move event
+                    const chosen = await new Promise<Move>((res) => {
+                        waitChoice = res;
+                    });
+                    setStatus('');
+                    diceUsed[chosen.die] = true;
+                    capturesTaken += chosen.captures.length;
+                    const res = await applyMove(p, chosen);
+                    if (res.captured || res.home) extra = true;
+                    if (hasWon(tokens, p)) {
+                        winner = p;
+                        return false;
+                    }
+                    optionsNow = [];
+                    continue;
+                }
+                if (isAI(p)) {
+                    // the AI takes every capture it can, including the second of a pair
+                    const caps = optionsNow.filter((m) => m.captures.length);
+                    const pool = caps.length ? caps : optionsNow;
+                    const chosen = pickMove(tokens, p, pool, active);
+                    selDie = chosen.die;
+                    refreshHighlights();
+                    await delay(900);
+                    diceUsed[chosen.die] = true;
+                    capturesTaken += chosen.captures.length;
+                    const res = await applyMove(p, chosen);
+                    if (res.captured || res.home) extra = true;
+                    if (hasWon(tokens, p)) {
+                        winner = p;
+                        return false;
+                    }
+                    optionsNow = [];
+                    continue;
+                }
+
+                // --- human: tap a die to choose it, then tap a token to move it
+                setStatus(tr(lang, 'pickDie'));
+                const usableDies = [0, 1].filter((i) => !diceUsed[i] && optionsNow.some((m) => m.die === i));
+                if (!usableDies.includes(selDie)) selDie = usableDies[0];
+                refreshHighlights();
+                if (Math.random() < 0.25) anyAI('advice', p, undefined, 0.5);
                 const chosen = await new Promise<Move>((res) => {
                     waitChoice = res;
                 });
@@ -1039,57 +1146,20 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                     return false;
                 }
                 optionsNow = [];
-                continue;
             }
-            if (isAI(p)) {
-                // the AI takes every capture it can, including the second of a pair
-                const caps = optionsNow.filter((m) => m.captures.length);
-                const pool = caps.length ? caps : optionsNow;
-                const chosen = pickMove(tokens, p, pool, active);
-                selDie = chosen.die;
-                refreshHighlights();
-                await delay(900);
-                diceUsed[chosen.die] = true;
-                capturesTaken += chosen.captures.length;
-                const res = await applyMove(p, chosen);
-                if (res.captured || res.home) extra = true;
-                if (hasWon(tokens, p)) {
-                    winner = p;
-                    return false;
-                }
-                optionsNow = [];
-                continue;
+            // Settle up: any capture the roll promised and the player did not take.
+            if (captureDebt(capturePromise, capturesTaken)) {
+                const victims = maxCaptures(tokens, p, dice, active).victims;
+                const victim = victims.find((v) => tokens[v.p][v.t] >= 0 && tokens[v.p][v.t] <= LAST_TRACK);
+                if (victim) await penalize(p, victim.t);
             }
-
-            // --- human: tap a die to choose it, then tap a token to move it
-            setStatus(tr(lang, 'pickDie'));
-            const usableDies = [0, 1].filter((i) => !diceUsed[i] && optionsNow.some((m) => m.die === i));
-            if (!usableDies.includes(selDie)) selDie = usableDies[0];
-            refreshHighlights();
-            if (Math.random() < 0.25) anyAI('advice', p, undefined, 0.5);
-            const chosen = await new Promise<Move>((res) => {
-                waitChoice = res;
-            });
-            setStatus('');
-            diceUsed[chosen.die] = true;
-            capturesTaken += chosen.captures.length;
-            const res = await applyMove(p, chosen);
-            if (res.captured || res.home) extra = true;
-            if (hasWon(tokens, p)) {
-                winner = p;
-                return false;
-            }
-            optionsNow = [];
+            diceUsed = [true, true];
+            clearHighlights();
+            return extra;
+        } finally {
+            clearInterval(turnTimerInterval);
+            store.patch({ timerActive: false });
         }
-        // Settle up: any capture the roll promised and the player did not take.
-        if (captureDebt(capturePromise, capturesTaken)) {
-            const victims = maxCaptures(tokens, p, dice, active).victims;
-            const victim = victims.find((v) => tokens[v.p][v.t] >= 0 && tokens[v.p][v.t] <= LAST_TRACK);
-            if (victim) await penalize(p, victim.t);
-        }
-        diceUsed = [true, true];
-        clearHighlights();
-        return extra;
     }
 
     function finish() {
@@ -1161,6 +1231,11 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         bgFill.tint = 0xffffff;
         updateTokens(now);
         updatePlates(dt);
+        if (homeCenterTxt) {
+            const midP = P(7.5, 7.5, 0.05);
+            homeCenterTxt.position.set(midP.x, midP.y);
+            homeCenterTxt.scale.set(Math.max(0.7, S * 0.024));
+        }
         updateFly(dt);
         drawDice(now);
         syncHand();

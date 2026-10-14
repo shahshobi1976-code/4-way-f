@@ -1,4 +1,5 @@
 import http from 'node:http';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
@@ -17,7 +18,23 @@ const io = new SocketIOServer(server, {
     pingTimeout: 5000,
 });
 
-const PORT = Number(process.env.PORT || 3000);
+function resolvePort(): number {
+    const portArgIdx = process.argv.indexOf('--port');
+    if (portArgIdx !== -1 && process.argv[portArgIdx + 1]) {
+        return Number(process.argv[portArgIdx + 1]);
+    }
+    for (const arg of process.argv) {
+        if (arg.startsWith('--port=')) {
+            return Number(arg.split('=')[1]);
+        }
+    }
+    if (process.env.PORT && process.env.PORT !== '8080') {
+        return Number(process.env.PORT);
+    }
+    return 3000;
+}
+
+const PORT = resolvePort();
 const isProduction = process.env.NODE_ENV === 'production';
 
 app.use(express.json());
@@ -43,10 +60,10 @@ app.get('/api/rooms/:code', (req, res) => {
 
 // Socket.IO event router
 io.on('connection', (socket) => {
-    socket.on('create_room', (data: { name: string; avatar: string; sessionToken: string }, callback) => {
+    socket.on('create_room', (data: { name: string; avatar: string; sessionToken: string; turnTimeSec?: number }, callback) => {
         try {
-            const { name, avatar, sessionToken } = data || {};
-            const res = roomManager.createRoom(sessionToken, name, avatar, socket.id);
+            const { name, avatar, sessionToken, turnTimeSec } = data || {};
+            const res = roomManager.createRoom(sessionToken, name, avatar, socket.id, turnTimeSec);
             if (res.ok && res.roomCode) {
                 socket.join(res.roomCode);
                 const room = roomManager.getRoom(res.roomCode);
@@ -60,6 +77,12 @@ io.on('connection', (socket) => {
         } catch (e: any) {
             if (typeof callback === 'function') callback({ ok: false, error: e.message });
         }
+    });
+
+    socket.on('set_turn_time', (data: { roomCode: string; sessionToken: string; turnTimeSec: number }, callback) => {
+        const { roomCode, sessionToken, turnTimeSec } = data || {};
+        const ok = roomManager.setTurnTime(roomCode, sessionToken, turnTimeSec);
+        if (typeof callback === 'function') callback({ ok });
     });
 
     socket.on('join_room', (data: { roomCode: string; name: string; avatar: string; sessionToken: string }, callback) => {
@@ -143,19 +166,34 @@ io.on('connection', (socket) => {
 async function startServer() {
     if (!isProduction) {
         const vite = await createViteServer({
-            server: { middlewareMode: true, host: '0.0.0.0' },
+            server: { middlewareMode: true, host: '0.0.0.0', hmr: false },
             appType: 'spa',
         });
         app.use(vite.middlewares);
+        // Fallback for SPA routing in dev mode
+        app.use(async (req, res, next) => {
+            if (req.method !== 'GET') return next();
+            const url = req.originalUrl;
+            try {
+                const indexPath = path.resolve(__dirname, 'index.html');
+                let template = await fs.promises.readFile(indexPath, 'utf-8');
+                template = await vite.transformIndexHtml(url, template);
+                res.status(200).set({ 'Content-Type': 'text/html' }).end(template);
+            } catch (e) {
+                next(e);
+            }
+        });
     } else {
         const distPath = path.resolve(__dirname, 'dist');
         app.use(express.static(distPath));
-        app.get('*', (_req, res) => {
+        app.use((_req, res) => {
             res.sendFile(path.join(distPath, 'index.html'));
         });
     }
 
     server.listen(PORT, '0.0.0.0', () => {
+        console.log(`  ➜  Local:   http://localhost:${PORT}/`);
+        console.log(`  ➜  Network: http://0.0.0.0:${PORT}/`);
         console.log(`Ludo Emperor Multiplayer Server running on http://0.0.0.0:${PORT}`);
     });
 }

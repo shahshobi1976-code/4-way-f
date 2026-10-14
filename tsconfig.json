@@ -11,5 +11,5 @@
         "skipLibCheck": true,
         "isolatedModules": true
     },
-    "include": ["src", "server", "server.ts"]
+    "include": ["src", "server", "server.ts", "vite-env.d.ts"]
 }
