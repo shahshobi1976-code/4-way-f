@@ -3,9 +3,10 @@ import { store, useStore } from '../state/store';
 import { bus } from '../game/bus';
 import { tr, colorName } from '../i18n';
 import { COLORS } from '../game/rules';
-import { RoundBtn, U } from './kit';
-import { ScreenButtons } from './FloatingControls';
+import { U } from './kit';
 import { multiplayerClient } from '../network/multiplayerClient';
+import { CelebrationCanvas } from './CelebrationCanvas';
+import * as sfx from '../game/sfx';
 
 const hex = (c: number) => `#${c.toString(16).padStart(6, '0')}`;
 
@@ -13,7 +14,7 @@ const QUICK_EMOJIS = ['👍', '😂', '🎲', '😡', '🎯', '🔥', '👑', '�
 const QUICK_PHRASES = ['Good move!', 'Unlucky!', 'Hurry up! ⏰', 'Nice roll! 🎲', 'GG! 🏆', 'Watch out! 👀'];
 
 /** Live Turn Timer matching the exact screenshot design */
-function TurnTimer() {
+function TurnTimer({ compact = false }: { compact?: boolean }) {
     const turnSecondsLeft = useStore((s) => s.turnSecondsLeft);
     const settings = useStore((s) => s.settings);
     const isMultiplayer = !!multiplayerClient.roomCode;
@@ -26,16 +27,16 @@ function TurnTimer() {
     if (!timerEnabled) {
         return (
             <div
-                className="relative overflow-hidden rounded-full border border-cyan-400/40 bg-[#0a0d26]/85 shadow-lg backdrop-blur-md flex items-center justify-center text-xs font-bold text-cyan-200"
+                className="relative overflow-hidden rounded-full border border-cyan-400/40 bg-[#0a0d26]/85 shadow-lg backdrop-blur-md flex items-center justify-center text-xs font-bold text-cyan-200 select-none"
                 style={{
-                    height: U(38),
-                    minWidth: U(120),
-                    padding: `0 ${U(14)}`,
+                    height: compact ? U(40) : U(38),
+                    minWidth: compact ? U(100) : U(120),
+                    padding: `0 ${U(12)}`,
                 }}
             >
                 <div className="flex items-center gap-1.5 font-bold tracking-wide text-cyan-200">
-                    <span style={{ fontSize: U(18) }}>♾️</span>
-                    <span style={{ fontSize: U(16) }}>No Timer</span>
+                    <span style={{ fontSize: compact ? U(16) : U(18) }}>♾️</span>
+                    <span style={{ fontSize: compact ? U(14) : U(16) }}>No Timer</span>
                 </div>
             </div>
         );
@@ -58,16 +59,16 @@ function TurnTimer() {
 
     return (
         <div
-            className={`relative overflow-hidden rounded-full border-2 transition-all duration-300 shadow-xl backdrop-blur-md flex items-center justify-center ${
+            className={`relative overflow-hidden rounded-full border-2 transition-all duration-300 shadow-xl backdrop-blur-md flex items-center justify-center select-none ${
                 isCritical
                     ? 'border-red-400/80 bg-red-950/80 shadow-red-500/30'
                     : 'border-emerald-400/60 bg-[#0a0d26]/90 shadow-emerald-500/20'
             }`}
             style={{
-                height: U(38),
-                minWidth: U(140),
-                maxWidth: U(200),
-                padding: `0 ${U(14)}`,
+                height: U(20),
+                minWidth: compact ? U(72) : U(96),
+                maxWidth: compact ? U(110) : U(150),
+                padding: `0 ${U(8)}`,
             }}
         >
             {/* Smooth animated progress fill */}
@@ -76,22 +77,22 @@ function TurnTimer() {
                 style={{ width: `${pct}%` }}
             />
             {/* Glowing gold timer text */}
-            <div className="relative z-10 flex items-center gap-1.5 font-black text-amber-300 tracking-wider drop-shadow-[0_0_8px_rgba(250,204,21,0.8)]">
-                <span style={{ fontSize: U(20) }}>⏳</span>
+            <div className="relative z-10 flex items-center gap-1 font-black text-amber-300 tracking-wider drop-shadow-[0_0_8px_rgba(250,204,21,0.8)]">
+                <span style={{ fontSize: U(11) }}>⏳</span>
                 <span
-                    className={`font-mono ${isCritical ? 'text-red-200 animate-pulse' : 'text-amber-200'}`}
-                    style={{ fontSize: U(22) }}
+                    className={`font-mono leading-none ${isCritical ? 'text-red-200 animate-pulse' : 'text-amber-200'}`}
+                    style={{ fontSize: compact ? U(12) : U(13) }}
                 >
                     {seconds}s
                 </span>
-                <span className="text-[10px] text-white/60 font-semibold">/ {total}s</span>
+                {!compact && <span className="text-[9px] text-white/60 font-semibold leading-none">/{total}s</span>}
             </div>
         </div>
     );
 }
 
-/** Player cards row with solid player colors matching screenshot */
-function PlayerCardsRow({ compact = false }: { compact?: boolean }) {
+/** Joint percentage bar where players are joined into a continuous bar and higher percentage shows bigger segment */
+function JointPercentageBar({ compact = false }: { compact?: boolean }) {
     const progress = useStore((s) => s.progress);
     const active = useStore((s) => s.active);
     const players = useStore((s) => s.players);
@@ -104,32 +105,130 @@ function PlayerCardsRow({ compact = false }: { compact?: boolean }) {
         return !n || ['red', 'green', 'yellow', 'cyan', 'blue'].includes(n.toLowerCase()) ? colorName(lang, i) : n;
     };
 
+    // Calculate dynamic proportional widths:
+    // The player with more percentage shows big, while the player with less shows less color.
+    // We guarantee a minimum visible slice (minShare) so names/colors are always readable.
+    const minShare = 10;
+    const totalProgress = idxs.reduce((sum, i) => sum + (progress[i] || 0), 0);
+    const pool = Math.max(0, 100 - idxs.length * minShare);
+
+    const widths = idxs.map((i) => {
+        if (totalProgress === 0) {
+            return 100 / idxs.length;
+        }
+        const proportionalShare = ((progress[i] || 0) / totalProgress) * pool;
+        return minShare + proportionalShare;
+    });
+
     return (
-        <div className={`flex items-center gap-1.5 ${compact ? 'max-w-[420px]' : 'w-full'}`}>
-            {idxs.map((i) => {
+        <div
+            className={`relative flex items-stretch rounded-xl overflow-hidden border-2 border-white/40 shadow-xl backdrop-blur-md bg-black/60 select-none ${
+                compact ? 'max-w-[420px]' : 'w-full'
+            }`}
+            style={{
+                height: U(30),
+            }}
+        >
+            {idxs.map((i, index) => {
                 const isTurn = current === i;
+                const widthPct = widths[index];
+                const pct = progress[i] || 0;
                 return (
                     <div
                         key={i}
-                        className={`flex-1 rounded-lg px-2 py-1 flex items-center justify-center font-black text-white text-center transition-all shadow-md ${
+                        className={`relative flex items-center justify-center font-black text-white text-center transition-[width] duration-500 ease-out overflow-hidden ${
                             isTurn
-                                ? 'ring-2 ring-white scale-102 brightness-110 drop-shadow-[0_0_10px_rgba(255,255,255,0.7)]'
-                                : 'opacity-90 hover:opacity-100'
+                                ? 'brightness-110 drop-shadow-[0_0_8px_rgba(255,255,255,0.8)] z-10'
+                                : 'opacity-95'
                         }`}
                         style={{
+                            width: `${widthPct}%`,
                             background: hex(COLORS[i]),
-                            height: U(38),
-                            fontSize: U(18),
-                            textShadow: '0 1px 3px rgba(0,0,0,0.8)',
+                            textShadow: '0 1px 3px rgba(0,0,0,0.85)',
+                            borderRight: index < idxs.length - 1 ? '1.5px solid rgba(255,255,255,0.35)' : 'none',
                         }}
+                        title={`${nm(i)}: ${pct}%`}
                     >
-                        <span className="truncate">
-                            {nm(i)}: {progress[i]}%
-                        </span>
+                        {/* Glowing active turn indicator atop the segment */}
+                        {isTurn && (
+                            <div className="absolute inset-x-0 top-0 h-1 bg-white animate-pulse shadow-[0_0_6px_#fff]" />
+                        )}
+
+                        {/* Responsive label adapting to dynamic segment width */}
+                        <div
+                            className="px-1.5 flex items-center justify-center gap-1 truncate font-black tracking-wide"
+                            style={{ fontSize: U(13) }}
+                        >
+                            {widthPct > 24 ? (
+                                <span className="truncate">
+                                    {nm(i)}: {pct}%
+                                </span>
+                            ) : widthPct > 15 ? (
+                                <span className="truncate">
+                                    {players[i]?.avatar || ''} {pct}%
+                                </span>
+                            ) : (
+                                <span>{pct}%</span>
+                            )}
+                        </div>
                     </div>
                 );
             })}
         </div>
+    );
+}
+
+// Backward-compatible alias
+const PlayerCardsRow = JointPercentageBar;
+
+/** Lucky Wish button component */
+function LuckyWishButton({ compact = false }: { compact?: boolean }) {
+    const wishNums = useStore((s) => s.wishNums);
+    const wishUsable = useStore((s) => s.wishUsable);
+
+    return (
+        <button
+            onClick={() => bus.wish?.()}
+            disabled={!wishUsable}
+            aria-label="Lucky wish"
+            title={wishUsable ? 'Click to activate Lucky Wish!' : 'Lucky Wish not available'}
+            className={`flex items-center rounded-full border-2 font-black transition-all select-none ${
+                wishUsable
+                    ? 'pulse-wish border-amber-300 bg-gradient-to-r from-amber-400 to-orange-500 text-black shadow-lg scale-105 active:scale-95 cursor-pointer'
+                    : 'border-white/20 bg-black/70 text-white/50 cursor-not-allowed'
+            }`}
+            style={{
+                height: compact ? U(40) : U(64),
+                padding: compact ? `0 ${U(14)}` : `0 ${U(18)}`,
+                gap: compact ? U(6) : U(8),
+                fontSize: compact ? U(16) : U(24),
+            }}
+        >
+            <span style={{ fontSize: compact ? U(18) : U(24) }}>✨</span>
+            <span>{wishNums ? `${wishNums[0]},${wishNums[1]}` : (compact ? 'Wish' : 'no wish')}</span>
+        </button>
+    );
+}
+
+/** Landscape / Web Top Bar:
+ * - Royal Watch (Turn Timer) in the TOP-LEFT corner
+ * - Joint Progress Bar (all players combined together) in the TOP-RIGHT corner with Settings button
+ */
+function LandscapeTopHud() {
+    return (
+        <>
+            {/* Top-Left: Royal Watch (Turn Timer) */}
+            <div className="absolute top-2.5 left-4 z-20 pointer-events-auto flex items-center gap-2">
+                <TurnTimer compact />
+            </div>
+
+            {/* Top-Right: Combined Joint Progress Bar */}
+            <div className="absolute top-2.5 right-4 z-20 flex items-center gap-2.5 pointer-events-auto">
+                <div style={{ width: U(340), maxWidth: '42vw' }}>
+                    <JointPercentageBar compact />
+                </div>
+            </div>
+        </>
     );
 }
 
@@ -202,74 +301,26 @@ export function Hud() {
 
     return (
         <>
-            {/* Top HUD: Layout adapts to landscape vs portrait matching the screenshots */}
+            {/* Top HUD */}
             {landscape ? (
-                <>
-                    {/* Landscape Top-Left: Timer Pill */}
-                    <div className="absolute top-3 left-4 z-20 pointer-events-auto">
-                        <TurnTimer />
-                    </div>
-                    {/* Landscape Top-Right: Player Cards + Settings */}
-                    <div className="absolute top-3 right-4 z-20 flex items-center gap-2 pointer-events-auto">
-                        <PlayerCardsRow compact />
-                        <RoundBtn label="Settings" size={42} onClick={() => store.patch({ modal: 'settings' })}>⚙️</RoundBtn>
-                    </div>
-                </>
+                <LandscapeTopHud />
             ) : (
-                <>
-                    {/* Portrait Top: Player Cards + Centered Timer below */}
-                    <div className="hud-bar z-20 pointer-events-auto">
-                        <PlayerCardsRow />
-                        <div className="flex justify-center mt-1.5">
-                            <TurnTimer />
-                        </div>
+                /* Vertical Top: Progress bar + Centered Timer (no menu button) */
+                <div className="absolute top-2.5 inset-x-3 z-20 pointer-events-auto flex flex-col items-center gap-1">
+                    <div className="w-full">
+                        <JointPercentageBar />
                     </div>
-                    <RoundBtn label="Settings" size={46} onClick={() => store.patch({ modal: 'settings' })} className="hud-gear z-20">⚙️</RoundBtn>
-                </>
+                    <div className="flex justify-center">
+                        <TurnTimer compact />
+                    </div>
+                </div>
             )}
 
-            {/* Multiplayer Live Room & Turn Status Overlay */}
-            {isMultiplayer && (
+            {/* Offline / Reconnecting notice in multiplayer */}
+            {isMultiplayer && offlineNotice && (
                 <div className="absolute top-16 left-0 right-0 z-20 flex flex-col items-center pointer-events-none px-4">
-                    {/* Offline / Reconnecting notice */}
-                    {offlineNotice && (
-                        <div className="pointer-events-auto mb-2 px-4 py-1.5 rounded-full bg-red-600/90 text-white font-extrabold text-xs sm:text-sm shadow-lg animate-pulse flex items-center gap-2">
-                            <span>⚠️</span> <span>{offlineNotice}</span>
-                        </div>
-                    )}
-
-                    {/* Room Badge + Turn status indicator */}
-                    <div className="pointer-events-auto flex flex-wrap items-center justify-center gap-2 bg-slate-950/85 backdrop-blur-md border border-cyan-500/30 px-3.5 py-1.5 rounded-full shadow-xl">
-                        {/* Room code chip */}
-                        <button
-                            onClick={handleCopyCode}
-                            className="flex items-center gap-1.5 bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-400/40 text-cyan-300 px-2.5 py-1 rounded-full text-xs font-mono font-black transition-all"
-                            title="Click to copy invite link"
-                        >
-                            <span>ROOM: {roomCode}</span>
-                            <span>{copiedCode ? '✓' : '📋'}</span>
-                        </button>
-
-                        {/* Turn indicator & countdown timer */}
-                        <div className="flex items-center gap-2">
-                            <span
-                                className={`text-xs sm:text-sm font-black px-2.5 py-0.5 rounded-full ${
-                                    isMyTurn
-                                        ? 'bg-green-500 text-slate-950 animate-pulse'
-                                        : 'bg-amber-400/20 text-amber-300 border border-amber-400/40'
-                                }`}
-                            >
-                                {isMyTurn ? '🎯 YOUR TURN' : `Waiting for ${nm(current)}`}
-                            </span>
-
-                            {/* Live 30s Countdown timer pill */}
-                            <div className="flex items-center gap-1 bg-black/50 px-2 py-0.5 rounded-full border border-slate-700">
-                                <span className="text-xs">⏱️</span>
-                                <span className={`text-xs font-mono font-black ${secondsLeft <= 5 ? 'text-red-400 animate-bounce' : 'text-slate-200'}`}>
-                                    {secondsLeft}s
-                                </span>
-                            </div>
-                        </div>
+                    <div className="pointer-events-auto mb-2 px-4 py-1.5 rounded-full bg-red-600/90 text-white font-extrabold text-xs sm:text-sm shadow-lg animate-pulse flex items-center gap-2">
+                        <span>⚠️</span> <span>{offlineNotice}</span>
                     </div>
                 </div>
             )}
@@ -287,41 +338,19 @@ export function Hud() {
                 </div>
             )}
 
-            {/* Bottom-left: Lucky Wish + Quick Chat (in Multiplayer) */}
-            <div className="absolute z-20 flex items-center gap-2" style={{ left: U(16), bottom: U(18) }}>
-                {/* Lucky Wish Button */}
-                <button
-                    onClick={() => bus.wish?.()}
-                    disabled={!wishUsable}
-                    aria-label="Lucky wish"
-                    className={`flex items-center rounded-full border-2 font-black transition-all ${
-                        wishUsable
-                            ? 'pulse-wish border-amber-300 bg-gradient-to-r from-amber-400 to-orange-500 text-black shadow-lg scale-105'
-                            : 'border-white/20 bg-black/60 text-white/50'
-                    }`}
-                    style={{ height: U(64), padding: `0 ${U(18)}`, gap: U(8), fontSize: U(24) }}
-                >
-                    ✨ {wishNums ? `${wishNums[0]},${wishNums[1]}` : 'no wish'}
-                </button>
-
-                {/* Quick Chat / Reactions toggle in multiplayer */}
-                {isMultiplayer && (
+            {/* Quick Chat (in Multiplayer) */}
+            {isMultiplayer && (
+                <div className="absolute z-20 pointer-events-auto" style={{ left: U(12), bottom: U(62) }}>
                     <button
                         onClick={() => setChatOpen((o) => !o)}
-                        className="rounded-full bg-cyan-500/20 hover:bg-cyan-500/35 border-2 border-cyan-400/50 text-cyan-200 flex items-center justify-center font-bold text-xl transition-all shadow-md active:scale-95"
-                        style={{ width: U(64), height: U(64) }}
+                        className="rounded-full bg-cyan-500/20 hover:bg-cyan-500/35 border-2 border-cyan-400/50 text-cyan-200 flex items-center justify-center font-bold text-lg transition-all shadow-md active:scale-95"
+                        style={{ width: U(40), height: U(40) }}
                         title="Chat & Emoji Reactions"
                     >
                         💬
                     </button>
-                )}
-            </div>
-
-            {/* Bottom-right: Music + Fullscreen */}
-            <div className="absolute z-20 flex" style={{ right: U(16), bottom: U(18), gap: U(12) }}>
-                <RoundBtn label="Music" onClick={() => store.patch({ modal: 'music' })}>🎵</RoundBtn>
-                <ScreenButtons />
-            </div>
+                </div>
+            )}
 
             {/* Quick Emoji & Chat Popup Menu */}
             {chatOpen && isMultiplayer && (
@@ -378,59 +407,205 @@ export function Hud() {
                 </div>
             )}
 
-            {/* Popup announcements (Lucky 7, Penalty) */}
+            {/* Popup announcements (Penalty on the board, Lucky 7) */}
             {popup && !modal && (
-                <div className="pointer-events-none absolute inset-x-0 z-30 flex justify-center" style={{ bottom: U(130) }}>
+                popup.kind === 'penalty' ? (
+                    /* Dramatic Penalty alert placed directly ON the board */
                     <div
-                        className="pop pointer-events-auto rounded-2xl border-2 text-center backdrop-blur shadow-2xl"
-                        style={{
-                            padding: `${U(16)} ${U(30)}`, maxWidth: U(620),
-                            borderColor: popup.kind === 'lucky' ? '#ffc83a' : popup.kind === 'penalty' ? '#ff4d4d' : '#18e0ff',
-                            background: 'rgba(8,12,34,0.85)',
-                        }}
+                        className={`pointer-events-none absolute z-35 flex items-center justify-center animate-bounce duration-700 ${
+                            landscape
+                                ? 'top-[36%] left-[30%] -translate-x-1/2 -translate-y-1/2 w-[88vw] max-w-[500px]'
+                                : 'top-[26%] inset-x-4 flex justify-center'
+                        }`}
                     >
-                        <div className="font-black" style={{ fontSize: U(42), color: popup.kind === 'lucky' ? '#ffd84a' : popup.kind === 'penalty' ? '#ff6b6b' : '#7fe9ff' }}>
-                            {popup.kind === 'lucky' ? '✨7 ' : popup.kind === 'penalty' ? '⚠️ ' : ''}{popup.title}
+                        <div
+                            className="pop pointer-events-auto rounded-3xl border-4 text-center backdrop-blur-xl shadow-[0_0_55px_rgba(239,68,68,0.85)] bg-gradient-to-b from-red-950/98 via-[#1d0615]/98 to-black/98 select-none"
+                            style={{
+                                padding: `${U(18)} ${U(26)}`,
+                                borderColor: '#ff3344',
+                                maxWidth: U(560),
+                            }}
+                        >
+                            <div className="flex items-center justify-center gap-2 font-black text-red-400 drop-shadow-[0_0_12px_rgba(239,68,68,0.9)] animate-pulse" style={{ fontSize: U(34) }}>
+                                <span>🚨</span>
+                                <span>⚠️ {popup.title} ⚠️</span>
+                                <span>🚨</span>
+                            </div>
+                            <div className="text-white font-extrabold tracking-wide" style={{ fontSize: U(22), marginTop: U(8) }}>
+                                {popup.sub}
+                            </div>
+                            <div className="inline-block rounded-full bg-red-600/30 border border-red-500/50 text-red-200 font-bold px-3 py-1" style={{ fontSize: U(14), marginTop: U(8) }}>
+                                ⚠️ Missed mandatory capture! Token sent back to Base!
+                            </div>
+                            <div className="flex justify-center" style={{ marginTop: U(12) }}>
+                                <button
+                                    onClick={() => store.patch({ popup: null })}
+                                    className="rounded-xl bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 text-white font-black shadow-lg active:scale-95 transition-all cursor-pointer"
+                                    style={{ padding: `${U(8)} ${U(32)}`, fontSize: U(20) }}
+                                >
+                                    {tr(lang, 'ok')}
+                                </button>
+                            </div>
                         </div>
-                        <div className="text-white/90" style={{ fontSize: U(26), marginTop: U(4) }}>{popup.sub}</div>
-                        <button onClick={() => store.patch({ popup: null })} className="rounded-xl bg-white/15 font-bold" style={{ marginTop: U(10), padding: `${U(6)} ${U(26)}`, fontSize: U(24) }}>{tr(lang, 'ok')}</button>
                     </div>
-                </div>
+                ) : (
+                    /* Lucky 7 / Info popup centered on board */
+                    <div
+                        className={`pointer-events-none absolute z-35 flex items-center justify-center ${
+                            landscape
+                                ? 'top-[36%] left-[30%] -translate-x-1/2 -translate-y-1/2 w-[88vw] max-w-[500px]'
+                                : 'top-[30%] inset-x-4 flex justify-center'
+                        }`}
+                    >
+                        <div
+                            className="pop pointer-events-auto rounded-3xl border-3 text-center backdrop-blur-xl shadow-2xl select-none"
+                            style={{
+                                padding: `${U(16)} ${U(30)}`,
+                                maxWidth: U(560),
+                                borderColor: popup.kind === 'lucky' ? '#ffc83a' : '#18e0ff',
+                                background: 'rgba(8,12,34,0.92)',
+                            }}
+                        >
+                            <div className="font-black" style={{ fontSize: U(38), color: popup.kind === 'lucky' ? '#ffd84a' : '#7fe9ff' }}>
+                                {popup.kind === 'lucky' ? '✨7 ' : ''}{popup.title}
+                            </div>
+                            <div className="text-white/90 font-bold" style={{ fontSize: U(24), marginTop: U(4) }}>
+                                {popup.sub}
+                            </div>
+                            <button
+                                onClick={() => store.patch({ popup: null })}
+                                className="rounded-xl bg-white/20 hover:bg-white/30 text-white font-bold cursor-pointer"
+                                style={{ marginTop: U(10), padding: `${U(6)} ${U(26)}`, fontSize: U(22) }}
+                            >
+                                {tr(lang, 'ok')}
+                            </button>
+                        </div>
+                    </div>
+                )
             )}
 
-            {/* Victory Podium Modal */}
+            {/* Grand Victory Celebration ("Jashan") and Full Result Window */}
             {result && (
-                <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/85 backdrop-blur-sm" style={{ padding: U(20) }}>
-                    <div className="pop w-full rounded-2xl border-2 border-amber-300 bg-[#0e1530] text-center shadow-2xl" style={{ maxWidth: U(560), padding: U(24) }}>
-                        <div style={{ fontSize: U(70) }}>🏆</div>
-                        <div className="font-black text-amber-300" style={{ fontSize: U(40) }}>{tr(lang, 'winT', { n: nm(result[0].idx) })}</div>
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md overflow-y-auto p-4 select-none">
+                    {/* Festive fireworks & confetti particle celebration */}
+                    <CelebrationCanvas />
 
-                        <div className="flex flex-col" style={{ gap: U(8), marginTop: U(16) }}>
-                            {result.map((r, k) => (
-                                <div key={r.idx} className="flex items-center justify-between rounded-xl bg-white/5" style={{ padding: `${U(10)} ${U(16)}`, borderLeft: `${U(8)} solid ${hex(COLORS[r.idx])}`, fontSize: U(26) }}>
-                                    <span className="font-black">{['🥇', '🥈', '🥉', '4th'][k]} {players[r.idx].avatar} {nm(r.idx)}</span>
-                                    <span className="font-bold text-white/80">{r.pct}%</span>
-                                </div>
-                            ))}
+                    <div
+                        className="pop relative z-10 w-full rounded-3xl border-3 border-amber-400/80 bg-gradient-to-b from-[#141b3d]/98 via-[#0c122e]/98 to-[#060817]/98 text-center shadow-[0_0_60px_rgba(245,158,11,0.5)] overflow-hidden"
+                        style={{ maxWidth: U(580), padding: `${U(20)} ${U(24)}` }}
+                    >
+                        {/* Celebration ribbon header */}
+                        <div className="inline-flex items-center gap-2 px-4 py-1 rounded-full bg-gradient-to-r from-amber-500/30 via-yellow-400/40 to-amber-500/30 border border-amber-300/60 text-amber-200 font-black text-sm tracking-widest uppercase mb-2 shadow-[0_0_15px_rgba(245,158,11,0.3)] animate-pulse">
+                            <span>🎊</span> <span>JASHAN-E-FATEH • VICTORY CELEBRATION</span> <span>🎊</span>
                         </div>
 
-                        <div className="flex" style={{ gap: U(12), marginTop: U(20) }}>
+                        {/* Glowing Trophy & Crown */}
+                        <div className="relative my-1">
+                            <div className="text-6xl sm:text-7xl drop-shadow-[0_0_20px_rgba(250,204,21,0.9)] animate-bounce">
+                                🏆
+                            </div>
+                            <div className="absolute top-0 right-1/2 translate-x-7 -translate-y-2 text-2xl animate-pulse">
+                                👑
+                            </div>
+                        </div>
+
+                        <div className="font-black text-transparent bg-clip-text bg-gradient-to-r from-amber-200 via-yellow-300 to-amber-400 tracking-wide" style={{ fontSize: U(34) }}>
+                            {nm(result[0].idx)} WINS!
+                        </div>
+                        <div className="text-amber-100/80 font-bold text-sm tracking-wide mt-1">
+                            🎉 Congratulations! Grand Champion of the Match 🎉
+                        </div>
+
+                        {/* Complete Results Leaderboard Table */}
+                        <div className="flex flex-col gap-2.5 my-4">
+                            {result.map((r, k) => {
+                                const isWinner = k === 0;
+                                const medals = ['🥇 1st', '🥈 2nd', '🥉 3rd', '4th'];
+                                return (
+                                    <div
+                                        key={r.idx}
+                                        className={`flex items-center justify-between rounded-2xl border transition-all ${
+                                            isWinner
+                                                ? 'bg-gradient-to-r from-amber-500/25 via-yellow-500/15 to-transparent border-amber-400/70 shadow-[0_0_16px_rgba(245,158,11,0.3)]'
+                                                : 'bg-white/5 border-white/10'
+                                        }`}
+                                        style={{
+                                            padding: `${U(10)} ${U(14)}`,
+                                            borderLeftWidth: U(6),
+                                            borderLeftColor: hex(COLORS[r.idx]),
+                                        }}
+                                    >
+                                        {/* Rank & Player Info */}
+                                        <div className="flex items-center gap-2.5 min-w-0">
+                                            <span className={`font-black ${isWinner ? 'text-amber-300 text-lg' : 'text-slate-300 text-base'}`}>
+                                                {medals[k]}
+                                            </span>
+                                            <span className="text-2xl">{players[r.idx]?.avatar || '👤'}</span>
+                                            <div className="text-left min-w-0">
+                                                <div className="font-black text-white text-base truncate flex items-center gap-1.5">
+                                                    <span>{nm(r.idx)}</span>
+                                                    {isWinner && <span className="text-amber-400 text-xs">👑 Champion</span>}
+                                                </div>
+                                                <div className="text-xs text-white/60 font-semibold">
+                                                    Color: {colorName(lang, r.idx)}
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        {/* Percentage & Progress Bar */}
+                                        <div className="flex items-center gap-3 shrink-0">
+                                            <div className="w-24 sm:w-28 h-3 rounded-full bg-black/60 overflow-hidden border border-white/20">
+                                                <div
+                                                    className="h-full rounded-full transition-all duration-700"
+                                                    style={{
+                                                        width: `${r.pct}%`,
+                                                        backgroundColor: hex(COLORS[r.idx]),
+                                                    }}
+                                                />
+                                            </div>
+                                            <span className={`font-black font-mono text-base ${isWinner ? 'text-amber-300 font-extrabold' : 'text-white/90'}`}>
+                                                {r.pct}%
+                                            </span>
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+
+                        {/* Action Buttons: Rematch, Jashan Confetti, Main Menu */}
+                        <div className="flex flex-col sm:flex-row gap-2.5 mt-4">
                             <button
                                 onClick={handleRematchClick}
-                                className="flex-1 rounded-xl bg-gradient-to-r from-cyan-400 to-emerald-400 font-black text-slate-950 shadow-lg hover:brightness-110 active:scale-[0.98] transition-all"
-                                style={{ padding: U(14), fontSize: U(26) }}
+                                className="flex-1 rounded-2xl bg-gradient-to-r from-emerald-400 via-teal-400 to-cyan-400 hover:from-emerald-300 hover:to-cyan-300 font-black text-slate-950 shadow-[0_0_20px_rgba(52,211,153,0.4)] hover:brightness-110 active:scale-[0.98] transition-all cursor-pointer flex items-center justify-center gap-2"
+                                style={{ padding: U(12), fontSize: U(20) }}
                             >
-                                {isMultiplayer ? '🔄 Play Again (Rematch)' : tr(lang, 'again')}
+                                <span>🔄</span>
+                                <span>{isMultiplayer ? 'Play Again (Rematch)' : tr(lang, 'again')}</span>
                             </button>
+
+                            <button
+                                onClick={() => {
+                                    window.dispatchEvent(new CustomEvent('launch-jashan'));
+                                    sfx.fanfare();
+                                }}
+                                className="rounded-2xl bg-gradient-to-r from-amber-400 to-orange-500 hover:from-amber-300 hover:to-orange-400 font-black text-slate-950 shadow-md active:scale-[0.98] transition-all cursor-pointer flex items-center justify-center gap-1.5 px-4"
+                                style={{ padding: U(12), fontSize: U(18) }}
+                                title="Launch more celebration fireworks!"
+                            >
+                                <span>🎊</span>
+                                <span>Jashan!</span>
+                            </button>
+
                             <button
                                 onClick={() => {
                                     if (isMultiplayer) multiplayerClient.leaveRoom();
                                     store.patch({ phase: 'menu', result: null });
                                 }}
-                                className="flex-1 rounded-xl bg-white/10 font-bold text-white hover:bg-white/20 active:scale-[0.98] transition-all"
-                                style={{ padding: U(14), fontSize: U(26) }}
+                                className="flex-1 rounded-2xl bg-white/10 hover:bg-white/20 border border-white/20 font-bold text-white active:scale-[0.98] transition-all cursor-pointer flex items-center justify-center gap-2"
+                                style={{ padding: U(12), fontSize: U(20) }}
                             >
-                                {tr(lang, 'menu')}
+                                <span>🏠</span>
+                                <span>{tr(lang, 'menu')}</span>
                             </button>
                         </div>
                     </div>

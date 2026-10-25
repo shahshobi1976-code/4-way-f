@@ -28,7 +28,7 @@ export function createStage(app: Application): Stage {
     const layout = () => {
         const sw = Math.max(1, app.screen.width);
         const sh = Math.max(1, app.screen.height);
-        land = sw > sh * 1.05;
+        land = sw >= sh;
         if (land) {
             u = sh / 720;
             h = 720;
@@ -40,13 +40,19 @@ export function createStage(app: Application): Stage {
         }
         root.scale.set(u);
         const frame = document.getElementById('app-frame');
-        frame?.style.setProperty('--u', `${u}px`);
         frame?.classList.toggle('land', land);
         if (store.get().landscape !== land) store.patch({ landscape: land });
         subs.forEach((cb) => cb());
     };
     app.renderer.on('resize', layout);
     layout();
+
+    const unsubStore = store.subscribe(() => {
+        const desiredLand = store.get().landscape;
+        if (desiredLand !== land) {
+            layout();
+        }
+    });
 
     return {
         root,
@@ -62,6 +68,7 @@ export function createStage(app: Application): Stage {
         },
         destroy() {
             app.renderer.off('resize', layout);
+            unsubStore();
             subs.clear();
         },
     };

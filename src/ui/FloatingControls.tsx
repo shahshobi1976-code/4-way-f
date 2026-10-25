@@ -1,5 +1,6 @@
 import { useEffect, useState, type CSSProperties } from 'react';
 import { store, useStore } from '../state/store';
+import { bus } from '../game/bus';
 import { RoundBtn, U } from './kit';
 
 /**
@@ -7,7 +8,11 @@ import { RoundBtn, U } from './kit';
  * called from a user gesture, and some (notably iOS Safari) refuse outright.
  */
 /** 'mobile' build offers landscape/portrait choice; 'web' build offers fullscreen only. */
-export const IS_MOBILE = (window as any).__LUDO_TARGET__ === 'mobile';
+export const IS_MOBILE =
+    typeof window !== 'undefined' &&
+    ((window as any).__LUDO_TARGET__ === 'mobile' ||
+        /Android|iPhone|iPad|iPod|Opera Mini|IEMobile|Mobile/i.test(navigator.userAgent) ||
+        (window.matchMedia && window.matchMedia('(pointer: coarse)').matches));
 
 function lockOrientation(kind: 'landscape' | 'portrait') {
     try {
@@ -20,31 +25,44 @@ function lockLandscape() {
     lockOrientation('landscape');
 }
 
-/** Mobile: pick landscape or portrait. Browsers only allow the lock in fullscreen, so landscape enters it. */
+/** Mobile / Web: pick landscape or portrait. */
 export function setOrientation(kind: 'landscape' | 'portrait') {
     const d: any = document;
     const el: any = document.documentElement;
     const inFs = !!(d.fullscreenElement || d.webkitFullscreenElement);
+    const frame = document.getElementById('app-frame');
+
     if (kind === 'landscape') {
+        try { (window as any).__USER_ORIENTATION__ = 'landscape'; } catch {}
         if (!inFs) {
             try {
                 const p = (el.requestFullscreen || el.webkitRequestFullscreen)?.call(el);
                 if (p && typeof p.catch === 'function') p.catch(() => {});
-            } catch { /* ignore */ }
+            } catch {
+                /* ignore */
+            }
         }
         lockOrientation('landscape');
+        store.patch({ landscape: true });
+        if (frame) frame.classList.add('land');
         if (!orientationRetry) {
             orientationRetry = onFsChangeForOrientation;
             document.addEventListener('fullscreenchange', orientationRetry);
             document.addEventListener('webkitfullscreenchange', orientationRetry);
         }
     } else {
+        try { (window as any).__USER_ORIENTATION__ = 'portrait'; } catch {}
         clearOrientationRetry();
         lockOrientation('portrait');
-        // leave fullscreen afterwards so the lock does not trap the player
+        store.patch({ landscape: false });
+        if (frame) frame.classList.remove('land');
         setTimeout(() => {
-            try { (screen.orientation as any)?.unlock?.(); } catch { /* ignore */ }
-        }, 400);
+            try {
+                (screen.orientation as any)?.unlock?.();
+            } catch {
+                /* ignore */
+            }
+        }, 300);
     }
 }
 
@@ -96,83 +114,73 @@ export function toggleFullscreen() {
     }
 }
 
-/** Web: one fullscreen button. Mobile: landscape + portrait buttons. */
-export function ScreenButtons({ gap = 12 }: { gap?: number }) {
+/** Adaptive screen buttons: Fullscreen button + Wish icon (when an active wish exists). Scaled to 0.65x. */
+export function ScreenButtons({ gap = 6 }: { gap?: number }) {
     const fs = useStore((s) => s.fullscreen);
-    const landscape = useStore((s) => s.landscape);
-    if (!IS_MOBILE) {
-        return <RoundBtn label="Fullscreen" onClick={toggleFullscreen}>{fs ? '⤡' : '⛶'}</RoundBtn>;
-    }
-    const ring = (on: boolean): CSSProperties => (on ? { boxShadow: '0 0 0 3px rgba(24,224,255,0.9)' } : {});
+    const wishNums = useStore((s) => s.wishNums);
+    const wishUsable = useStore((s) => s.wishUsable);
+    const phase = useStore((s) => s.phase);
+
+    // Only render wish button if there is a real wish; if no wish, do not render any wish icon
+    const hasWish = phase === 'playing' && wishNums && wishNums.length === 2;
+
     return (
-        <div className="flex" style={{ gap: U(gap) }}>
-            <RoundBtn label="Landscape" onClick={() => setOrientation('landscape')} style={ring(landscape)}>↔️</RoundBtn>
-            <RoundBtn label="Portrait" onClick={() => setOrientation('portrait')} style={ring(!landscape)}>↕️</RoundBtn>
+        <div className="flex items-center" style={{ gap: U(gap) }}>
+            <RoundBtn
+                label="Fullscreen"
+                size={42}
+                onClick={toggleFullscreen}
+                title="Toggle Fullscreen"
+            >
+                {fs ? '⤡' : '⛶'}
+            </RoundBtn>
+
+            {/* When a wish exists, display it right next to the fullscreen icon */}
+            {hasWish && (
+                <button
+                    type="button"
+                    onClick={() => bus.wish?.()}
+                    disabled={!wishUsable}
+                    aria-label="Lucky Wish"
+                    title={wishUsable ? `Click to activate Lucky Wish (${wishNums[0]}, ${wishNums[1]})!` : `Lucky Wish (${wishNums[0]}, ${wishNums[1]})`}
+                    className={`flex items-center justify-center font-black rounded-full border-2 transition-all select-none shadow-lg ${
+                        wishUsable
+                            ? 'pulse-wish border-amber-300 bg-gradient-to-r from-amber-400 to-orange-500 text-black scale-105 active:scale-95 cursor-pointer'
+                            : 'border-white/30 bg-slate-900/80 text-white/50 cursor-not-allowed opacity-80'
+                    }`}
+                    style={{
+                        height: U(42),
+                        padding: `0 ${U(12)}`,
+                        gap: U(5),
+                        fontSize: U(14),
+                    }}
+                >
+                    <span style={{ fontSize: U(16) }}>✨</span>
+                    <span>{wishNums[0]},{wishNums[1]}</span>
+                </button>
+            )}
         </div>
     );
 }
 
 /**
- * Portrait hint for phones. The game is fully playable in portrait (the board
- * stacks above the dice), so this only nudges toward the wider view and gets
- * out of the way; it never blocks play. Hidden on pointer-fine devices
- * (desktop/laptop) where rotating is meaningless.
+ * RotateHint is removed per user request (no rotate icons on any screen).
  */
 export function RotateHint() {
-    const landscape = useStore((s) => s.landscape);
-    const [fine, setFine] = useState(true);
-    const [dismissed, setDismissed] = useState(false);
-    useEffect(() => {
-        const mq = window.matchMedia('(pointer: coarse)');
-        const apply = () => setFine(!mq.matches);
-        apply();
-        mq.addEventListener?.('change', apply);
-        return () => mq.removeEventListener?.('change', apply);
-    }, []);
-    if (!IS_MOBILE || fine || landscape || dismissed) return null;
-    return (
-        <button
-            onClick={() => setDismissed(true)}
-            className="pop absolute z-40 flex items-center"
-            style={{
-                top: U(14),
-                left: '50%',
-                transform: 'translateX(-50%)',
-                gap: U(8),
-                padding: `${U(7)}px ${U(14)}px`,
-                borderRadius: U(999),
-                background: 'rgba(6,10,30,0.88)',
-                border: `1px solid rgba(24,224,255,0.5)`,
-                color: '#cfefff',
-                fontWeight: 700,
-                fontSize: U(15),
-                whiteSpace: 'nowrap',
-            }}
-            aria-label="Rotate device for the wide board layout"
-        >
-            <span style={{ fontSize: U(18) }}>🔄</span>
-            Rotate for full board
-        </button>
-    );
+    return null;
 }
 
-/** Menu / setup floating buttons: music + settings bottom-right, fullscreen bottom-left, ☰ toggle top-right. */
+/** Menu / screen floating buttons: music + settings bottom-right, fullscreen bottom-left (scaled to 0.65x). */
 export function FloatingControls() {
-    const [open, setOpen] = useState(true);
     return (
         <>
-            <RoundBtn label="Toggle controls" size={52} onClick={() => setOpen(!open)} className="absolute z-30" style={{ top: U(18), right: U(18) }}>☰</RoundBtn>
-            {open && (
-                <>
-                    <div className="absolute z-30 flex flex-col" style={{ right: U(18), bottom: U(20), gap: U(12) }}>
-                        <RoundBtn label="Music" onClick={() => store.patch({ modal: 'music' })}>🎵</RoundBtn>
-                        <RoundBtn label="Settings" onClick={() => store.patch({ modal: 'settings' })}>⚙️</RoundBtn>
-                    </div>
-                    <div className="absolute z-30" style={{ left: U(18), bottom: U(20) }}>
-                        <ScreenButtons />
-                    </div>
-                </>
-            )}
+            <div className="absolute z-30 flex flex-col" style={{ right: U(12), bottom: U(14), gap: U(8) }}>
+                <RoundBtn size={42} label="Music" onClick={() => store.patch({ modal: 'music' })}>🎵</RoundBtn>
+                <RoundBtn size={42} label="Settings" onClick={() => store.patch({ modal: 'settings' })}>⚙️</RoundBtn>
+            </div>
+            <div className="absolute z-30" style={{ left: U(12), bottom: U(14) }}>
+                <ScreenButtons gap={6} />
+            </div>
         </>
     );
 }

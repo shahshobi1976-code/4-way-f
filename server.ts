@@ -60,10 +60,10 @@ app.get('/api/rooms/:code', (req, res) => {
 
 // Socket.IO event router
 io.on('connection', (socket) => {
-    socket.on('create_room', (data: { name: string; avatar: string; sessionToken: string; turnTimeSec?: number }, callback) => {
+    socket.on('create_room', (data: { name: string; avatar: string; sessionToken: string; turnTimeSec?: number; maxPlayers?: number }, callback) => {
         try {
-            const { name, avatar, sessionToken, turnTimeSec } = data || {};
-            const res = roomManager.createRoom(sessionToken, name, avatar, socket.id, turnTimeSec);
+            const { name, avatar, sessionToken, turnTimeSec, maxPlayers } = data || {};
+            const res = roomManager.createRoom(sessionToken, name, avatar, socket.id, turnTimeSec, maxPlayers);
             if (res.ok && res.roomCode) {
                 socket.join(res.roomCode);
                 const room = roomManager.getRoom(res.roomCode);
@@ -108,6 +108,12 @@ io.on('connection', (socket) => {
     socket.on('toggle_ready', (data: { roomCode: string; sessionToken: string }, callback) => {
         const { roomCode, sessionToken } = data || {};
         const ok = roomManager.toggleReady(roomCode, sessionToken);
+        if (typeof callback === 'function') callback({ ok });
+    });
+
+    socket.on('set_wish', (data: { roomCode: string; sessionToken: string; wish: [number, number] | null }, callback) => {
+        const { roomCode, sessionToken, wish } = data || {};
+        const ok = roomManager.setPlayerWish(roomCode, sessionToken, wish);
         if (typeof callback === 'function') callback({ ok });
     });
 
@@ -194,7 +200,7 @@ async function startServer() {
     server.listen(PORT, '0.0.0.0', () => {
         console.log(`  ➜  Local:   http://localhost:${PORT}/`);
         console.log(`  ➜  Network: http://0.0.0.0:${PORT}/`);
-        console.log(`Ludo Emperor Multiplayer Server running on http://0.0.0.0:${PORT}`);
+        console.log(`Ludo Dethroned Multiplayer Server running on http://0.0.0.0:${PORT}`);
     });
 }
 

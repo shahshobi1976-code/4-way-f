@@ -8,6 +8,7 @@ import { bus } from '../game/bus';
 import { stopMusic } from '../game/music';
 import { Chip, Modal, Toggle, U } from './kit';
 import { MultiplayerLobbyModal } from './MultiplayerLobbyModal';
+import { TutorialModal } from './TutorialModal';
 
 const close = () => store.patch({ modal: null });
 
@@ -40,51 +41,106 @@ function MusicPicker() {
 function Settings() {
     const s = useStore((st) => st.settings);
     const phase = useStore((st) => st.phase);
+    const landscape = useStore((st) => st.landscape);
+
     return (
-        <Modal title="⚙️ Settings" onClose={close}>
-            <Toggle on={s.rotate} onChange={(v) => store.patchSettings({ rotate: v })} label="Rotate board to current player" />
-            <div className="rounded-xl bg-white/5" style={{ padding: `${U(12)} ${U(16)}`, marginBottom: U(10) }}>
-                <div className="flex justify-between font-semibold"><span>Camera tilt</span><span>{s.tilt}°</span></div>
-                <input type="range" min={20} max={90} value={s.tilt} onChange={(e) => store.patchSettings({ tilt: Number(e.target.value) })} className="w-full" />
-                <div className="flex justify-between text-white/50" style={{ fontSize: U(16) }}><span>low angle</span><span>top view</span></div>
+        <Modal title="⚙️ Settings" onClose={close} wide={landscape}>
+            <div className={`text-xs ${landscape ? 'grid grid-cols-2 gap-3 items-start' : 'flex flex-col gap-2'}`}>
+                {/* Column 1: Board, Tilt, Timer, Language */}
+                <div className="flex flex-col gap-2">
+                    <Toggle on={s.rotate} onChange={(v) => store.patchSettings({ rotate: v })} label="Rotate board to player" />
+                    
+                    <div className="rounded-xl bg-white/5 p-2 flex flex-col gap-1">
+                        <div className="flex justify-between font-bold text-white text-xs">
+                            <span>Camera tilt</span>
+                            <span className="text-cyan-300">{s.tilt}°</span>
+                        </div>
+                        <input
+                            type="range"
+                            min={20}
+                            max={90}
+                            value={s.tilt}
+                            onChange={(e) => store.patchSettings({ tilt: Number(e.target.value) })}
+                            className="w-full accent-cyan-400 h-1.5 cursor-pointer"
+                        />
+                        <div className="flex justify-between text-[10px] text-white/50">
+                            <span>low angle</span>
+                            <span>top view</span>
+                        </div>
+                    </div>
+
+                    <div className="flex flex-col gap-1">
+                        <div className="flex items-center justify-between text-xs">
+                            <span className="font-bold text-cyan-200">⏱️ Turn Timer</span>
+                            <span className="font-bold text-cyan-300 text-[11px]">
+                                {s.timerEnabled ? `⏳ ${s.timerSec}s` : '♾️ Off'}
+                            </span>
+                        </div>
+                        <div className="grid grid-cols-4 gap-1">
+                            <Chip active={!s.timerEnabled} onClick={() => store.patchSettings({ timerEnabled: false })}>
+                                ♾️ Off
+                            </Chip>
+                            {([60, 90, 120] as const).map((sec) => (
+                                <Chip
+                                    key={sec}
+                                    active={s.timerEnabled && s.timerSec === sec}
+                                    onClick={() => store.patchSettings({ timerEnabled: true, timerSec: sec })}
+                                >
+                                    {sec}s
+                                </Chip>
+                            ))}
+                        </div>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-2 pt-1">
+                        <span className="font-bold text-cyan-200 shrink-0 text-xs">🌐 Language</span>
+                        <select
+                            value={s.lang}
+                            onChange={(e) => store.patchSettings({ lang: e.target.value })}
+                            className="flex-1 rounded-lg border border-cyan-400/50 bg-[#0e1530] text-white px-2 py-1 text-xs outline-none"
+                        >
+                            {LANGS.map((l) => (
+                                <option key={l.code} value={l.code}>
+                                    {l.label}
+                                </option>
+                            ))}
+                        </select>
+                    </div>
+                </div>
+
+                {/* Column 2: Audio, Backgrounds, Music, Return to Menu */}
+                <div className="flex flex-col gap-2">
+                    <Toggle on={s.sound} onChange={(v) => store.patchSettings({ sound: v })} label="🔊 Sound & Voices" />
+
+                    <div className="flex flex-col gap-1">
+                        <span className="font-bold text-cyan-200 text-xs">Background Arena</span>
+                        <div className="grid grid-cols-2 gap-1">
+                            {BG_NAMES.map((n, i) => (
+                                <Chip key={n} active={s.bg === i} onClick={() => store.patchSettings({ bg: i })}>
+                                    {n}
+                                </Chip>
+                            ))}
+                        </div>
+                    </div>
+
+                    <div className="flex flex-col gap-1">
+                        <MusicPicker />
+                    </div>
+
+                    {phase === 'playing' && (
+                        <button
+                            type="button"
+                            onClick={() => {
+                                stopMusic();
+                                store.patch({ modal: null, phase: 'menu', result: null, popup: null });
+                            }}
+                            className="w-full py-2 rounded-xl bg-red-500/25 border border-red-500/40 font-extrabold text-red-200 hover:bg-red-500/40 transition-colors text-xs uppercase tracking-wider mt-1 cursor-pointer"
+                        >
+                            ← Exit to Main Menu
+                        </button>
+                    )}
+                </div>
             </div>
-            <Toggle on={s.sound} onChange={(v) => store.patchSettings({ sound: v })} label="🔊 Sound effects & voices" />
-            <div className="flex items-center justify-between" style={{ margin: `${U(14)} 0 ${U(8)}` }}>
-                <span className="font-bold text-cyan-200">⏱️ Turn Timer (Optional)</span>
-                <span className="text-sm font-semibold text-cyan-300">
-                    {s.timerEnabled ? `⏳ ${s.timerSec}s` : '♾️ Off (Unlimited)'}
-                </span>
-            </div>
-            <div className="grid grid-cols-4" style={{ gap: U(6) }}>
-                <Chip
-                    active={!s.timerEnabled}
-                    onClick={() => store.patchSettings({ timerEnabled: false })}
-                >
-                    ♾️ Off
-                </Chip>
-                {([60, 90, 120] as const).map((sec) => (
-                    <Chip
-                        key={sec}
-                        active={s.timerEnabled && s.timerSec === sec}
-                        onClick={() => store.patchSettings({ timerEnabled: true, timerSec: sec })}
-                    >
-                        ⏳ {sec}s
-                    </Chip>
-                ))}
-            </div>
-            <div className="font-bold text-cyan-200" style={{ margin: `${U(14)} 0 ${U(8)}` }}>🌐 Language</div>
-            <select value={s.lang} onChange={(e) => store.patchSettings({ lang: e.target.value })} className="w-full rounded-lg border border-cyan-300/50 bg-[#0e1530] text-white" style={{ padding: U(10), fontSize: U(22) }}>
-                {LANGS.map((l) => <option key={l.code} value={l.code}>{l.label}</option>)}
-            </select>
-            <div className="font-bold text-cyan-200" style={{ margin: `${U(14)} 0 ${U(8)}` }}>Background</div>
-            <div className="grid grid-cols-2" style={{ gap: U(8) }}>
-                {BG_NAMES.map((n, i) => <Chip key={n} active={s.bg === i} onClick={() => store.patchSettings({ bg: i })}>{n}</Chip>)}
-            </div>
-            <div className="font-bold text-cyan-200" style={{ margin: `${U(14)} 0 ${U(8)}` }}>Music</div>
-            <MusicPicker />
-            {phase === 'playing' && (
-                <button onClick={() => { stopMusic(); store.patch({ modal: null, phase: 'menu', result: null, popup: null }); }} className="w-full rounded-xl bg-red-500/20 font-bold text-red-200" style={{ marginTop: U(16), padding: U(12), fontSize: U(24) }}>← Main menu</button>
-            )}
         </Modal>
     );
 }
@@ -112,44 +168,27 @@ function HowTo() {
 function Tournament() {
     const lang = useStore((s) => s.settings.lang);
     return (
-        <Modal title={`🏆 ${tr(lang, 'tour')}`} onClose={close}>
-            <p className="text-center font-black text-amber-300" style={{ fontSize: U(40), padding: U(20) }}>{tr(lang, 'soon')}</p>
+        <Modal title={`🏆 ${tr(lang, 'tour')}`} onClose={close} slim>
+            <div className="flex flex-col items-center justify-center text-center py-2 px-1">
+                <span className="text-4xl mb-1">🏆</span>
+                <p className="font-black text-amber-300 text-lg sm:text-xl mb-1">{tr(lang, 'soon')}</p>
+                <p className="text-white/70 text-xs max-w-xs mb-3">
+                    Championship tournament brackets and arena cups are preparing. Check back soon!
+                </p>
+                <button
+                    type="button"
+                    onClick={close}
+                    className="w-full max-w-xs py-2 rounded-xl bg-gradient-to-r from-amber-400 to-amber-500 text-slate-950 font-black text-xs uppercase tracking-wider shadow hover:brightness-110 active:scale-95 transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                    <span>←</span>
+                    <span>Return to Main Window</span>
+                </button>
+            </div>
         </Modal>
     );
 }
 
-function Invite() {
-    const code = useRef(Math.random().toString(36).slice(2, 8).toUpperCase()).current;
-    const link = `${location.origin}${location.pathname}?room=${code}`;
-    const [copied, setCopied] = useState(false);
-    const players = useStore((s) => s.players);
-    const start = () => {
-        // no online rooms yet: empty seats are filled by the computer, you play Cyan
-        [0, 1, 2].forEach((i) => store.patchPlayer(i, { ai: true, wish: null }));
-        store.patchPlayer(3, { ai: false });
-        store.patch({ modal: null, mode: 4, phase: 'playing', active: [true, true, true, true], gameId: store.get().gameId + 1, result: null });
-    };
-    return (
-        <Modal title="🌐 Invite friends" onClose={close}>
-            <div className="text-center text-white/70">Room code</div>
-            <div className="text-center font-black tracking-[0.3em] text-cyan-300" style={{ fontSize: U(56) }}>{code}</div>
-            <div className="break-all rounded-xl bg-white/5 text-cyan-100" style={{ padding: U(10), fontSize: U(18) }}>{link}</div>
-            <div className="flex" style={{ gap: U(10), marginTop: U(12) }}>
-                <button className="flex-1 rounded-xl bg-cyan-400 font-bold text-black" style={{ padding: U(12) }} onClick={() => { void navigator.clipboard?.writeText(link).then(() => setCopied(true)).catch(() => {}); }}>{copied ? 'Copied ✓' : 'Copy'}</button>
-                <button className="flex-1 rounded-xl bg-white/15 font-bold" style={{ padding: U(12) }} onClick={() => { if (navigator.share) void navigator.share({ title: 'Ludo Emperor', text: `Join my Ludo room ${code}`, url: link }).catch(() => {}); }}>Share</button>
-            </div>
-            <div className="grid grid-cols-2" style={{ gap: U(8), marginTop: U(16) }}>
-                {[3, 0, 1, 2].map((c, k) => (
-                    <div key={c} className="rounded-xl bg-white/5 text-center" style={{ padding: U(10), borderBottom: `${U(4)} solid ${['#e53935', '#43a047', '#fdd835', '#00bcd4'][c]}` }}>
-                        {k === 0 ? `${players[3].avatar} You` : '⏳ Waiting…'}
-                    </div>
-                ))}
-            </div>
-            <button onClick={start} className="w-full rounded-xl bg-gradient-to-r from-cyan-400 to-emerald-400 font-black text-black" style={{ marginTop: U(16), padding: U(14), fontSize: U(26) }}>Start game</button>
-            <p className="text-white/50" style={{ fontSize: U(16), marginTop: U(8) }}>Live multiplayer rooms need an online room service, which is not built yet: empty seats are played by the computer.</p>
-        </Modal>
-    );
-}
+
 
 function Wish({ idx }: { idx: number }) {
     const players = useStore((s) => s.players);
@@ -237,8 +276,9 @@ export function Modals() {
     if (!modal) return null;
     if (modal === 'settings') return <Settings />;
     if (modal === 'music') return <Modal title="🎵 Music" onClose={close}><MusicPicker /></Modal>;
-    if (modal === 'howto') return <HowTo />;
-    if (modal === 'invite' || modal === 'multiplayer') return <MultiplayerLobbyModal onClose={close} />;
+    if (modal === 'howto') return <TutorialModal onClose={close} />;
+    const urlRoom = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('room') : null;
+    if (modal === 'invite' || modal === 'multiplayer') return <MultiplayerLobbyModal onClose={close} initialRoomCode={urlRoom || undefined} />;
     if (modal === 'tournament') return <Tournament />;
     if (modal.startsWith('wish:')) return <Wish idx={Number(modal.slice(5))} />;
     if (modal.startsWith('profile:')) return <Profile idx={Number(modal.slice(8))} />;

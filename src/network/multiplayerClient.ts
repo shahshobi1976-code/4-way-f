@@ -206,14 +206,18 @@ class MultiplayerClient {
             }
         });
 
+        const numSeats = state.maxPlayers || (state.players.length <= 2 ? 2 : 4);
+        const myWish = this.myPlayerIndex !== null && state.players[this.myPlayerIndex]?.wish;
         store.patch({
             phase: 'playing',
-            mode: 4,
+            mode: numSeats === 2 ? 2 : 4,
             active,
             modal: null,
             gameId: store.get().gameId + 1,
             result: null,
             popup: null,
+            wishNums: myWish || store.get().wishNums || [6, 5],
+            wishUsable: true,
         });
     }
 
@@ -236,10 +240,10 @@ class MultiplayerClient {
         return this.roomState.hostId === this.sessionToken;
     }
 
-    public createRoom(name: string, avatar: string, turnTimeSec = 90): Promise<{ ok: boolean; roomCode?: string; error?: string }> {
+    public createRoom(name: string, avatar: string, turnTimeSec = 90, maxPlayers = 2): Promise<{ ok: boolean; roomCode?: string; error?: string }> {
         return new Promise((resolve) => {
             if (!this.socket) return resolve({ ok: false, error: 'Socket not initialized' });
-            this.socket.emit('create_room', { name, avatar, sessionToken: this.sessionToken, turnTimeSec }, (res: any) => {
+            this.socket.emit('create_room', { name, avatar, sessionToken: this.sessionToken, turnTimeSec, maxPlayers }, (res: any) => {
                 if (res?.ok && res.roomCode) {
                     this.roomCode = res.roomCode;
                     this.myPlayerIndex = 0;
@@ -255,6 +259,11 @@ class MultiplayerClient {
     public setTurnTime(turnTimeSec: number) {
         if (!this.socket || !this.roomCode) return;
         this.socket.emit('set_turn_time', { roomCode: this.roomCode, sessionToken: this.sessionToken, turnTimeSec });
+    }
+
+    public setWish(wish: [number, number] | null) {
+        if (!this.socket || !this.roomCode) return;
+        this.socket.emit('set_wish', { roomCode: this.roomCode, sessionToken: this.sessionToken, wish });
     }
 
     public joinRoom(roomCode: string, name: string, avatar: string): Promise<{ ok: boolean; error?: string }> {

@@ -4,14 +4,46 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <meta name="theme-color" content="#0a0f26" />
-    <title>Ludo Emperor 4 Way</title>
-    <meta name="description" content="Ludo Emperor 4 Way - 2-dice Ludo with Lucky Seven, 3D tilted board" />
-    <meta property="og:title" content="Ludo Emperor 4 Way" />
-    <meta property="og:description" content="Ludo Emperor 4 Way - 2-dice Ludo with Lucky Seven, 3D tilted board" />
+    <title>Ludo Dethroned 3D</title>
+    <link rel="icon" type="image/jpeg" href="/assets/aistudio/image_745468f3_92e66563.jpg" />
+    <meta name="description" content="Ludo Dethroned 3D - 2-dice Ludo with Lucky Seven, 3D tilted board" />
+    <meta property="og:title" content="Ludo Dethroned 3D" />
+    <meta property="og:description" content="Ludo Dethroned 3D - 2-dice Ludo with Lucky Seven, 3D tilted board" />
+    <meta property="og:image" content="/assets/aistudio/image_745468f3_92e66563.jpg" />
     <script>
         (function() {
             try {
                 if (typeof window !== 'undefined') {
+                    // Suppress unhandled third-party extension errors (e.g. MetaMask inpage.js)
+                    var isExtensionNoise = function(err, src) {
+                        var str = String((err && (err.message || err.stack || err)) || '');
+                        var file = String(src || (err && err.filename) || '');
+                        return (
+                            file.indexOf('chrome-extension://') !== -1 ||
+                            file.indexOf('moz-extension://') !== -1 ||
+                            file.indexOf('inpage.js') !== -1 ||
+                            str.indexOf('MetaMask') !== -1 ||
+                            str.indexOf('nkbihfbeogaeaoehlefnkodbefgpgknn') !== -1 ||
+                            str.indexOf('Failed to connect to MetaMask') !== -1 ||
+                            str.indexOf('Cannot set property fetch') !== -1
+                        );
+                    };
+
+                    window.addEventListener('unhandledrejection', function(event) {
+                        if (event && isExtensionNoise(event.reason)) {
+                            event.preventDefault();
+                            event.stopImmediatePropagation();
+                        }
+                    }, true);
+
+                    window.addEventListener('error', function(event) {
+                        if (event && isExtensionNoise(event.error || event.message, event.filename)) {
+                            event.preventDefault();
+                            event.stopImmediatePropagation();
+                            return true;
+                        }
+                    }, true);
+
                     var currentFetch = window.fetch ? window.fetch.bind(window) : undefined;
                     var desc = {
                         configurable: true,

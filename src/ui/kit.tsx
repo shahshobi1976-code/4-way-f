@@ -3,22 +3,61 @@ import type { CSSProperties, ReactNode } from 'react';
 /** Size in design units: scales with the device frame (see --u in app.css). */
 export const U = (n: number) => `calc(var(--u) * ${n})`;
 
-export function Modal({ title, onClose, children, wide }: { title: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
+export function Modal({
+    title,
+    onClose,
+    children,
+    wide,
+    slim,
+}: {
+    title: string;
+    onClose: () => void;
+    children: ReactNode;
+    wide?: boolean;
+    slim?: boolean;
+}) {
     return (
         <div
-            className="absolute inset-0 z-40 flex items-center justify-center bg-black/70"
-            style={{ padding: U(20) }}
-            onPointerDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
+            className="absolute inset-0 z-40 flex items-center justify-center bg-black/80 p-1.5 sm:p-3 overflow-hidden backdrop-blur-sm"
+            onPointerDown={(e) => {
+                if (e.target === e.currentTarget) onClose();
+            }}
         >
             <div
-                className="pop flex max-h-full w-full flex-col overflow-hidden rounded-2xl border border-cyan-400/50 bg-[#0e1530] shadow-[0_0_40px_rgba(24,224,255,0.25)]"
-                style={{ maxWidth: U(wide ? 680 : 600) }}
+                className="pop flex max-h-[96vh] max-h-[96dvh] w-full flex-col overflow-hidden rounded-2xl border border-cyan-400/50 bg-[#0c122e] shadow-[0_0_35px_rgba(24,224,255,0.25)]"
+                style={{
+                    maxWidth: slim
+                        ? 'min(96vw, 480px)'
+                        : wide
+                        ? 'min(98vw, 760px)'
+                        : 'min(96vw, 580px)',
+                }}
             >
-                <div className="flex items-center justify-between border-b border-cyan-400/30" style={{ padding: `${U(14)} ${U(20)}` }}>
-                    <h2 className="font-extrabold tracking-wide text-cyan-300" style={{ fontSize: U(30) }}>{title}</h2>
-                    <button onClick={onClose} className="rounded-full bg-white/10 font-bold text-white" style={{ width: U(48), height: U(48), fontSize: U(26) }} aria-label="Close">✕</button>
+                {/* Slim Header Bar with explicit Back Button + Title + Close Button */}
+                <div className="flex items-center justify-between border-b border-cyan-400/30 px-3 py-2 bg-slate-950/70 shrink-0 gap-2">
+                    <button
+                        onClick={onClose}
+                        className="flex items-center gap-1 px-2 py-1 rounded-lg bg-white/10 hover:bg-white/20 text-cyan-300 hover:text-white font-extrabold text-xs transition-colors shrink-0 cursor-pointer"
+                        title="Return to Main Menu"
+                        aria-label="Back to Main Menu"
+                    >
+                        <span>←</span>
+                        <span className="hidden xs:inline sm:inline">Main Menu</span>
+                    </button>
+                    <h2 className="font-extrabold tracking-wide text-cyan-200 text-center truncate text-xs sm:text-sm flex-1">
+                        {title}
+                    </h2>
+                    <button
+                        onClick={onClose}
+                        className="rounded-full bg-white/10 hover:bg-white/20 font-bold text-white transition-colors flex items-center justify-center shrink-0 cursor-pointer w-7 h-7 text-xs"
+                        aria-label="Close"
+                    >
+                        ✕
+                    </button>
                 </div>
-                <div className="overflow-y-auto" style={{ padding: U(20), fontSize: U(24) }}>{children}</div>
+                <div className="overflow-y-auto p-2.5 sm:p-3 text-xs sm:text-sm">
+                    {children}
+                </div>
             </div>
         </div>
     );
@@ -47,12 +86,29 @@ export function Chip({ active, children, onClick, style }: { active?: boolean; c
     );
 }
 
-export function RoundBtn({ children, onClick, size = 64, label, className = '', style }: { children: ReactNode; onClick: () => void; size?: number; label: string; className?: string; style?: CSSProperties }) {
+export function RoundBtn({
+    children,
+    onClick,
+    size = 42,
+    label,
+    className = '',
+    style,
+    title,
+}: {
+    children: ReactNode;
+    onClick: () => void;
+    size?: number;
+    label: string;
+    className?: string;
+    style?: CSSProperties;
+    title?: string;
+}) {
     return (
         <button
             aria-label={label}
+            title={title || label}
             onClick={onClick}
-            className={`flex items-center justify-center rounded-full border border-cyan-300/60 bg-[#0b1230]/85 text-white shadow-[0_0_14px_rgba(24,224,255,0.35)] active:scale-95 ${className}`}
+            className={`flex items-center justify-center rounded-full border border-cyan-300/60 bg-[#0b1230]/85 text-white shadow-[0_0_10px_rgba(24,224,255,0.35)] active:scale-95 cursor-pointer ${className}`}
             style={{ width: U(size), height: U(size), fontSize: U(size * 0.46), ...style }}
         >
             {children}

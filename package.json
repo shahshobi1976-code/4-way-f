@@ -1,7 +1,7 @@
 {
-    "name": "ludo-emperor-4-way",
+    "name": "ludo-dethroned-3d",
     "version": "1.0.0",
-    "description": "Ludo Emperor 4 Way - 2-dice Ludo with Lucky Seven, 3D tilted board (Pixi.js + React + RUN.game)",
+    "description": "Ludo Dethroned 3D - 2-dice Ludo with Lucky Seven, 3D tilted board",
     "private": true,
     "type": "module",
     "scripts": {
@@ -33,6 +33,7 @@
     "dependencies": {
         "@series-inc/rundot-game-sdk": "5.28.1",
         "express": "^5.3.0",
+        "jimp": "^1.6.1",
         "pixi.js": "8.19.0",
         "react": "19.2.4",
         "react-dom": "19.2.4",

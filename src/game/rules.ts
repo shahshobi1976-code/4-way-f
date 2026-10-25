@@ -155,6 +155,9 @@ export function leaderOf(tokens: Tokens, active: boolean[]): number {
     return best;
 }
 
+/** Explicit alias for theme calculation: Match Leader / Potential Winner detection */
+export const getMatchLeader = leaderOf;
+
 /** The computer players pile on whoever is winning: captures of the leader score highest. */
 export function scoreMove(tokens: Tokens, p: number, m: Move, active: boolean[]): number {
     const leader = leaderOf(tokens, active);

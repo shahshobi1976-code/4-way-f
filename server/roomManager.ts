@@ -21,6 +21,7 @@ export interface RoomPlayer {
     connected: boolean;
     disconnectTime?: number | null;
     isAI: boolean;
+    wish?: [number, number] | null;
 }
 
 export interface ClientRoomState {
@@ -37,6 +38,7 @@ export interface ClientRoomState {
     winner: number | null;
     rankings: { playerIndex: number; name: string; avatar: string; rank: number }[];
     turnTimeSec?: number;
+    maxPlayers?: number;
 }
 
 export interface Room {
@@ -45,6 +47,7 @@ export interface Room {
     phase: 'lobby' | 'playing' | 'game_over';
     fillBots: boolean;
     turnTimeSec: number;
+    maxPlayers: number;
     players: (RoomPlayer | null)[];
     tokens: Tokens;
     currentTurn: number;
@@ -90,6 +93,7 @@ class RoomManager {
                           ...p,
                           isHost: p.id === room.hostId,
                           isReady: p.ready,
+                          wish: p.wish || null,
                       }
                     : null,
             ),
@@ -101,7 +105,27 @@ class RoomManager {
             winner: room.winner,
             rankings: room.rankings,
             turnTimeSec: room.turnTimeSec || 90,
+            maxPlayers: room.maxPlayers || (room.players.length <= 2 ? 2 : 4),
         };
+    }
+
+    public setPlayerWish(code: string, sessionToken: string, wish: [number, number] | null): boolean {
+        const room = this.rooms.get(code);
+        if (!room) return false;
+        const player = room.players.find((p) => p && p.id === sessionToken);
+        if (!player) return false;
+        if (wish) {
+            const [a, b] = wish;
+            if (a >= 1 && a <= 6 && b >= 1 && b <= 6 && !(a === 6 && b === 6)) {
+                player.wish = [a, b];
+            } else {
+                player.wish = null;
+            }
+        } else {
+            player.wish = null;
+        }
+        this.broadcast(room.code, 'room_updated', this.getClientRoomState(room));
+        return true;
     }
 
     private generateCode(): string {
@@ -131,26 +155,27 @@ class RoomManager {
         avatar: string,
         socketId: string,
         turnTimeSec = 90,
+        maxPlayers = 2,
     ): { ok: boolean; roomCode?: string; error?: string } {
         if (!sessionToken) return { ok: false, error: 'Invalid session' };
         const code = this.generateCode();
-        const players: (RoomPlayer | null)[] = [
-            {
-                id: sessionToken,
-                name: (name || 'Host').trim().slice(0, 16),
-                avatar: avatar || '🤴',
-                socketId,
-                ready: true,
-                isReady: true,
-                isHost: true,
-                connected: true,
-                disconnectTime: null,
-                isAI: false,
-            },
-            null,
-            null,
-            null,
-        ];
+        const numSeats = maxPlayers === 4 ? 4 : 2;
+        const hostPlayer: RoomPlayer = {
+            id: sessionToken,
+            name: (name || 'Host').trim().slice(0, 16),
+            avatar: avatar || '🤴',
+            socketId,
+            ready: true,
+            isReady: true,
+            isHost: true,
+            connected: true,
+            disconnectTime: null,
+            isAI: false,
+        };
+        const players: (RoomPlayer | null)[] = [hostPlayer];
+        for (let i = 1; i < numSeats; i++) {
+            players.push(null);
+        }
 
         const room: Room = {
             code,
@@ -158,6 +183,7 @@ class RoomManager {
             phase: 'lobby',
             fillBots: true,
             turnTimeSec: turnTimeSec !== undefined ? turnTimeSec : 90,
+            maxPlayers: numSeats,
             players,
             tokens: newTokens(),
             currentTurn: 0,
@@ -258,7 +284,8 @@ class RoomManager {
         if (room.phase !== 'lobby') return { ok: false, error: 'Already playing' };
 
         // Fill remaining seats with bots if enabled
-        for (let i = 0; i < 4; i++) {
+        const numSeats = room.maxPlayers || room.players.length || 4;
+        for (let i = 0; i < numSeats; i++) {
             if (!room.players[i] && room.fillBots) {
                 room.players[i] = {
                     id: `bot_${i}_${Date.now()}`,
@@ -370,8 +397,8 @@ class RoomManager {
 
         // If both dice used or no moves left, advance
         if (room.diceUsed[0] && room.diceUsed[1]) {
-            const hasSix = room.dice[0] === 6 || room.dice[1] === 6;
-            this.advanceTurn(room, hasSix && room.consecutiveSixes < 3);
+            const hasDoubleSix = room.dice[0] === 6 && room.dice[1] === 6;
+            this.advanceTurn(room, hasDoubleSix && room.consecutiveSixes < 3);
         }
     }
 
@@ -394,7 +421,8 @@ class RoomManager {
         room.diceUsed = [false, false];
 
         const lucky = isLuckySum(d1, d2) && luckySevenAllowed(room.tokens, room.currentTurn);
-        if (d1 === 6 || d2 === 6) {
+        const doubleSix = d1 === 6 && d2 === 6;
+        if (doubleSix) {
             room.consecutiveSixes += 1;
         } else {
             room.consecutiveSixes = 0;
@@ -461,7 +489,7 @@ class RoomManager {
             room.tokens[cap.p][cap.t] = -1;
         }
 
-        const reachedHome = move.to >= 51;
+        const reachedHome = move.to === 56;
 
         this.broadcast(room.code, 'pawn_moved', {
             p: room.currentTurn,
@@ -497,9 +525,9 @@ class RoomManager {
         }
 
         if (!canPlayOther) {
-            // Check for extra turn bonus (rolling a 6 or capturing or reaching home)
-            const hadSix = (room.dice[0] === 6 || room.dice[1] === 6) && room.consecutiveSixes < 3;
-            const extraTurn = hadSix || move.captures.length > 0 || reachedHome;
+            // Check for extra turn bonus (double 6 or capture or reaching home)
+            const doubleSix = room.dice[0] === 6 && room.dice[1] === 6 && room.consecutiveSixes < 3;
+            const extraTurn = doubleSix || move.captures.length > 0 || reachedHome;
             setTimeout(() => {
                 this.advanceTurn(room, extraTurn);
             }, 800);
@@ -513,9 +541,10 @@ class RoomManager {
         if (room.turnTimeout) clearTimeout(room.turnTimeout);
 
         if (!extraTurn) {
-            let next = (room.currentTurn + 1) % 4;
+            const numSeats = room.maxPlayers || room.players.length || 4;
+            let next = (room.currentTurn + 1) % numSeats;
             while (room.players[next] === null) {
-                next = (next + 1) % 4;
+                next = (next + 1) % numSeats;
             }
             room.currentTurn = next;
             room.consecutiveSixes = 0;

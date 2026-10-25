@@ -1,6 +1,34 @@
-// Ensure window.fetch has both getter and setter so browser extensions/interceptors can patch it
+// Suppress third-party browser extension errors (e.g. MetaMask, requests interceptors)
 if (typeof window !== 'undefined') {
     try {
+        const isExtensionNoise = (err: any, src?: string) => {
+            const str = String((err && (err.message || err.stack || err)) || '');
+            const file = String(src || (err && err.filename) || '');
+            return (
+                file.includes('chrome-extension://') ||
+                file.includes('moz-extension://') ||
+                file.includes('inpage.js') ||
+                str.includes('MetaMask') ||
+                str.includes('nkbihfbeogaeaoehlefnkodbefgpgknn') ||
+                str.includes('Failed to connect to MetaMask') ||
+                str.includes('Cannot set property fetch')
+            );
+        };
+
+        window.addEventListener('unhandledrejection', (event) => {
+            if (event && isExtensionNoise(event.reason)) {
+                event.preventDefault();
+                event.stopImmediatePropagation();
+            }
+        }, true);
+
+        window.addEventListener('error', (event) => {
+            if (event && isExtensionNoise(event.error || event.message, event.filename)) {
+                event.preventDefault();
+                event.stopImmediatePropagation();
+            }
+        }, true);
+
         let currentFetch = window.fetch ? window.fetch.bind(window) : undefined;
         const desc = {
             configurable: true,
@@ -81,4 +109,4 @@ registerLifecycles({
 });
 
 // 8) fire-and-forget analytics
-log('Ludo Emperor booted');
+log('Ludo Dethroned booted');

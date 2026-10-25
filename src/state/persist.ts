@@ -11,7 +11,7 @@ import { safeStorage } from './storage';
 //   write : the SDK cache when available, localStorage otherwise.
 // Every call is guarded: storage problems must never break boot.
 
-const SETTINGS_KEY = 'ludo-emperor-settings';
+const SETTINGS_KEY = 'ludo-dethroned-settings';
 
 /** Cached SDK device cache, or null while the host is unavailable. */
 let device: { getItem(k: string): Promise<unknown>; setItem(k: string, v: unknown): Promise<unknown> } | null = null;

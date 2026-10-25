@@ -24,7 +24,11 @@ export function GameCanvas() {
                 return;
             }
             if (cancelled) {
-                app.destroy(true, { children: true });
+                try {
+                    app.destroy(true, { children: false });
+                } catch {
+                    // Safe cleanup
+                }
                 return;
             }
             const stage = createStage(app);
@@ -34,15 +38,53 @@ export function GameCanvas() {
                 active: s.active.slice(),
                 lang: s.settings.lang,
             });
+
+            const syncDimensions = () => {
+                if (cancelled || !host || !app.renderer) return;
+                const rect = host.getBoundingClientRect();
+                const w = Math.round(rect.width || host.clientWidth || window.innerWidth);
+                const h = Math.round(rect.height || host.clientHeight || window.innerHeight);
+                if (w > 0 && h > 0 && (app.screen.width !== w || app.screen.height !== h)) {
+                    app.renderer.resize(w, h);
+                }
+            };
+
+            const ro = new ResizeObserver(() => {
+                syncDimensions();
+            });
+            ro.observe(host);
+
+            const onOrient = () => {
+                syncDimensions();
+                window.setTimeout(syncDimensions, 60);
+                window.setTimeout(syncDimensions, 180);
+                window.setTimeout(syncDimensions, 360);
+            };
+
+            window.addEventListener('resize', onOrient);
+            window.addEventListener('orientationchange', onOrient);
+            window.visualViewport?.addEventListener('resize', onOrient);
+            try {
+                (screen.orientation as any)?.addEventListener?.('change', onOrient);
+            } catch {}
+
             const unsub = store.subscribe(() => {
                 if (store.get().paused) app.ticker.stop();
                 else if (!app.ticker.started) app.ticker.start();
             });
+
             cleanup = () => {
-                unsub();
-                scene.destroy();
-                stage.destroy();
-                app.destroy(true, { children: true });
+                try { ro.disconnect(); } catch {}
+                window.removeEventListener('resize', onOrient);
+                window.removeEventListener('orientationchange', onOrient);
+                window.visualViewport?.removeEventListener('resize', onOrient);
+                try {
+                    (screen.orientation as any)?.removeEventListener?.('change', onOrient);
+                } catch {}
+                try { unsub(); } catch {}
+                try { scene.destroy(); } catch {}
+                try { stage.destroy(); } catch {}
+                try { app.destroy(true, { children: false }); } catch {}
             };
         })();
         return () => {

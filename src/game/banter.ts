@@ -12,6 +12,7 @@ type Pack = Partial<Record<Cat, string[]>>;
 // ---------------------------------------------------------------- English
 const EN: Pack = {
     capture: [
+        "Don't let the winner win the match! Back to base!",
         'Back to base, {n}! 😂', 'AND DOWN GOES THE PAWN! Put that in the highlights reel!',
         'Nothing personal, chief! Just board business.', "Are you feeding me tokens on purpose? I'm starting to feel full!",
         'This star is officially under new management. Access denied!',

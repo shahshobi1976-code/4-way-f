@@ -15,7 +15,11 @@
 
 html, body, #root {
     height: 100%;
+    height: 100dvh;
+    width: 100%;
+    width: 100dvw;
     margin: 0;
+    padding: 0;
     background: #0a0d26;
     overflow: hidden;
     overscroll-behavior: none;
@@ -26,32 +30,48 @@ html, body, #root {
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
 }
 
-/* Device frame: a 9:16 phone-shaped box centred on desktop; fills the screen in fullscreen. */
+/* Device frame: 9:16 phone-proportioned in portrait; expands cleanly to full screen in landscape */
 #app-frame {
     --u: 1px;
     --colx: 14;
     --colw: 692;
     position: relative;
     height: 100%;
-    width: min(100vw, calc(100vh * 9 / 16));
+    height: 100dvh;
+    width: min(100vw, calc(100dvh * 9 / 16));
     margin: 0 auto;
     overflow: hidden;
-    background: #0a0d26;
     color: #fff;
+    transition: none;
 }
-/* Wide viewport (desktop window, laptop, tablet, phone turned sideways): use the
-   wide landscape layout instead of a letterboxed portrait strip. The upper bound
-   keeps it a comfortable centred column on very wide desktops; the 1.45:1 lower
-   bound matters because the menu/setup screens are ~1450 design units wide and
-   the frame clips its overflow, so a narrower frame cuts their content off. */
-#app-frame.land { width: min(100vw, max(calc(100vh * 1.45), 820px)); }
-#app-frame.fs.land { width: 100vw; }
-/* fullscreen in portrait: fill the screen too */
-#app-frame.fs:not(.land) { width: 100vw; }
-/* The menu and setup screens are the original portrait column: the `land` class
-   is withheld while they are on screen (see App.tsx), so the frame keeps the 9:16
-   width and `--u` follows the frame. The playing board still uses the wide
-   layout. Nothing extra is needed here. */
+/* Wide landscape layout on phones, tablets, and web desktops */
+#app-frame.land {
+    width: 100% !important;
+    max-width: 100vw !important;
+    height: 100% !important;
+    height: 100dvh !important;
+}
+#app-frame.fs {
+    width: 100vw !important;
+    height: 100vh !important;
+    height: 100dvh !important;
+}
+
+/* Custom slim scrollbars so no ugly crawler bars appear */
+::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+}
+::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.2);
+}
+::-webkit-scrollbar-thumb {
+    background: rgba(24, 224, 255, 0.35);
+    border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: rgba(24, 224, 255, 0.6);
+}
 
 /* safe-area helpers for notches */
 .safe-top { padding-top: env(safe-area-inset-top); }
