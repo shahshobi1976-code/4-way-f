@@ -9,6 +9,9 @@ import { stopMusic } from '../game/music';
 import { Chip, Modal, Toggle, U } from './kit';
 import { MultiplayerLobbyModal } from './MultiplayerLobbyModal';
 import { TutorialModal } from './TutorialModal';
+import { multiplayerClient } from '../network/multiplayerClient';
+
+import * as sfx from '../game/sfx';
 
 const close = () => store.patch({ modal: null });
 
@@ -110,7 +113,15 @@ function Settings() {
 
                 {/* Column 2: Audio, Backgrounds, Music, Return to Menu */}
                 <div className="flex flex-col gap-2">
-                    <Toggle on={s.sound} onChange={(v) => store.patchSettings({ sound: v })} label="🔊 Sound & Voices" />
+                    <Toggle on={s.sound} onChange={(v) => store.patchSettings({ sound: v })} label="🔊 Sound Effects" />
+                    <Toggle
+                        on={!s.aiMute}
+                        onChange={(v) => {
+                            store.patchSettings({ aiMute: !v });
+                            if (!v) sfx.stopSpeech();
+                        }}
+                        label="🎙️ AI Talking (Mute AI Only)"
+                    />
 
                     <div className="flex flex-col gap-1">
                         <span className="font-bold text-cyan-200 text-xs">Background Arena</span>
@@ -132,6 +143,9 @@ function Settings() {
                             type="button"
                             onClick={() => {
                                 stopMusic();
+                                if (multiplayerClient.roomCode) {
+                                    multiplayerClient.leaveRoom();
+                                }
                                 store.patch({ modal: null, phase: 'menu', result: null, popup: null });
                             }}
                             className="w-full py-2 rounded-xl bg-red-500/25 border border-red-500/40 font-extrabold text-red-200 hover:bg-red-500/40 transition-colors text-xs uppercase tracking-wider mt-1 cursor-pointer"

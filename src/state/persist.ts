@@ -54,3 +54,17 @@ export async function readDevice(): Promise<string | null> {
     }
     return null;
 }
+
+export const LUDO_MATCHES_KEY = 'ludo_matches_played';
+
+export function getMatchCount(): number {
+    const val = safeStorage.getItem(LUDO_MATCHES_KEY);
+    return val ? parseInt(val, 10) || 0 : 0;
+}
+
+export function recordMatchStarted(): number {
+    const current = getMatchCount();
+    const next = current + 1;
+    safeStorage.setItem(LUDO_MATCHES_KEY, String(next));
+    return next;
+}

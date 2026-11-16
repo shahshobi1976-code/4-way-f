@@ -140,8 +140,8 @@ In-game communication is integrated right into the board: real-time emoji reacti
 **Q7: Why does the progress bar show proportional widths?**
 > **A:** The Joint Progress Bar in the top-right corner visually represents each player's real-time match dominance. As a player nears victory, their color expands across the bar, signaling to all opponents who needs to be targeted.
 
-**Q8: Can 5 players play together?**
-> **A:** Yes! The engine supports both the classic 4-player cross and the 5-player pentagonal chaos board.
+**Q8: Can 4 players play together?**
+> **A:** Absolutely! Ludo Emperor is built from the ground up for the classic 4-player cross battle, with support for 2-player strategic head-to-head duels as well.
 
 **Q9: Does rolling double sixes cancel after three times?**
 > **A:** Never. There is no arbitrary 3-six penalty. If luck and strategy are on your side, your momentum continues uninterrupted.

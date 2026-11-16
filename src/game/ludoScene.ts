@@ -1,17 +1,19 @@
 // The Ludo Dethroned game scene: tilted/rotating pseudo-3D board, 3D-style pawns, two dice,
 // computer players that gang up on the leader, penalties, Lucky Seven, talk and sound.
-import { Application, Circle, Container, Graphics, Text } from 'pixi.js';
+import { Application, Circle, Container, Graphics, Rectangle, Sprite, Text } from 'pixi.js';
 import type { Stage } from './stage';
 import { store, type PlayerCfg } from '../state/store';
 import { multiplayerClient } from '../network/multiplayerClient';
+import { recordMatchStarted } from '../state/persist';
 import { bus } from './bus';
 import { tr, colorName } from '../i18n';
 import {
     BASE_CENTER, BASE_SPOTS, COLORS, HOME, HOME_COL, IN_BASE, LAST_TRACK, PATH_START, SAFE, STAR_IDX, START_IDX, TRACK,
     boardPos, fineProgress, globalIdx, hasWon, isLuckySum, legalMoves, luckySevenAllowed, maxCaptures, newTokens,
-    percent, pickMove, randDie, type Move, type Tokens,
+    percent, pickMove, randDie, findOffendingToken, type Move, type Tokens,
 } from './rules';
 import { BG_BASE, circlePts, drawBackground, drawDie, drawPawn, mix, shade, starPts } from './draw';
+import { TOKEN_URLS_BY_PLAYER, getCachedPawnTexture, loadPawnTexture } from './tokenAssets';
 import * as sfx from './sfx';
 import * as banter from './banter';
 import type { Cat } from './banter';
@@ -30,6 +32,7 @@ const SPEED = 0.5; // whole game runs at half speed (as requested)
 const BOARD_SPEED = 0.8; // camera turns/tilts at 0.8x
 const YAW_FOR = [-90, 180, 90, 0]; // rotate board so colour c sits bottom-left
 const DEFAULT_NAMES = ['red', 'green', 'yellow', 'cyan'];
+const TOKEN_SIZE_SCALE = 0.75; // token size scaled to 0.75x
 
 interface Tween {
     tok: TokView;
@@ -45,6 +48,7 @@ interface TokView {
     t: number;
     c: Container;
     body: Graphics;
+    sprite?: Sprite;
     shadow: Graphics;
     ring: Graphics;
     vx: number;
@@ -79,13 +83,31 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     const handLayer = new Container();
     root.addChild(bgFill, bgG, boardG, shadowLayer, tokenLayer, plateLayer, flyLayer, uiLayer, handLayer);
 
+    const isOnline = () => {
+        return Boolean(
+            multiplayerClient.roomCode &&
+            multiplayerClient.roomState &&
+            multiplayerClient.roomState.phase === 'playing'
+        );
+    };
+
     // ---------------------------------------------------------------- game state
-    const tokens: Tokens = newTokens();
-    let current = active.findIndex((a) => a);
+    const tokens: Tokens = (isOnline() && multiplayerClient.roomState?.tokens)
+        ? multiplayerClient.roomState.tokens.map((r) => r.slice())
+        : newTokens();
+    let current = (isOnline() && multiplayerClient.roomState?.currentTurn !== undefined)
+        ? multiplayerClient.roomState.currentTurn
+        : active.findIndex((a) => a);
     let winner = -1;
     let ranking: { idx: number; pct: number }[] = [];
     const wishUsed = [false, false, false, false];
     const sixStreak = [0, 0, 0, 0];
+
+    // Count matches in browser (localStorage): in the first 3 matches only, show capture hints and skip confirmations
+    const matchCount = recordMatchStarted();
+    const isFirst3Matches = matchCount <= 3;
+    let turnCapturePromise = 0;
+    let turnCapturesTaken = 0;
 
     let dice: [number, number] = [5, 2];
     let diceUsed: [boolean, boolean] = [true, true];
@@ -96,19 +118,32 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     let dieFlash = 0;
     let diceColor = COLORS[current];
     let waitRoll: ((forced?: [number, number]) => void) | null = null;
-    let waitChoice: ((m: Move) => void) | null = null;
+    let waitRollTarget = -1;
+    let waitChoice: ((m?: Move) => void) | null = null;
     let optionsNow: Move[] = [];
     let turnChangeResolver: ((newTurn: number) => void) | null = null;
     let statusText = '';
 
+    const cleanPlayerName = (raw: string): string => {
+        if (!raw) return '';
+        return raw.replace(/\s*#[a-zA-Z0-9_-]+$/, '').trim();
+    };
+
     const nameOf = (p: number): string => {
-        const n = (cfgs[p]?.name || '').trim();
+        const raw = (cfgs[p]?.name || '').trim();
+        const n = cleanPlayerName(raw);
         if (!n || DEFAULT_NAMES.includes(n.toLowerCase()) || n === colorName(lang, p)) return colorName(lang, p);
         return n;
     };
     const plateName = (p: number) => nameOf(p).toUpperCase();
     const avatarOf = (p: number) => cfgs[p]?.avatar || '🎲';
-    const isAI = (p: number) => !!cfgs[p]?.ai;
+
+    const isAI = (p: number) => {
+        if (isOnline()) {
+            return !!multiplayerClient.roomState?.players[p]?.isAI;
+        }
+        return !!cfgs[p]?.ai || !!store.get().players[p]?.ai;
+    };
     const nextActive = (p: number) => {
         for (let i = 1; i <= 4; i++) {
             const q = (p + i) % 4;
@@ -124,10 +159,41 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         });
     }
 
-    // ---------------------------------------------------------------- timers / tweens (ticker clock, pause-safe)
+    // ---------------------------------------------------------------- timers / tweens (ticker clock + abort-safe)
     let clock = 0;
     const timers: { t: number; cb: () => void }[] = [];
-    const delay = (ms: number) => new Promise<void>((res) => timers.push({ t: clock + ms, cb: res }));
+    const turnAbortCallbacks = new Set<() => void>();
+    const bumpTurnEpoch = () => {
+        turnEpoch++;
+        const cbs = Array.from(turnAbortCallbacks);
+        turnAbortCallbacks.clear();
+        for (const cb of cbs) {
+            try { cb(); } catch {}
+        }
+    };
+    const delay = (ms: number, abortOnTurnChange = false) => new Promise<void>((res) => {
+        let done = false;
+        let wallTimer: ReturnType<typeof setTimeout> | null = null;
+        const finishDelay = () => {
+            if (done) return;
+            done = true;
+            if (wallTimer !== null) {
+                clearTimeout(wallTimer);
+                wallTimer = null;
+            }
+            turnAbortCallbacks.delete(finishDelay);
+            res();
+        };
+        if (abortOnTurnChange) {
+            turnAbortCallbacks.add(finishDelay);
+        }
+        // In online mode (or when tab is hidden/ticker stopped), wall-clock setTimeout prevents permanent freezes
+        if (isOnline() || (typeof document !== 'undefined' && document.hidden)) {
+            wallTimer = setTimeout(finishDelay, ms);
+        } else {
+            timers.push({ t: clock + ms, cb: finishDelay });
+        }
+    });
     const tweens: Tween[] = [];
 
     // ---------------------------------------------------------------- camera / projection
@@ -161,7 +227,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     let colX = 20, colW = 680;
     let adRect = { x: 20, y: 700, w: 680, h: 160 };
 
-    function fitBoard() {
+    function fitBoard(scaleMultiplier = 1.0) {
         const el = rad(pitch), se = Math.sin(el), ce = Math.cos(el);
         let minX = 1e9, maxX = -1e9, minY = 1e9, maxY = -1e9;
         for (const [x, y, z] of [[0, 0, 0], [15, 0, 0], [15, 15, 0], [0, 15, 0], [0, 15, -0.7], [15, 15, -0.7]]) {
@@ -173,7 +239,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             minY = Math.min(minY, Y * k); maxY = Math.max(maxY, Y * k);
         }
         const baseS = Math.min(boardRect.w / (maxX - minX), boardRect.h / (maxY - minY));
-        S = baseS;
+        S = baseS * scaleMultiplier;
         OX = boardRect.x + boardRect.w / 2 - ((minX + maxX) / 2) * S;
         OY = boardRect.y - minY * S;
     }
@@ -188,7 +254,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             colX = 24 + bw + 32;
             colW = W - colX - 24;
 
-            fitBoard();
+            fitBoard(1.0);
 
             // 1. Ad banner in landscape / web with DOUBLED height (220 units)
             const bannerTop = 82;
@@ -204,15 +270,15 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             turnY = diceCY + diceSize * 0.5 + 32;
             chatY = turnY + 36;
         } else {
-            // Vertical mobile: board cleanly positioned UNDER the timer (no overlap) with 3x banner height
-            const boardTop = 180;
-            const boardW = Math.min(W - 32, 680);
-            const maxBoardH = Math.min(boardW * 0.72, Math.round((H - boardTop) * 0.38));
+            // Vertical mobile: increase board size by 0.2x (1.20x scale) cleanly positioned with 3x banner height
+            const boardTop = 150;
+            const boardW = Math.min(W - 20, 740);
+            const maxBoardH = Math.min(boardW * 0.86, Math.round((H - boardTop) * 0.44));
             boardRect = { x: Math.round((W - boardW) / 2), y: boardTop, w: boardW, h: maxBoardH };
             colX = 16;
             colW = boardW;
 
-            fitBoard();
+            fitBoard(1.20);
 
             // Calculate exact bottom coordinate of board and bottom plates (Yellow & Blue)
             const c0 = P(0, 0), c1 = P(15, 0), c2 = P(15, 15), c3 = P(0, 15);
@@ -220,7 +286,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
 
             // 1. Clickable dice placed cleanly below the board & bottom nameplates (pushed down)
             diceSize = 60;
-            diceCY = Math.round(actualBottom + 64 + diceSize / 2);
+            diceCY = Math.round(actualBottom + 54 + diceSize / 2);
             diceCX = [W / 2 - diceSize * 1.25, W / 2 + diceSize * 1.25];
 
             // 2. Turn message and chatter ("message place") positioned comfortably below the dice
@@ -228,8 +294,8 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             chatY = Math.round(turnY + 24);
 
             // 3. Advertisement banner placed cleanly UNDER the message place with 3x height
-            const bannerTop = Math.round(chatY + 56);
-            const bannerH = Math.min(210, Math.max(140, Math.round(H - bannerTop - 54)));
+            const bannerTop = Math.round(chatY + 52);
+            const bannerH = Math.min(210, Math.max(130, Math.round(H - bannerTop - 50)));
             adRect = { x: 24, y: bannerTop, w: W - 48, h: bannerH };
         }
         document.getElementById('app-frame')?.style.setProperty('--colx', String(colX));
@@ -319,6 +385,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     // ---------------------------------------------------------------- tokens
     const views: TokView[][] = [[], [], [], []];
     for (let p = 0; p < 4; p++) {
+        const tokenUrl = TOKEN_URLS_BY_PLAYER[p];
         for (let t = 0; t < 4; t++) {
             const c = new Container();
             const body = new Graphics();
@@ -326,13 +393,46 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             c.addChild(body);
             c.eventMode = 'static';
             c.cursor = 'pointer';
-            c.hitArea = new Circle(0, -0.4, 0.62);
+            c.interactiveChildren = false; // hitArea receives taps directly without child interception
+            c.hitArea = new Circle(0, -0.65, 1.4);
             const shadow = new Graphics();
-            shadow.ellipse(0, 0, 0.36, 0.14).fill({ color: 0x000000, alpha: 0.3 });
+            shadow.ellipse(0, 0, 0.38, 0.15).fill({ color: 0x000000, alpha: 0.35 });
             const ring = new Graphics();
-            ring.ellipse(0, 0, 0.5, 0.2).stroke({ width: 0.08, color: 0xffffff, alpha: 0.95 });
+            ring.ellipse(0, 0, 0.52, 0.22).stroke({ width: 0.08, color: 0xffffff, alpha: 0.95 });
             ring.visible = false;
             const v: TokView = { p, t, c, body, shadow, ring, vx: 0, vy: 0, vz: 0, tween: null, movable: false, flash: 0, phase: Math.random() * 6 };
+
+            const attachSprite = (tex: any) => {
+                if (dead || c.destroyed || !tex) return;
+                const natW = (tex.source as any)?.naturalWidth || tex.width || 200;
+                if (!natW || isNaN(natW) || natW <= 0) return;
+
+                if (v.sprite && !v.sprite.destroyed) {
+                    v.sprite.texture = tex;
+                    return;
+                }
+                const sp = new Sprite(tex);
+                sp.anchor.set(0.5, 0.94);
+                const targetW = 0.78;
+                const scale = targetW / natW;
+                sp.scale.set(scale, scale);
+                sp.eventMode = 'none';
+                body.visible = false;
+                c.addChild(sp);
+                v.sprite = sp;
+            };
+
+            const cached = getCachedPawnTexture(tokenUrl);
+            if (cached) {
+                attachSprite(cached);
+            } else {
+                void loadPawnTexture(tokenUrl).then((tex) => {
+                    attachSprite(tex);
+                }).catch(() => {
+                    // Fallback to body Graphics
+                });
+            }
+
             const [bx, by] = boardPos(p, IN_BASE, t);
             v.vx = bx;
             v.vy = by;
@@ -344,11 +444,52 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         }
     }
 
-    function tween(tok: TokView, pts: [number, number][], stepMs: number, hop: number): Promise<void> {
+    function tween(tok: TokView, pts: [number, number][], stepMs: number, hop: number, expectedEpoch?: number): Promise<void> {
         return new Promise<void>((res) => {
-            const tw: Tween = { tok, pts, seg: 0, u: 0, stepMs, hop, done: res };
+            if (dead || pts.length < 2 || (typeof document !== 'undefined' && document.hidden) || (expectedEpoch !== undefined && isOnline() && turnEpoch !== expectedEpoch)) {
+                const lastPt = pts[pts.length - 1];
+                if (lastPt) {
+                    tok.vx = lastPt[0];
+                    tok.vy = lastPt[1];
+                }
+                tok.vz = 0;
+                tok.tween = null;
+                res();
+                return;
+            }
+            let settled = false;
+            let safetyTimer: ReturnType<typeof setTimeout> | null = null;
+            const finishTween = () => {
+                if (settled) return;
+                settled = true;
+                if (safetyTimer !== null) {
+                    clearTimeout(safetyTimer);
+                    safetyTimer = null;
+                }
+                turnAbortCallbacks.delete(abortFinish);
+                const idx = tweens.indexOf(tw);
+                if (idx !== -1) tweens.splice(idx, 1);
+                tok.tween = null;
+                res();
+            };
+            const abortFinish = () => {
+                const lastPt = pts[pts.length - 1];
+                if (lastPt) {
+                    tok.vx = lastPt[0];
+                    tok.vy = lastPt[1];
+                }
+                tok.vz = 0;
+                finishTween();
+            };
+            const tw: Tween = { tok, pts, seg: 0, u: 0, stepMs, hop, done: finishTween };
             tok.tween = tw;
             tweens.push(tw);
+            if (isOnline()) {
+                turnAbortCallbacks.add(abortFinish);
+                // Wall-clock cap ensures tween never freezes if browser throttles/pauses requestAnimationFrame
+                const maxMs = Math.max(400, (pts.length - 1) * stepMs + 600);
+                safetyTimer = setTimeout(abortFinish, maxMs);
+            }
         });
     }
 
@@ -406,12 +547,12 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                 const gr = P(v.vx + o, v.vy, 0);
                 const bounce = v.movable ? Math.abs(Math.sin((now / 1000) * 6 + v.phase)) * 0.38 : 0;
                 if (v.c?.position) v.c.position.set(pr.x, pr.y - bounce * S * pr.k);
-                if (v.c?.scale) v.c.scale.set(S * pr.k * crowd);
+                if (v.c?.scale) v.c.scale.set(S * pr.k * crowd * TOKEN_SIZE_SCALE);
                 if (v.c) v.c.zIndex = -gr.d * 100 + (v.tween ? 500 : 0);
                 if (v.shadow?.position) v.shadow.position.set(gr.x, gr.y);
-                if (v.shadow?.scale) v.shadow.scale.set(S * gr.k * crowd * (1 - Math.min(0.5, v.vz * 0.25)));
+                if (v.shadow?.scale) v.shadow.scale.set(S * gr.k * crowd * TOKEN_SIZE_SCALE * (1 - Math.min(0.5, v.vz * 0.25)));
                 if (v.ring?.position) v.ring.position.set(gr.x, gr.y);
-                if (v.ring?.scale) v.ring.scale.set(S * gr.k * crowd);
+                if (v.ring?.scale) v.ring.scale.set(S * gr.k * crowd * TOKEN_SIZE_SCALE);
                 v.ring.visible = v.movable || v.flash > 0;
                 if (v.flash > 0) {
                     v.ring.tint = 0xff2a2a;
@@ -489,9 +630,10 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     let homeCenterTxt: Text | null = null;
     const chatTxt: Text[] = [];
     let adC: Container;
-
     let uiBuilt = false;
     let adG: Graphics;
+    let diceTrayC: Container;
+    let diceTrayG: Graphics;
 
     function buildUi() {
         if (!uiBuilt) {
@@ -499,15 +641,35 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             uiLayer.removeChildren();
             dieC.length = 0;
             dieG.length = 0;
+            let lastDieTap = 0;
+            const triggerDieTap = (dieIdx: number) => {
+                const t = performance.now();
+                if (t - lastDieTap < 200) return;
+                lastDieTap = t;
+                onDieTap(dieIdx);
+            };
+            bus.roll = () => triggerDieTap(0);
+
+            // Generous clickable tray beneath both dice
+            diceTrayC = new Container();
+            diceTrayG = new Graphics();
+            diceTrayG.eventMode = 'none';
+            diceTrayC.addChild(diceTrayG);
+            diceTrayC.eventMode = 'static';
+            diceTrayC.cursor = 'pointer';
+            diceTrayC.on('pointertap', () => triggerDieTap(0));
+            uiLayer.addChild(diceTrayC);
+
             for (let i = 0; i < 2; i++) {
                 const c = new Container();
                 const g = new Graphics();
+                g.eventMode = 'none';
                 c.addChild(g);
                 c.position.set(diceCX[i], diceCY);
                 c.eventMode = 'static';
                 c.cursor = 'pointer';
-                c.hitArea = new Circle(0, 0, diceSize * 0.85);
-                c.on('pointertap', () => onDieTap(i));
+                c.hitArea = new Circle(0, 0, diceSize * 1.35);
+                c.on('pointertap', () => triggerDieTap(i));
                 uiLayer.addChild(c);
                 dieC.push(c);
                 dieG.push(g);
@@ -525,21 +687,19 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                 },
             });
             homeCenterTxt.anchor.set(0.5);
+            homeCenterTxt.eventMode = 'none';
             uiLayer.addChild(homeCenterTxt);
 
             // half-size text for the turn line and the AI chatter
             turnTxt = new Text({ text: '', style: { fontFamily: 'Arial, sans-serif', fontSize: 16, fontWeight: '800', fill: 0xffffff, stroke: { color: 0x000000, width: 3 } } });
             turnTxt.anchor.set(0.5);
+            turnTxt.eventMode = 'static';
+            turnTxt.cursor = 'pointer';
+            turnTxt.on('pointertap', () => triggerDieTap(0));
             turnTxt.position.set(diceCX[0] / 2 + diceCX[1] / 2, turnY);
             uiLayer.addChild(turnTxt);
             chatTxt.length = 0;
-            for (let i = 0; i < 2; i++) {
-                const t = new Text({ text: '', style: { fontFamily: 'Arial, sans-serif', fontSize: 13, fontWeight: '700', fill: 0xffffff, stroke: { color: 0x000000, width: 2 }, wordWrap: true, wordWrapWidth: colW - 20, align: 'center' } });
-                t.anchor.set(0.5, 0);
-                t.position.set(colX + colW / 2, chatY + i * 40);
-                uiLayer.addChild(t);
-                chatTxt.push(t);
-            }
+            // AI banter text lines removed from board per user instruction
             // Advertisement banner slot
             adC = new Container();
             adG = new Graphics();
@@ -548,6 +708,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                 style: { fontFamily: 'Arial, sans-serif', fontSize: 13, fontWeight: '900', fill: 0x111827 },
             });
             adTag.anchor.set(0.5);
+            adTag.eventMode = 'none';
             adTag.position.set(40, 28);
             adC.addChild(adG, adTag);
             adC.eventMode = 'static';
@@ -557,10 +718,16 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         }
 
         // On every layout, seamlessly reposition and redraw without destroying Text textures
+        if (diceTrayC) {
+            const trayW = Math.abs(diceCX[1] - diceCX[0]) + diceSize * 2.8;
+            const trayH = diceSize * 1.8;
+            diceTrayC.position.set((diceCX[0] + diceCX[1]) / 2, diceCY);
+            diceTrayC.hitArea = new Rectangle(-trayW / 2, -trayH / 2, trayW, trayH);
+        }
         for (let i = 0; i < 2; i++) {
             if (dieC[i]) {
                 dieC[i].position.set(diceCX[i], diceCY);
-                dieC[i].hitArea = new Circle(0, 0, diceSize * 0.85);
+                dieC[i].hitArea = new Circle(0, 0, diceSize * 1.35);
             }
         }
         if (turnTxt && !turnTxt.destroyed) {
@@ -591,15 +758,28 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
 
     function drawDice(now: number) {
         if (dead) return;
+        const isMyTurn = isOnline() ? multiplayerClient.myPlayerIndex === current : !isAI(current);
+        const rollingIdle = !!waitRoll && isMyTurn;
+
+        if (diceTrayG) {
+            const trayW = Math.abs(diceCX[1] - diceCX[0]) + diceSize * 2.8;
+            const trayH = diceSize * 1.8;
+            const trayBorder = rollingIdle ? COLORS[current] : 0x1e293b;
+            const trayAlpha = rollingIdle ? 0.75 + 0.25 * Math.sin(now / 180) : 0.25;
+            diceTrayG.clear()
+                .roundRect(-trayW / 2, -trayH / 2, trayW, trayH, 20)
+                .fill({ color: 0x070b1e, alpha: rollingIdle ? 0.75 : 0.45 })
+                .stroke({ width: rollingIdle ? 2.5 : 1, color: trayBorder, alpha: trayAlpha });
+        }
+
         for (let i = 0; i < 2; i++) {
             const used = diceUsed[i];
-            const rollingIdle = !!waitRoll && !isAI(current);
-            // "tap a die" nudge: both dice breathe so it is obvious they are buttons
-            const choosingDie = !!waitChoice && !used && !dieConfirmed;
-            const pulse = (rollingIdle || dieFlash > 0 ? 1 + 0.06 * Math.sin(now / 160) : 1) * (choosingDie ? 1 + 0.04 * Math.sin(now / 220) : 1);
+            const choosingDie = !!waitChoice && !used && !dieConfirmed && isMyTurn;
+            const pulse = (rollingIdle || dieFlash > 0 ? 1 + 0.08 * Math.sin(now / 160) : 1) * (choosingDie ? 1 + 0.04 * Math.sin(now / 220) : 1);
             const sel = !used && selDie === i && !!waitChoice;
+            const dimDice = !isMyTurn || (used && !waitRoll);
             if (dieG[i]) {
-                drawDie(dieG[i], diceSize, dice[i], diceColor, current === 2 ? 0x2a2a2a : 0xffffff, { dim: used && !waitRoll, glow: sel });
+                drawDie(dieG[i], diceSize, dice[i], diceColor, current === 2 ? 0x2a2a2a : 0xffffff, { dim: dimDice, glow: sel || rollingIdle });
             }
             if (dieC[i]?.scale) {
                 dieC[i].scale.set(pulse);
@@ -634,7 +814,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         return { x: cx, y: cy };
     }
     function syncHand() {
-        if (dead || (multiplayerClient.roomCode && multiplayerClient.myPlayerIndex !== current) || isAI(current) || winner >= 0) {
+        if (dead || (isOnline() && multiplayerClient.myPlayerIndex !== current) || isAI(current) || winner >= 0) {
             handTarget = null;
         } else if (waitRoll) {
             handTarget = dieCenter(0); // any die starts the roll
@@ -678,21 +858,26 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     }
     function refreshTurnText() {
         if (!turnTxt || turnTxt.destroyed) return;
-        if (multiplayerClient.roomCode) {
+        if (isOnline()) {
             const isMe = multiplayerClient.myPlayerIndex === current;
             if (isMe) {
                 turnTxt.text = waitRoll
-                    ? '🎯 Your Turn! Roll the dice'
+                    ? '🎯 Your Turn'
                     : '🎲 Pick a die & move your pawn';
                 turnTxt.style.fill = 0x22c55e;
             } else {
-                turnTxt.text = `${avatarOf(current)} ${nameOf(current)}'s turn`;
+                turnTxt.text = `⏳ Waiting for ${avatarOf(current)} ${nameOf(current)}...`;
                 turnTxt.style.fill = 0xfacc15;
             }
             return;
         }
-        turnTxt.text = statusText || `${avatarOf(current)} ${tr(lang, 'turn', { n: nameOf(current) })}`;
-        turnTxt.style.fill = statusText ? 0xffffff : mix(COLORS[current], 0xffffff, 0.25);
+        if (isAI(current)) {
+            turnTxt.text = `🤖 ${avatarOf(current)} ${nameOf(current)} is rolling...`;
+            turnTxt.style.fill = 0x93c5fd;
+            return;
+        }
+        turnTxt.text = statusText || (waitRoll ? `🎯 ${avatarOf(current)} ${nameOf(current)}` : `${avatarOf(current)} ${tr(lang, 'turn', { n: nameOf(current) })}`);
+        turnTxt.style.fill = statusText ? 0xffffff : (waitRoll ? 0x22c55e : mix(COLORS[current], 0xffffff, 0.25));
     }
 
     // ---------------------------------------------------------------- 3D-style rolling dice on the board
@@ -755,20 +940,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     let pumping = false;
 
     function updateChat() {
-        for (let i = 0; i < 2; i++) {
-            const idx = lines.length - 1 - i;
-            const t = chatTxt[1 - i];
-            if (!t || t.destroyed) continue;
-            if (idx < 0) {
-                t.text = '';
-                continue;
-            }
-            const l = lines[idx];
-            const age = clock - l.born;
-            t.text = `${avatarOf(l.idx)} ${nameOf(l.idx)}: ${l.text}`;
-            t.style.fill = mix(COLORS[l.idx], 0xffffff, 0.35);
-            t.alpha = age > 6500 ? Math.max(0, 1 - (age - 6500) / 1500) : 1;
-        }
+        return; // AI messages removed from board per user instruction
     }
 
     async function pump() {
@@ -786,10 +958,23 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     }
 
     function enqueue(item: ChatItem, front = false) {
+        item.text = banter.removeHahahaOnly(item.text);
+        if (item.alt) item.alt = banter.removeHahahaOnly(item.alt);
+        if (!item.text) return;
         if (queue.length > 5 && !front) return; // never flood
         if (front) queue.unshift(item);
         else queue.push(item);
         void pump();
+    }
+
+    // Equitable round-robin cycle across all AI players (Shahbaz, Mughal, Zoi, Kajal)
+    let aiRoundRobinIndex = 0;
+    function getNextRoundRobinAI(exclude: number = -1): number | null {
+        const aiPool = [0, 1, 2, 3].filter((q) => q !== exclude && active[q] && isAI(q));
+        if (!aiPool.length) return null;
+        const selected = aiPool[aiRoundRobinIndex % aiPool.length];
+        aiRoundRobinIndex = (aiRoundRobinIndex + 1) % aiPool.length;
+        return selected;
     }
 
     /** A computer player says something (if it's not a human seat). */
@@ -801,15 +986,15 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             enqueue({ idx, text: l.text, alt: l.alt, voice: true });
         }
     }
-    /** The computer player (other than `not`) who has been quiet the longest speaks, so every AI gets a voice. */
+
+    /** Banter and event speech triggers use an equitable round-robin cycle across all AI players. */
     function anyAI(cat: Cat, not: number, vars?: Record<string, string>, chance = 1) {
-        const pool = [0, 1, 2, 3].filter((q) => q !== not && active[q] && isAI(q));
-        if (!pool.length) return;
-        pool.sort((a, b) => lastSpoke[a] - lastSpoke[b]);
-        ai(cat, pool[0], vars, chance);
+        const nextAI = getNextRoundRobinAI(not);
+        if (nextAI === null) return;
+        ai(cat, nextAI, vars, chance);
     }
     const lastSpoke = [-1e9, -1e9, -1e9, -1e9];
-    /** After every turn, whichever AI has been silent longest chips in with a joke, threat or compliment. */
+    /** After every turn, the next AI in the round-robin cycle chips in with dialogue. */
     function chatterAfterTurn(actor: number) {
         const cats: Cat[] = ['joke', 'threat', 'praise', 'advice', 'laugh', 'yard', 'sore'];
         if (Math.random() < 0.6) anyAI(cats[Math.floor(Math.random() * cats.length)], actor, undefined, 1);
@@ -820,59 +1005,244 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         enqueue({ idx, text, voice: o?.voice !== false }, true);
     };
 
-    bus.onRemoteDiceRolled = (rp, rolledDice) => {
+    let pendingRemoteRoll: { p: number; dice: [number, number] } | null = null;
+    const pendingRemoteMoves: { p: number; dieIndex: number; tokenIndex: number; to: number; captures: { p: number; t: number }[]; reachedHome: boolean; passed?: boolean }[] = [];
+    const pendingLocalMoves: { dieIndex: number; tokenIndex: number }[] = [];
+    let latestRemoteTurn: number | null = null;
+    let latestRemoteExtraTurn = false;
+    let remoteTurnChangedPending = false;
+    let turnEpoch = 0;
+
+    function syncTokensFromServer() {
+        if (!multiplayerClient.roomState?.tokens) return;
+        for (let pl = 0; pl < 4; pl++) {
+            if (multiplayerClient.roomState.tokens[pl]) {
+                tokens[pl] = multiplayerClient.roomState.tokens[pl].slice();
+            }
+        }
+    }
+
+    function buildMoveFromServer(rp: number, dieIndex: number, tokenIndex: number, to: number, captures: { p: number; t: number }[], reachedHome: boolean, passed?: boolean): Move {
+        if (passed) {
+            return { tok: tokenIndex, die: dieIndex, value: dice[dieIndex] || 0, to: tokens[rp][tokenIndex], captures: [], fromBase: false, reachesHome: false, passed: true } as any;
+        }
+        return optionsNow.find((o) => o.die === dieIndex && o.tok === tokenIndex)
+            || legalMoves(tokens, rp, dice[dieIndex], dieIndex, active).find((o) => o.tok === tokenIndex)
+            || {
+                tok: tokenIndex,
+                to,
+                die: dieIndex,
+                value: dice[dieIndex] || 0,
+                captures: captures || [],
+                fromBase: tokens[rp][tokenIndex] === IN_BASE,
+                reachesHome: !!reachedHome,
+            };
+    }
+
+    bus.onRemoteDiceRolled = (rp, rolledDice, lucky, streakForfeited) => {
+        if (lucky) {
+            popup('lucky', 'LUCKY 7!', `${nameOf(rp)} rolled Lucky 7 (counts as 6+6)!`, 2500);
+            sfx.fanfare();
+        } else if (streakForfeited) {
+            popup('penalty', 'PENALTY', `${nameOf(rp)} rolled 3 consecutive double sixes! Turn forfeited.`, 2500);
+        }
+
+        // If current was desynced from active roller, abort stale turn cleanly and align to rp
         if (current !== rp) {
+            latestRemoteTurn = rp;
+            remoteTurnChangedPending = true;
+            bumpTurnEpoch();
+            if (waitRoll) {
+                const r = waitRoll;
+                waitRoll = null;
+                waitRollTarget = -1;
+                r(undefined);
+            }
+            if (waitChoice) {
+                const c = waitChoice;
+                waitChoice = null;
+                c(undefined as any);
+            }
             current = rp;
             diceColor = COLORS[rp];
             targetYaw = store.get().settings.rotate ? YAW_FOR[rp] : 0;
             publish();
         }
-        if (waitRoll) {
+
+        // Resolve waiter if it belongs to this player
+        if (waitRoll && (waitRollTarget === rp || waitRollTarget === -1 || current === rp)) {
             const r = waitRoll;
             waitRoll = null;
+            waitRollTarget = -1;
             r([rolledDice[0], rolledDice[1]]);
+        } else {
+            pendingRemoteRoll = { p: rp, dice: [rolledDice[0], rolledDice[1]] };
         }
         refreshTurnText();
         syncHand();
     };
 
-    bus.onRemotePawnMoved = (rp, dieIndex, tokenIndex) => {
-        if (current !== rp) {
+    bus.onRemotePawnMoved = (rp, dieIndex, tokenIndex, to, captures, reachedHome, passed) => {
+        // Echo filter: if this is our own local tap already applied optimistically, skip it!
+        // (If NOT in pendingLocalMoves, the server auto-played it on timeout — animate it normally.)
+        if (isOnline() && rp === multiplayerClient.myPlayerIndex) {
+            const locIdx = pendingLocalMoves.findIndex((pm) => pm.dieIndex === dieIndex && pm.tokenIndex === tokenIndex);
+            if (locIdx !== -1) {
+                pendingLocalMoves.splice(locIdx, 1);
+                return;
+            }
+        }
+
+        if (current !== rp && !remoteTurnChangedPending) {
             current = rp;
             diceColor = COLORS[rp];
             publish();
         }
-        if (waitChoice) {
-            const m = optionsNow.find((o) => o.die === dieIndex && o.tok === tokenIndex)
-                || legalMoves(tokens, rp, dice[dieIndex], dieIndex, active).find((o) => o.tok === tokenIndex);
-            if (m) {
+        if (rp === multiplayerClient.myPlayerIndex) {
+            bus.onGulDecision = undefined;
+            store.patch({ gulPrompt: null, captureNotice: null, skipCapturePrompt: null });
+        }
+        if (passed) {
+            diceUsed[dieIndex] = true;
+            popup('info', 'PASSED', `${nameOf(rp)} passed the Gul!`, 2000);
+            if (waitChoice && current === rp) {
                 const r = waitChoice;
                 waitChoice = null;
-                r(m);
+                r(buildMoveFromServer(rp, dieIndex, tokenIndex, to, captures, reachedHome, true));
+                return;
             }
+            pendingRemoteMoves.push({ p: rp, dieIndex, tokenIndex, to, captures, reachedHome, passed: true });
+            return;
         }
+        if (waitChoice && current === rp) {
+            const m = buildMoveFromServer(rp, dieIndex, tokenIndex, to, captures, reachedHome, false);
+            const r = waitChoice;
+            waitChoice = null;
+            r(m);
+            return;
+        }
+        pendingRemoteMoves.push({ p: rp, dieIndex, tokenIndex, to, captures, reachedHome, passed: false });
         refreshTurnText();
         syncHand();
     };
 
-    bus.onRemoteTurnChanged = (newTurn: number) => {
+    bus.onRemotePenaltyApplied = (rp: number, tokenIndex: number) => {
+        void penalize(rp, tokenIndex);
+    };
+
+    bus.onRemoteGameOver = (remoteWinner: number) => {
+        bumpTurnEpoch();
+        winner = remoteWinner;
+        bus.onGulDecision = undefined;
+        store.patch({ gulPrompt: null, captureNotice: null, skipCapturePrompt: null });
+        if (waitChoice) {
+            const c = waitChoice;
+            waitChoice = null;
+            c(undefined as any);
+        }
+        if (waitRoll) {
+            const r = waitRoll;
+            waitRoll = null;
+            waitRollTarget = -1;
+            r(undefined);
+        }
         if (turnChangeResolver) {
             const res = turnChangeResolver;
             turnChangeResolver = null;
+            res(remoteWinner);
+        }
+        finish();
+    };
+
+    bus.onRemoteTurnChanged = (newTurn: number, extraTurn?: boolean) => {
+        latestRemoteTurn = newTurn;
+        latestRemoteExtraTurn = !!extraTurn;
+        remoteTurnChangedPending = true;
+        bumpTurnEpoch();
+        pendingLocalMoves.length = 0;
+        // Purge pending remote moves that belonged to older turns
+        for (let i = pendingRemoteMoves.length - 1; i >= 0; i--) {
+            if (pendingRemoteMoves[i].p !== newTurn) {
+                pendingRemoteMoves.splice(i, 1);
+            }
+        }
+        clearHighlights();
+        bus.onGulDecision = undefined;
+        store.patch({ gulPrompt: null, captureNotice: null, skipCapturePrompt: null });
+
+        // Every turn_changed starts an unrolled turn (including extra turns for the same player)
+        pendingRemoteRoll = null;
+
+        // Resynchronize tokens with authoritative server state
+        syncTokensFromServer();
+
+        if (turnChangeResolver) {
+            const res = turnChangeResolver;
+            turnChangeResolver = null;
+            remoteTurnChangedPending = false;
             res(newTurn);
         }
-        if (current !== newTurn) {
-            current = newTurn;
-            diceColor = COLORS[newTurn];
-            targetYaw = store.get().settings.rotate ? YAW_FOR[newTurn] : 0;
-            publish();
+
+        // Always interrupt active waiters from previous turn even if current was pre-aligned
+        if (waitChoice) {
+            const c = waitChoice;
+            waitChoice = null;
+            c(undefined as any);
+        }
+        if (waitRoll) {
+            const r = waitRoll;
+            waitRoll = null;
+            waitRollTarget = -1;
+            r(undefined as any);
+        }
+        current = newTurn;
+        diceColor = COLORS[newTurn];
+        targetYaw = store.get().settings.rotate ? YAW_FOR[newTurn] : 0;
+        publish();
+        refreshTurnText();
+        syncHand();
+    };
+
+    bus.onRoomStateSynced = (state: any) => {
+        if (!state || state.phase !== 'playing') return;
+        latestRemoteTurn = state.currentTurn;
+        latestRemoteExtraTurn = false;
+        remoteTurnChangedPending = true;
+        bumpTurnEpoch();
+        pendingLocalMoves.length = 0;
+        pendingRemoteMoves.length = 0;
+        clearHighlights();
+        bus.onGulDecision = undefined;
+        store.patch({ gulPrompt: null, captureNotice: null, skipCapturePrompt: null });
+
+        syncTokensFromServer();
+        if (state.dice && state.currentTurn !== undefined) {
+            pendingRemoteRoll = { p: state.currentTurn, dice: [state.dice[0], state.dice[1]] };
+        } else {
+            pendingRemoteRoll = null;
+        }
+
+        if (turnChangeResolver) {
+            const res = turnChangeResolver;
+            turnChangeResolver = null;
+            remoteTurnChangedPending = false;
+            res(state.currentTurn);
         }
         if (waitChoice) {
             const c = waitChoice;
             waitChoice = null;
-            c(optionsNow[0]);
+            c(undefined as any);
         }
-        waitRoll = null;
+        if (waitRoll) {
+            const r = waitRoll;
+            waitRoll = null;
+            waitRollTarget = -1;
+            r(undefined);
+        }
+        current = state.currentTurn;
+        diceColor = COLORS[current];
+        targetYaw = store.get().settings.rotate ? YAW_FOR[current] : 0;
+        publish();
         refreshTurnText();
         syncHand();
     };
@@ -881,20 +1251,69 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     // Humans can tap either a die first OR tap a movable token directly.
     // If a token is tapped directly, the game smart-matches the appropriate die instantly!
     function onDieTap(i: number) {
-        if (multiplayerClient.roomCode) {
-            if (multiplayerClient.myPlayerIndex !== current) {
+        if (isOnline()) {
+            const myIdx = multiplayerClient.myPlayerIndex;
+            const serverTurn = multiplayerClient.roomState?.currentTurn;
+            // If server says it is my turn, synchronize current immediately so clicks are never locked out
+            if (myIdx !== null && serverTurn === myIdx && current !== myIdx) {
+                current = myIdx;
+                diceColor = COLORS[myIdx];
+                publish();
+                refreshTurnText();
+            }
+
+            if (myIdx !== current) {
                 // Strict turn locking: ignore taps on non-active screens
                 return;
             }
             if (waitRoll) {
+                const rollEpoch = turnEpoch;
+                const currentWaitRoll = waitRoll;
+                let rollResolved = false;
+                const resolveInFlight = (val?: [number, number]) => {
+                    if (rollResolved) return;
+                    rollResolved = true;
+                    turnAbortCallbacks.delete(abortRoll);
+                    currentWaitRoll(val);
+                };
+                const abortRoll = () => resolveInFlight(undefined);
+                turnAbortCallbacks.add(abortRoll);
+                waitRoll = null;
                 sfx.tap();
                 void multiplayerClient.rollDice().then((res) => {
-                    if (res && !res.ok) {
-                        console.warn('Roll dice rejected by server:', res.error);
-                        if (multiplayerClient.roomState && multiplayerClient.roomState.currentTurn !== current) {
+                    if (dead || turnEpoch !== rollEpoch) {
+                        resolveInFlight(undefined);
+                        return;
+                    }
+                    if (res?.ok && res.dice) {
+                        if (pendingRemoteRoll?.p === myIdx) pendingRemoteRoll = null;
+                        syncWish();
+                        resolveInFlight(res.dice);
+                    } else if (pendingRemoteRoll?.p === myIdx) {
+                        const d = pendingRemoteRoll.dice;
+                        pendingRemoteRoll = null;
+                        syncWish();
+                        resolveInFlight(d);
+                    } else if (multiplayerClient.roomState?.currentTurn === myIdx && multiplayerClient.roomState?.dice) {
+                        pendingRemoteRoll = null;
+                        syncWish();
+                        resolveInFlight(multiplayerClient.roomState.dice);
+                    } else {
+                        turnAbortCallbacks.delete(abortRoll);
+                        // Restore waitRoll if still our turn and no dice rolled yet
+                        if (multiplayerClient.roomState && multiplayerClient.roomState.currentTurn !== myIdx) {
                             current = multiplayerClient.roomState.currentTurn;
+                            diceColor = COLORS[current];
                             publish();
                             refreshTurnText();
+                            resolveInFlight(undefined);
+                        } else if (!rollResolved) {
+                            waitRoll = currentWaitRoll;
+                            syncWish();
+                        }
+                        if (res && !res.ok) {
+                            console.warn('Roll dice rejected by server:', res.error);
+                            void multiplayerClient.syncState();
                         }
                     }
                 });
@@ -905,10 +1324,11 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             sfx.tap();
             const r = waitRoll;
             waitRoll = null;
+            syncWish();
             r();
             return;
         }
-        if (waitChoice && !diceUsed[i] && (!multiplayerClient.roomCode ? !isAI(current) : multiplayerClient.myPlayerIndex === current)) {
+        if (waitChoice && !diceUsed[i] && (!isOnline() ? !isAI(current) : multiplayerClient.myPlayerIndex === current)) {
             if (!optionsNow.some((m) => m.die === i)) return;
             sfx.tap();
             selDie = i;
@@ -920,11 +1340,20 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     }
     function onTokenTap(v: TokView) {
         if (!waitChoice) return;
-        if (multiplayerClient.roomCode && multiplayerClient.myPlayerIndex !== current) {
-            // Strict turn locking
-            return;
+        if (isOnline()) {
+            const myIdx = multiplayerClient.myPlayerIndex;
+            const serverTurn = multiplayerClient.roomState?.currentTurn;
+            if (myIdx !== null && serverTurn === myIdx && current !== myIdx) {
+                current = myIdx;
+                diceColor = COLORS[myIdx];
+                publish();
+                refreshTurnText();
+            }
+            if (myIdx !== current || v.p !== myIdx) {
+                return;
+            }
         }
-        if (!multiplayerClient.roomCode && isAI(current)) return;
+        if (!isOnline() && isAI(current)) return;
         if (v.p !== current) return;
 
         // Smart die resolution:
@@ -947,19 +1376,77 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         dieConfirmed = true;
         sfx.tap();
 
-        if (multiplayerClient.roomCode) {
-            // Send move to server in background
-            void multiplayerClient.movePawn(m.die, v.t);
+        const proceedWithMove = () => {
+            if (m.reachesHome) {
+            store.patch({
+                gulPrompt: {
+                    p: current,
+                    tokenIndex: v.t,
+                    dieIndex: m.die,
+                    value: m.value,
+                },
+            });
+            bus.onGulDecision = (decision: 'gul' | 'pass') => {
+                bus.onGulDecision = undefined;
+                if (decision === 'gul') {
+                    dieConfirmed = true;
+                    sfx.tap();
+                    if (isOnline()) {
+                        pendingLocalMoves.push({ dieIndex: m.die, tokenIndex: v.t });
+                        void multiplayerClient.movePawn(m.die, v.t, 'gul').then((res) => {
+                            if (res && !res.ok && !dead) void multiplayerClient.syncState();
+                        });
+                    }
+                    const r = waitChoice;
+                    waitChoice = null;
+                    if (r) r(m);
+                } else {
+                    dieConfirmed = true;
+                    sfx.tap();
+                    if (isOnline()) {
+                        pendingLocalMoves.push({ dieIndex: m.die, tokenIndex: v.t });
+                        void multiplayerClient.movePawn(m.die, v.t, 'pass').then((res) => {
+                            if (res && !res.ok && !dead) {
+                                const idx = pendingLocalMoves.findIndex((pm) => pm.dieIndex === m.die && pm.tokenIndex === v.t);
+                                if (idx !== -1) pendingLocalMoves.splice(idx, 1);
+                                void multiplayerClient.syncState();
+                            }
+                        });
+                    }
+                    diceUsed[m.die] = true;
+                    clearHighlights();
+                    popup('info', 'PASSED', `${nameOf(current)} passed the Gul!`, 2000);
+                    const r = waitChoice;
+                    waitChoice = null;
+                    if (r) r({ ...m, reachesHome: false, to: tokens[current][v.t], passed: true } as any);
+                }
+            };
+            return;
+        }
+
+        if (isOnline()) {
+            // Track local move so server echo does not double-move or consume next die
+            pendingLocalMoves.push({ dieIndex: m.die, tokenIndex: v.t });
+            void multiplayerClient.movePawn(m.die, v.t).then((res) => {
+                if (res && !res.ok && !dead) {
+                    const idx = pendingLocalMoves.findIndex((pm) => pm.dieIndex === m.die && pm.tokenIndex === v.t);
+                    if (idx !== -1) pendingLocalMoves.splice(idx, 1);
+                    void multiplayerClient.syncState();
+                }
+            });
             // Execute move locally immediately for zero-latency instant response!
             const r = waitChoice;
             waitChoice = null;
-            r(m);
+            if (r) r(m);
             return;
         }
 
         const r = waitChoice;
         waitChoice = null;
-        r(m);
+        if (r) r(m);
+    };
+
+        proceedWithMove();
     }
     function flashDies() {
         dieFlash = 900;
@@ -969,6 +1456,53 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         if (!waitRoll || isAI(current)) return;
         const w = cfgs[current]?.wish;
         if (!w || wishUsed[current]) return;
+        if (isOnline()) {
+            const myIdx = multiplayerClient.myPlayerIndex;
+            if (myIdx !== current) return;
+            const wishEpoch = turnEpoch;
+            wishUsed[current] = true;
+            const currentWaitRoll = waitRoll;
+            let wishResolved = false;
+            const resolveWish = (val?: [number, number]) => {
+                if (wishResolved) return;
+                wishResolved = true;
+                turnAbortCallbacks.delete(abortWish);
+                currentWaitRoll(val);
+            };
+            const abortWish = () => resolveWish(undefined);
+            turnAbortCallbacks.add(abortWish);
+            waitRoll = null;
+            syncWish();
+            sfx.tap();
+            void multiplayerClient.rollDice(true).then((res) => {
+                if (dead || turnEpoch !== wishEpoch) {
+                    resolveWish(undefined);
+                    return;
+                }
+                if (res?.ok && res.dice) {
+                    if (pendingRemoteRoll?.p === myIdx) pendingRemoteRoll = null;
+                    syncWish();
+                    resolveWish(res.dice);
+                } else if (pendingRemoteRoll?.p === myIdx) {
+                    const d = pendingRemoteRoll.dice;
+                    pendingRemoteRoll = null;
+                    syncWish();
+                    resolveWish(d);
+                } else if (multiplayerClient.roomState?.currentTurn === myIdx && multiplayerClient.roomState?.dice) {
+                    pendingRemoteRoll = null;
+                    syncWish();
+                    resolveWish(multiplayerClient.roomState.dice);
+                } else {
+                    turnAbortCallbacks.delete(abortWish);
+                    wishUsed[current] = false;
+                    if (!wishResolved) {
+                        waitRoll = currentWaitRoll;
+                        syncWish();
+                    }
+                }
+            });
+            return;
+        }
         wishUsed[current] = true;
         const r = waitRoll;
         waitRoll = null;
@@ -978,10 +1512,18 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     function syncWish() {
         const w = cfgs[current]?.wish || null;
         const usable = !!w && !isAI(current) && !wishUsed[current];
-        store.patch({ wishNums: usable ? w : null, wishUsable: usable && !!waitRoll });
+        store.patch({
+            wishNums: usable ? w : null,
+            wishUsable: usable && !!waitRoll,
+            isWaitingRoll: !!waitRoll && (isOnline() ? multiplayerClient.myPlayerIndex === current : !isAI(current)),
+        });
     }
 
     function refreshHighlights() {
+        if (isOnline() && multiplayerClient.myPlayerIndex !== current) {
+            clearHighlights();
+            return;
+        }
         const mine = optionsNow.filter((m) => m.die === selDie);
         for (const v of views[current]) v.movable = mine.some((m) => m.tok === v.t);
     }
@@ -999,7 +1541,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     }
 
     // ---------------------------------------------------------------- the game flow
-    async function rollDice(p: number, forced?: [number, number]): Promise<{ a: number; b: number; lucky: boolean }> {
+    async function rollDice(p: number, forced?: [number, number], expectedEpoch?: number): Promise<{ a: number; b: number; lucky: boolean }> {
         let a = forced ? forced[0] : randDie();
         let b = forced ? forced[1] : randDie();
         const lucky = luckySevenAllowed(tokens, p) && isLuckySum(a, b) && !(a === 6 && b === 6);
@@ -1008,11 +1550,17 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         diceColor = COLORS[p];
         startFly(p, a, b, dur);
         sfx.diceRoll(dur);
-        await delay(dur + 150);
+        await delay(dur + 150, expectedEpoch !== undefined);
+        if (expectedEpoch !== undefined && isOnline() && turnEpoch !== expectedEpoch) {
+            return { a, b, lucky };
+        }
         dice = [a, b];
         diceUsed = [false, false];
         if (lucky) {
-            await delay(700);
+            await delay(700, expectedEpoch !== undefined);
+            if (expectedEpoch !== undefined && isOnline() && turnEpoch !== expectedEpoch) {
+                return { a, b, lucky };
+            }
             a = 6;
             b = 6;
             dice = [6, 6];
@@ -1020,7 +1568,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             popup('lucky', tr(lang, 'luckyT'), tr(lang, 'luckyS'), 3600);
             void sfx.speak({ text: tr(lang, 'sayLucky'), lang, player: p, cancelCurrent: true });
             anyAI('lucky', p, undefined, 0.8);
-            await delay(2800);
+            await delay(2800, expectedEpoch !== undefined);
         }
         return { a, b, lucky };
     }
@@ -1048,7 +1596,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         return taken < atStart;
     }
 
-    async function moveToken(p: number, m: Move) {
+    async function moveToken(p: number, m: Move, expectedEpoch?: number) {
         const v = views[p][m.tok];
         const from = tokens[p][m.tok];
         const pts: [number, number][] = [boardPos(p, from, m.tok)];
@@ -1057,8 +1605,11 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         const stepMs = 280;
         sfx.carMove(Math.min(2600, (pts.length - 1) * stepMs));
         // the token keeps its old logical position until the hop ends
-        await tween(v, pts, stepMs, 0.55);
-        tokens[p][m.tok] = m.to;
+        await tween(v, pts, stepMs, 0.55, expectedEpoch);
+        // Never overwrite authoritative synced state if turn already changed mid-animation
+        if (expectedEpoch === undefined || !isOnline() || turnEpoch === expectedEpoch) {
+            tokens[p][m.tok] = m.to;
+        }
     }
 
     async function sendHome(p: number, t: number, ms: number) {
@@ -1069,9 +1620,12 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         tokens[p][t] = IN_BASE;
     }
 
-    async function applyMove(p: number, m: Move): Promise<{ captured: boolean; home: boolean }> {
+    async function applyMove(p: number, m: Move, expectedEpoch?: number): Promise<{ captured: boolean; home: boolean }> {
         clearHighlights();
-        await moveToken(p, m);
+        await moveToken(p, m, expectedEpoch);
+        if (expectedEpoch !== undefined && isOnline() && turnEpoch !== expectedEpoch) {
+            return { captured: false, home: false };
+        }
         let captured = false;
         for (const c of m.captures) {
             // re-check: the victim is still on that square after landing
@@ -1083,40 +1637,59 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             ai('victim', victim, undefined, 0.9);
             anyAI('laugh', p, undefined, 0.5);
         }
-        if (captured) await delay(1400);
+        if (captured) await delay(1400, expectedEpoch !== undefined);
+        if (expectedEpoch !== undefined && isOnline() && turnEpoch !== expectedEpoch) {
+            return { captured, home: m.reachesHome };
+        }
         if (m.fromBase) ai('leave', p, undefined, 0.35);
         if (m.reachesHome) ai('home', p, undefined, 0.7);
         publish();
         return { captured, home: m.reachesHome };
     }
 
+    let isPenalizing = false;
     async function penalize(p: number, t: number) {
-        const v = views[p][t];
-        const name = nameOf(p);
-        v.flash = 1500;
-        sfx.buzzer();
-        // voice first, while the token flashes on the board
-        void sfx.speak({ text: tr(lang, 'sayPen', { n: name }), lang, player: p, slow: true, cancelCurrent: true });
-        await delay(1500);
-        v.flash = 0;
-        await sendHome(p, t, 2000);
-        popup('penalty', tr(lang, 'penT'), tr(lang, 'penS', { n: name }), 3800);
-        if (turnTxt && !turnTxt.destroyed) {
-            turnTxt.text = `⚠️ PENALTY: ${name} missed a capture! Pawn sent back to base!`;
+        if (isPenalizing) return;
+        isPenalizing = true;
+        try {
+            const v = views[p]?.[t];
+            const name = nameOf(p);
+            if (v) v.flash = 500;
+            sfx.buzzer();
+            popup('penalty', tr(lang, 'penT'), tr(lang, 'penS', { n: name }), 2500);
+            if (turnTxt && !turnTxt.destroyed) {
+                turnTxt.text = `⚠️ PENALTY: ${name} missed a capture! Pawn sent back to base!`;
+            }
+            if (v && tokens[p][t] !== IN_BASE) {
+                await sendHome(p, t, 600);
+            }
+            if (v) v.flash = 0;
+            tokens[p][t] = IN_BASE;
+            publish();
+            anyAI('laughAt', p, { n: name }, 0.8);
+            ai('excuse', p, undefined, 0.5);
+            await delay(250);
+        } finally {
+            isPenalizing = false;
         }
-        publish();
-        anyAI('laughAt', p, { n: name }, 1);
-        ai('excuse', p, undefined, 0.7);
-        await delay(1200);
     }
 
     async function takeTurn(p: number): Promise<boolean> {
+        const myTurnEpoch = turnEpoch;
+        const turnAborted = () => dead || winner >= 0 || (isOnline() && turnEpoch !== myTurnEpoch);
+
         // camera: bring this colour to the bottom-left
         targetYaw = store.get().settings.rotate ? YAW_FOR[p] : 0;
         diceColor = COLORS[p];
         current = p;
         diceUsed = [true, true];
         setStatus('');
+        clearHighlights();
+        bus.onGulDecision = undefined;
+        store.patch({ gulPrompt: null, captureNotice: null, skipCapturePrompt: null });
+        if (isOnline() && !pendingRemoteMoves.some((m) => m.p === p)) {
+            syncTokensFromServer();
+        }
         publish();
         syncWish();
 
@@ -1125,7 +1698,10 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         const timerSec = settings.timerSec || 90;
         let turnTimerInterval: any = null;
 
-        if (timerEnabled) {
+        if (isOnline()) {
+            // Online multiplayer: timer is authoritative from server & multiplayerClient
+            turnTimerInterval = null;
+        } else if (timerEnabled) {
             const turnDeadline = Date.now() + timerSec * 1000;
             store.patch({
                 turnSecondsLeft: timerSec,
@@ -1143,16 +1719,20 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                     sfx.tick();
                 }
                 if (left <= 0) {
-                    // Time's up! Auto roll or auto move for human
+                    // Offline / singleplayer auto-roll or auto-move
                     if (waitRoll) {
                         const r = waitRoll;
                         waitRoll = null;
                         sfx.tick();
                         r();
                     } else if (waitChoice && optionsNow.length > 0) {
+                        bus.onGulDecision = undefined;
+                        store.patch({ gulPrompt: null });
                         const r = waitChoice;
                         waitChoice = null;
-                        const autoMove = pickMove(tokens, p, optionsNow, active);
+                        const caps = optionsNow.filter((m) => m.captures.length > 0);
+                        const pool = caps.length > 0 ? caps : optionsNow;
+                        const autoMove = pickMove(tokens, p, pool, active);
                         sfx.tick();
                         r(autoMove);
                     }
@@ -1167,77 +1747,109 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         }
 
         try {
-            await delay(900);
+            if (!isOnline()) {
+                await delay(600);
+            }
+            if (turnAborted()) return false;
 
             // --- roll
             let forced: [number, number] | undefined;
-            if (multiplayerClient.roomCode && multiplayerClient.myPlayerIndex !== p) {
-                // Remote player's turn: wait for socket dice roll event
-                forced = await new Promise<[number, number]>((res) => {
-                    waitRoll = (f) => res(f || [1, 1]);
-                });
+            let initialDiceUsedFromServer: [boolean, boolean] | null = null;
+            if (isOnline()) {
+                if (multiplayerClient.roomState?.currentTurn === p && multiplayerClient.roomState?.dice) {
+                    forced = multiplayerClient.roomState.dice;
+                    if (multiplayerClient.roomState.diceUsed) {
+                        initialDiceUsedFromServer = [
+                            !!multiplayerClient.roomState.diceUsed[0],
+                            !!multiplayerClient.roomState.diceUsed[1],
+                        ];
+                    }
+                } else if (pendingRemoteRoll && pendingRemoteRoll.p === p) {
+                    forced = pendingRemoteRoll.dice;
+                    pendingRemoteRoll = null;
+                } else if (multiplayerClient.myPlayerIndex !== p) {
+                    // Remote player or Bot turn: wait for server dice_rolled or turn change
+                    forced = await new Promise<[number, number] | undefined>((res) => {
+                        waitRollTarget = p;
+                        waitRoll = (f) => res(f);
+                    });
+                } else {
+                    // Local human turn in online mode: wait for tap OR server auto-roll on timeout
+                    forced = await new Promise<[number, number] | undefined>((res) => {
+                        waitRollTarget = p;
+                        waitRoll = (f) => res(f);
+                        syncWish();
+                    });
+                }
+                if (!forced || turnAborted()) {
+                    return false;
+                }
             } else if (isAI(p)) {
                 await delay(1200);
-                if (Math.random() < 0.18) anyAI('joke', p, undefined, 0.5);
             } else {
                 forced = await new Promise<[number, number] | undefined>((res) => {
+                    waitRollTarget = p;
                     waitRoll = (f) => res(f);
                     syncWish();
                 });
             }
+            if (turnAborted()) return false;
             syncWish();
-            const roll = await rollDice(p, forced);
+            const roll = await rollDice(p, forced, myTurnEpoch);
+            if (turnAborted()) return false;
+            if (initialDiceUsedFromServer) {
+                diceUsed = initialDiceUsedFromServer;
+            }
             const double6 = roll.a === 6 && roll.b === 6;
             if (double6) {
                 sixStreak[p]++;
                 if (!roll.lucky) ai('sixes', p, undefined, 0.7);
             } else sixStreak[p] = 0;
-            if (roll.a === 1 && roll.b === 1) anyAI('ones', p, undefined, 0.8);
-            // No limit on consecutive double sixes: every double 6 earns another turn.
+            // Double 6 awards an extra turn unconditionally every time
             let extra = double6;
 
             // --- use each die
             // Capture obligation: the player must take EVERY capture this roll allows
             // (one per die, since each die is spent on its own move). The opening
             // promise is measured once; the moves are then counted against it.
+            const initialTurnTokens = tokens.map((r) => r.slice());
             const capturePromise = maxCaptures(tokens, p, dice, active).taken;
+            turnCapturePromise = capturePromise;
+            turnCapturesTaken = 0;
             let capturesTaken = 0;
             for (let guard = 0; guard < 4 && (!diceUsed[0] || !diceUsed[1]); guard++) {
+                if (turnAborted()) break;
                 optionsNow = movesFor(p);
                 if (!optionsNow.length) {
+                    store.patch({ captureNotice: null });
                     setStatus(tr(lang, 'noMoves'));
-                    await delay(1100);
+                    await delay(1100, isOnline());
                     setStatus('');
                     break;
                 }
-                if (multiplayerClient.roomCode && multiplayerClient.myPlayerIndex !== p) {
-                    // Remote player's turn: wait for socket pawn move event
-                    const chosen = await new Promise<Move>((res) => {
-                        waitChoice = res;
+
+                if (!isAI(p) && optionsNow.some((opt) => opt.captures.length > 0)) {
+                    store.patch({
+                        captureNotice: "Capture available! You must take it, or the token that could have captured goes back to base.",
                     });
-                    setStatus('');
-                    diceUsed[chosen.die] = true;
-                    capturesTaken += chosen.captures.length;
-                    const res = await applyMove(p, chosen);
-                    if (res.captured || res.home) extra = true;
-                    if (hasWon(tokens, p)) {
-                        winner = p;
-                        return false;
-                    }
-                    optionsNow = [];
-                    continue;
+                } else {
+                    store.patch({ captureNotice: null });
                 }
-                if (isAI(p)) {
-                    // the AI takes every capture it can, including the second of a pair
-                    const caps = optionsNow.filter((m) => m.captures.length);
-                    const pool = caps.length ? caps : optionsNow;
-                    const chosen = pickMove(tokens, p, pool, active);
-                    selDie = chosen.die;
-                    refreshHighlights();
-                    await delay(900);
-                    diceUsed[chosen.die] = true;
-                    capturesTaken += chosen.captures.length;
-                    const res = await applyMove(p, chosen);
+
+                // In online mode, consume any server-received move first (covers remote turns AND timeout auto-play on local seat!)
+                const pmIdx = isOnline() ? pendingRemoteMoves.findIndex((item) => item.p === p) : -1;
+                if (pmIdx !== -1) {
+                    const pm = pendingRemoteMoves.splice(pmIdx, 1)[0];
+                    setStatus('');
+                    diceUsed[pm.dieIndex] = true;
+                    if (pm.passed) {
+                        optionsNow = [];
+                        continue;
+                    }
+                    const preChosen = buildMoveFromServer(p, pm.dieIndex, pm.tokenIndex, pm.to, pm.captures, pm.reachedHome, false);
+                    capturesTaken += preChosen.captures.length;
+                    const res = await applyMove(p, preChosen, myTurnEpoch);
+                    if (turnAborted()) break;
                     if (res.captured || res.home) extra = true;
                     if (hasWon(tokens, p)) {
                         winner = p;
@@ -1247,19 +1859,84 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                     continue;
                 }
 
+                if (isOnline() && multiplayerClient.myPlayerIndex !== p) {
+                    if (turnAborted()) break;
+                    // Remote player or Bot turn: wait for socket pawn move event
+                    const chosen = await new Promise<Move | undefined>((res) => {
+                        waitChoice = (m) => res(m);
+                    });
+                    if (!chosen || turnAborted()) {
+                        break;
+                    }
+                    setStatus('');
+                    diceUsed[chosen.die] = true;
+                    if ((chosen as any).passed) {
+                        optionsNow = [];
+                        continue;
+                    }
+                    capturesTaken += chosen.captures.length;
+                    const res = await applyMove(p, chosen, myTurnEpoch);
+                    if (turnAborted()) break;
+                    if (res.captured || res.home) extra = true;
+                    if (hasWon(tokens, p)) {
+                        winner = p;
+                        return false;
+                    }
+                    optionsNow = [];
+                    continue;
+                }
+                if (!isOnline() && isAI(p)) {
+                    // the AI takes every capture it can, including 2-die combined captures
+                    const caps = optionsNow.filter((m) => m.captures.length);
+                    let pool = caps.length ? caps : optionsNow;
+                    if (caps.length === 0 && !diceUsed[0] && !diceUsed[1]) {
+                        const comboSetup = optionsNow.filter((m1) => {
+                            const sim = tokens.map((row) => row.slice());
+                            sim[p][m1.tok] = m1.to;
+                            const otherDie = m1.die === 0 ? 1 : 0;
+                            return legalMoves(sim, p, dice[otherDie], otherDie, active).some((m2) => m2.captures.length > 0);
+                        });
+                        if (comboSetup.length > 0) pool = comboSetup;
+                    }
+                    const chosen = pickMove(tokens, p, pool, active);
+                    selDie = chosen.die;
+                    refreshHighlights();
+                    await delay(900);
+                    diceUsed[chosen.die] = true;
+                    capturesTaken += chosen.captures.length;
+                    const res = await applyMove(p, chosen, myTurnEpoch);
+                    if (res.captured || res.home) extra = true;
+                    if (hasWon(tokens, p)) {
+                        winner = p;
+                        return false;
+                    }
+                    optionsNow = [];
+                    continue;
+                }
+
+                if (turnAborted()) break;
                 // --- human: tap a die to choose it, then tap a token to move it
                 setStatus(tr(lang, 'pickDie'));
                 const usableDies = [0, 1].filter((i) => !diceUsed[i] && optionsNow.some((m) => m.die === i));
                 if (!usableDies.includes(selDie)) selDie = usableDies[0];
                 refreshHighlights();
                 if (Math.random() < 0.25) anyAI('advice', p, undefined, 0.5);
-                const chosen = await new Promise<Move>((res) => {
-                    waitChoice = res;
+                const chosen = await new Promise<Move | undefined>((res) => {
+                    waitChoice = res as any;
                 });
+                if (!chosen || turnAborted()) {
+                    optionsNow = [];
+                    break;
+                }
                 setStatus('');
                 diceUsed[chosen.die] = true;
+                if ((chosen as any).passed) {
+                    optionsNow = [];
+                    continue;
+                }
                 capturesTaken += chosen.captures.length;
-                const res = await applyMove(p, chosen);
+                const res = await applyMove(p, chosen, myTurnEpoch);
+                if (turnAborted()) break;
                 if (res.captured || res.home) extra = true;
                 if (hasWon(tokens, p)) {
                     winner = p;
@@ -1267,18 +1944,30 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                 }
                 optionsNow = [];
             }
+            store.patch({ captureNotice: null, skipCapturePrompt: null });
             // Settle up: any capture the roll promised and the player did not take.
-            if (captureDebt(capturePromise, capturesTaken)) {
-                const victims = maxCaptures(tokens, p, dice, active).victims;
-                const victim = victims.find((v) => tokens[v.p][v.t] >= 0 && tokens[v.p][v.t] <= LAST_TRACK);
-                if (victim) await penalize(p, victim.t);
+            // In online multiplayer, server is authoritative and broadcasts penalty_applied
+            if (!isOnline() && captureDebt(capturePromise, capturesTaken)) {
+                const offendingTok = findOffendingToken(initialTurnTokens, tokens, p, dice, active);
+                if (offendingTok !== null) {
+                    await penalize(p, offendingTok);
+                    extra = false;
+                }
             }
             diceUsed = [true, true];
             clearHighlights();
             return extra;
         } finally {
-            clearInterval(turnTimerInterval);
-            store.patch({ timerActive: false });
+            if (turnTimerInterval) {
+                clearInterval(turnTimerInterval);
+            }
+            bus.onGulDecision = undefined;
+            bus.onSkipCaptureDecision = undefined;
+            if (!isOnline()) {
+                store.patch({ timerActive: false, gulPrompt: null, captureNotice: null, skipCapturePrompt: null });
+            } else {
+                store.patch({ gulPrompt: null, captureNotice: null, skipCapturePrompt: null });
+            }
         }
     }
 
@@ -1303,29 +1992,45 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         while (!dead && winner < 0) {
             const extra = await takeTurn(p);
             if (dead) return;
-            if (winner >= 0) break;
-            chatterAfterTurn(p);
-            const leader = [0, 1, 2, 3].filter((q) => active[q]).sort((a, b) => percent(tokens, b) - percent(tokens, a))[0];
-            if (Math.random() < 0.22 && leader !== undefined) {
-                anyAI('leader', leader, undefined, 0.6);
-                if (Math.random() < 0.4) anyAI('truce', leader, undefined, 0.5);
+            if (!isOnline()) {
+                chatterAfterTurn(p);
+                const leader = [0, 1, 2, 3].filter((q) => active[q]).sort((a, b) => percent(tokens, b) - percent(tokens, a))[0];
+                if (Math.random() < 0.22 && leader !== undefined) {
+                    anyAI('leader', leader, undefined, 0.6);
+                    if (Math.random() < 0.4) anyAI('truce', leader, undefined, 0.5);
+                }
             }
-            if (multiplayerClient.roomCode) {
-                // Wait for the server's authoritative turn transition so host and guest remain 100% in lockstep
-                if (multiplayerClient.roomState && multiplayerClient.roomState.currentTurn !== p) {
-                    p = multiplayerClient.roomState.currentTurn;
+            if (isOnline()) {
+                // In online multiplayer, server is authoritative on turn order and extra turns.
+                // If turn_changed already arrived while we were animating/resolving, consume it immediately:
+                if (remoteTurnChangedPending && latestRemoteTurn !== null) {
+                    p = latestRemoteTurn;
+                    remoteTurnChangedPending = false;
+                    latestRemoteTurn = null;
+                } else if (latestRemoteTurn !== null) {
+                    p = latestRemoteTurn;
+                    latestRemoteTurn = null;
                 } else {
+                    // Wait for server's authoritative turn_changed event
                     p = await new Promise<number>((res) => {
-                        const fallbackTimer = setTimeout(() => {
-                            if (turnChangeResolver === res) {
-                                turnChangeResolver = null;
-                                res(multiplayerClient.roomState?.currentTurn ?? nextActive(p));
-                            }
-                        }, 2400);
-                        turnChangeResolver = (newTurn) => {
+                        let settled = false;
+                        const finishWait = (newTurn: number) => {
+                            if (settled) return;
+                            settled = true;
                             clearTimeout(fallbackTimer);
+                            turnChangeResolver = null;
                             res(newTurn);
                         };
+                        const fallbackTimer = setTimeout(() => {
+                            if (settled) return;
+                            void multiplayerClient.syncState().then(() => {
+                                // onRoomStateSynced usually resolves turnChangeResolver; only fallback if still unsettled
+                                if (!settled) {
+                                    finishWait(multiplayerClient.roomState?.currentTurn ?? (extra ? p : nextActive(p)));
+                                }
+                            });
+                        }, 3500);
+                        turnChangeResolver = finishWait;
                     });
                 }
             } else {
@@ -1392,6 +2097,16 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     const unsubStore = store.subscribe(() => {
         bgFill.clear().rect(-60, -60, stage.designWidth() + 120, stage.designHeight() + 120).fill(BG_BASE[store.get().settings.bg]);
     });
+    const onVisibilityChange = () => {
+        if (dead) return;
+        if (!document.hidden && isOnline()) {
+            void multiplayerClient.syncState();
+        }
+    };
+    if (typeof document !== 'undefined') {
+        document.addEventListener('visibilitychange', onVisibilityChange);
+    }
+
     app.ticker.add(tick);
     store.patch({ result: null, popup: null, active: active.slice() });
     void run();
@@ -1399,14 +2114,24 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     return {
         destroy() {
             dead = true;
+            if (typeof document !== 'undefined') {
+                document.removeEventListener('visibilitychange', onVisibilityChange);
+            }
             offResize();
             unsubStore();
             app.ticker.remove(tick);
             bus.chat = undefined;
             bus.wish = undefined;
+            bus.roll = undefined;
             bus.onRemoteDiceRolled = undefined;
             bus.onRemotePawnMoved = undefined;
             bus.onRemoteTurnChanged = undefined;
+            bus.onRemotePenaltyApplied = undefined;
+            bus.onRemoteGameOver = undefined;
+            bus.onRoomStateSynced = undefined;
+            bus.onGulDecision = undefined;
+            bus.onSkipCaptureDecision = undefined;
+            bumpTurnEpoch();
             // release anything the turn loop is awaiting, so it can unwind cleanly
             if (turnChangeResolver) { const res = turnChangeResolver; turnChangeResolver = null; res(0); }
             if (waitRoll) { const r = waitRoll; waitRoll = null; r(); }
@@ -1416,7 +2141,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             tweens.length = 0;
             timers.length = 0;
             root.removeChildren();
-            store.patch({ wishNums: null, wishUsable: false });
+            store.patch({ wishNums: null, wishUsable: false, isWaitingRoll: false, gulPrompt: null, captureNotice: null, skipCapturePrompt: null });
         },
     };
 }

@@ -114,28 +114,53 @@ export function toggleFullscreen() {
     }
 }
 
-/** Adaptive screen buttons: Fullscreen button + Wish icon (when an active wish exists). Scaled to 0.65x. */
-export function ScreenButtons({ gap = 6 }: { gap?: number }) {
+import { multiplayerClient } from '../network/multiplayerClient';
+
+/** Adaptive screen buttons: Fullscreen button + Chat/Emoji reaction (in vertical mobile) + Wish icon. Scaled to 0.75x (size 48). */
+export function ScreenButtons({ gap = 8 }: { gap?: number }) {
     const fs = useStore((s) => s.fullscreen);
     const wishNums = useStore((s) => s.wishNums);
     const wishUsable = useStore((s) => s.wishUsable);
     const phase = useStore((s) => s.phase);
+    const landscape = useStore((s) => s.landscape);
+    const chatOpen = useStore((s) => s.chatOpen);
+    const isMultiplayer = !!multiplayerClient.roomCode;
+
+    // Show chat / message & emoji reaction button during play or in multiplayer
+    const showChat = phase === 'playing' || isMultiplayer;
 
     // Only render wish button if there is a real wish; if no wish, do not render any wish icon
     const hasWish = phase === 'playing' && wishNums && wishNums.length === 2;
+
+    const toggleChat = () => {
+        store.patch({ chatOpen: !chatOpen });
+    };
 
     return (
         <div className="flex items-center" style={{ gap: U(gap) }}>
             <RoundBtn
                 label="Fullscreen"
-                size={42}
+                size={48}
                 onClick={toggleFullscreen}
                 title="Toggle Fullscreen"
             >
                 {fs ? '⤡' : '⛶'}
             </RoundBtn>
 
-            {/* When a wish exists, display it right next to the fullscreen icon */}
+            {/* In vertical mobile screen only (!landscape): Chat & Emoji Reaction icon is placed on the RIGHT SIDE of Fullscreen icon */}
+            {!landscape && showChat && (
+                <RoundBtn
+                    label="Chat & Emoji Reactions"
+                    size={48}
+                    onClick={toggleChat}
+                    title="Chat & Emoji Reactions"
+                    className={chatOpen ? "!border-cyan-400 !bg-cyan-500/30 text-cyan-200 ring-2 ring-cyan-400/50" : ""}
+                >
+                    💬
+                </RoundBtn>
+            )}
+
+            {/* When a wish exists, display it right next to the previous icons */}
             {hasWish && (
                 <button
                     type="button"
@@ -149,13 +174,13 @@ export function ScreenButtons({ gap = 6 }: { gap?: number }) {
                             : 'border-white/30 bg-slate-900/80 text-white/50 cursor-not-allowed opacity-80'
                     }`}
                     style={{
-                        height: U(42),
-                        padding: `0 ${U(12)}`,
-                        gap: U(5),
-                        fontSize: U(14),
+                        height: U(48),
+                        padding: `0 ${U(14)}`,
+                        gap: U(6),
+                        fontSize: U(15),
                     }}
                 >
-                    <span style={{ fontSize: U(16) }}>✨</span>
+                    <span style={{ fontSize: U(17) }}>✨</span>
                     <span>{wishNums[0]},{wishNums[1]}</span>
                 </button>
             )}
@@ -170,16 +195,93 @@ export function RotateHint() {
     return null;
 }
 
-/** Menu / screen floating buttons: music + settings bottom-right, fullscreen bottom-left (scaled to 0.65x). */
+import * as sfx from '../game/sfx';
+
+/** Menu / screen floating buttons: AI Voice Mute + music + settings bottom-right, fullscreen + chat bottom-left (scaled to 0.75x). */
 export function FloatingControls() {
+    const phase = useStore((s) => s.phase);
+    const aiMute = useStore((s) => s.settings.aiMute);
+    const landscape = useStore((s) => s.landscape);
+    const chatOpen = useStore((s) => s.chatOpen);
+    const isMultiplayer = !!multiplayerClient.roomCode;
+
+    const showChat = phase === 'playing' || isMultiplayer;
+
+    const toggleAiMute = () => {
+        const next = !aiMute;
+        store.patchSettings({ aiMute: next });
+        if (next) {
+            sfx.stopSpeech();
+        }
+    };
+
+    const toggleChat = () => {
+        store.patch({ chatOpen: !chatOpen });
+    };
+
     return (
         <>
-            <div className="absolute z-30 flex flex-col" style={{ right: U(12), bottom: U(14), gap: U(8) }}>
-                <RoundBtn size={42} label="Music" onClick={() => store.patch({ modal: 'music' })}>🎵</RoundBtn>
-                <RoundBtn size={42} label="Settings" onClick={() => store.patch({ modal: 'settings' })}>⚙️</RoundBtn>
+            {/* Bottom-Right Controls: Scaled to 0.75x (size 48) */}
+            <div
+                className="absolute z-30 flex items-center"
+                style={{ right: U(12), bottom: U(14), gap: U(8) }}
+            >
+                {!landscape ? (
+                    /* In mobile vertical: Music icon is placed next to AI Mute on the left: [Music] [AI Mute] [Settings] */
+                    <div className="flex items-center" style={{ gap: U(8) }}>
+                        <RoundBtn size={48} label="Music" onClick={() => store.patch({ modal: 'music' })}>🎵</RoundBtn>
+                        {phase === 'playing' && (
+                            <RoundBtn
+                                size={48}
+                                label={aiMute ? "Unmute AI Voice" : "Mute AI Voice"}
+                                onClick={toggleAiMute}
+                                title={aiMute ? "AI Voice is MUTED (Click to Unmute AI Talk)" : "AI Voice is ACTIVE (Click to Mute AI Talk Only)"}
+                                className={aiMute ? "!border-amber-400 !bg-red-950/85 text-amber-300 ring-2 ring-amber-400/50" : ""}
+                            >
+                                {aiMute ? '🔇' : '🎙️'}
+                            </RoundBtn>
+                        )}
+                        <RoundBtn size={48} label="Settings" onClick={() => store.patch({ modal: 'settings' })}>⚙️</RoundBtn>
+                    </div>
+                ) : (
+                    <div className="flex flex-col items-end" style={{ gap: U(8) }}>
+                        <RoundBtn size={48} label="Music" onClick={() => store.patch({ modal: 'music' })}>🎵</RoundBtn>
+                        <div className="flex items-center" style={{ gap: U(8) }}>
+                            {phase === 'playing' && (
+                                <RoundBtn
+                                    size={48}
+                                    label={aiMute ? "Unmute AI Voice" : "Mute AI Voice"}
+                                    onClick={toggleAiMute}
+                                    title={aiMute ? "AI Voice is MUTED (Click to Unmute AI Talk)" : "AI Voice is ACTIVE (Click to Mute AI Talk Only)"}
+                                    className={aiMute ? "!border-amber-400 !bg-red-950/85 text-amber-300 ring-2 ring-amber-400/50" : ""}
+                                >
+                                    {aiMute ? '🔇' : '🎙️'}
+                                </RoundBtn>
+                            )}
+                            <RoundBtn size={48} label="Settings" onClick={() => store.patch({ modal: 'settings' })}>⚙️</RoundBtn>
+                        </div>
+                    </div>
+                )}
             </div>
+
+            {/* In landscape mode: Chat button is stacked above fullscreen in bottom-left */}
+            {landscape && showChat && (
+                <div className="absolute z-30" style={{ left: U(12), bottom: U(70) }}>
+                    <RoundBtn
+                        label="Chat & Emoji Reactions"
+                        size={48}
+                        onClick={toggleChat}
+                        title="Chat & Emoji Reactions"
+                        className={chatOpen ? "!border-cyan-400 !bg-cyan-500/30 text-cyan-200 ring-2 ring-cyan-400/50" : ""}
+                    >
+                        💬
+                    </RoundBtn>
+                </div>
+            )}
+
+            {/* Bottom-Left Controls: Fullscreen + [Chat & Emoji (vertical mobile only)] + Wish */}
             <div className="absolute z-30" style={{ left: U(12), bottom: U(14) }}>
-                <ScreenButtons gap={6} />
+                <ScreenButtons gap={8} />
             </div>
         </>
     );

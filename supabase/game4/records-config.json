@@ -1,0 +1,8 @@
+{
+  "matchDurationMinSeconds": 120,
+  "minHumanPlayers": 2,
+  "maxCapturesPerSeat": 60,
+  "maxRecordedMatchesPerIpPerDay": 30,
+  "maxRecordedMatchesPerTokenPerDay": 10,
+  "maxGuestIdsPerIpPer5Min": 15
+}

@@ -55,7 +55,7 @@ export function Modal({
                         ✕
                     </button>
                 </div>
-                <div className="overflow-y-auto p-2.5 sm:p-3 text-xs sm:text-sm">
+                <div className={`overflow-y-auto text-xs sm:text-sm ${slim ? 'p-1.5 sm:p-2' : 'p-2.5 sm:p-3'}`}>
                     {children}
                 </div>
             </div>
@@ -89,7 +89,7 @@ export function Chip({ active, children, onClick, style }: { active?: boolean; c
 export function RoundBtn({
     children,
     onClick,
-    size = 42,
+    size = 48,
     label,
     className = '',
     style,
@@ -109,7 +109,7 @@ export function RoundBtn({
             title={title || label}
             onClick={onClick}
             className={`flex items-center justify-center rounded-full border border-cyan-300/60 bg-[#0b1230]/85 text-white shadow-[0_0_10px_rgba(24,224,255,0.35)] active:scale-95 cursor-pointer ${className}`}
-            style={{ width: U(size), height: U(size), fontSize: U(size * 0.46), ...style }}
+            style={{ width: U(size), height: U(size), fontSize: U(size * 0.48), ...style }}
         >
             {children}
         </button>

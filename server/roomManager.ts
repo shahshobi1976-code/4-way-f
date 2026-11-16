@@ -6,12 +6,24 @@ import {
     hasWon,
     isLuckySum,
     luckySevenAllowed,
+    maxCaptures,
+    findOffendingToken,
     type Move,
     type Tokens,
 } from '../src/game/rules';
+import {
+    generateGuestIdentity,
+    hashToken,
+    sanitizeDisplayName,
+    recordMatchEnded,
+    type PlayerRecordData,
+    type SeatResultData,
+} from './records';
 
 export interface RoomPlayer {
-    id: string; // sessionToken
+    id: string; // publicPlayerId e.g. g_a1b2c3d4
+    publicPlayerId: string;
+    tokenHash: string; // SHA-256 hash of secret token (plain secret is NEVER stored in memory)
     name: string;
     avatar: string;
     socketId: string;
@@ -22,6 +34,28 @@ export interface RoomPlayer {
     disconnectTime?: number | null;
     isAI: boolean;
     wish?: [number, number] | null;
+    wishUsed?: boolean;
+    capturesMade: number;
+    timesCaptured: number;
+    penalties: number;
+}
+
+export interface ClientRoomPlayer {
+    id: string;
+    publicPlayerId: string;
+    name: string;
+    avatar: string;
+    socketId: string;
+    ready: boolean;
+    isReady?: boolean;
+    isHost?: boolean;
+    connected: boolean;
+    disconnectTime?: number | null;
+    isAI: boolean;
+    wish?: [number, number] | null;
+    capturesMade: number;
+    timesCaptured: number;
+    penalties: number;
 }
 
 export interface ClientRoomState {
@@ -29,7 +63,7 @@ export interface ClientRoomState {
     hostId: string;
     phase: 'lobby' | 'playing' | 'game_over';
     fillBots: boolean;
-    players: (RoomPlayer | null)[];
+    players: (ClientRoomPlayer | null)[];
     tokens: number[][];
     currentTurn: number;
     turnDeadline: number;
@@ -58,6 +92,17 @@ export interface Room {
     rankings: { playerIndex: number; name: string; avatar: string; rank: number }[];
     consecutiveSixes: number;
     rematchVotes: Set<string>;
+    startedAt?: number;
+    endedAt?: number;
+    matchEnded?: boolean;
+    capturesMade: number[];
+    timesCaptured: number[];
+    penalties: number[];
+    capturePromise: number;
+    capturesTakenThisTurn: number;
+    hadCaptureOrHomeThisTurn?: boolean;
+    turnAutoPlay?: boolean;
+    initialTurnTokens?: Tokens;
     turnTimeout?: NodeJS.Timeout | null;
     disconnectTimeouts: Map<number, NodeJS.Timeout>;
 }
@@ -68,6 +113,17 @@ const DEFAULT_TURN_TIME_LIMIT_MS = 90000;
 const DISCONNECT_GRACE_SEC = 60;
 const BOT_NAMES = ['Nova Bot', 'Atlas Bot', 'Echo Bot', 'Titan Bot'];
 const BOT_AVATARS = ['🤖', '🦁', '⚡', '👑'];
+
+function calculateProgress(tokens: Tokens, p: number): number {
+    const list = tokens[p] || [];
+    let sum = 0;
+    for (const t of list) {
+        if (t === -1) sum += 0;
+        else if (t >= 56) sum += 25;
+        else sum += (t / 56) * 25;
+    }
+    return Math.min(100, Math.max(0, Math.round(sum * 100) / 100));
+}
 
 class RoomManager {
     private rooms = new Map<string, Room>();
@@ -90,10 +146,21 @@ class RoomManager {
             players: room.players.map((p) =>
                 p
                     ? {
-                          ...p,
-                          isHost: p.id === room.hostId,
+                          id: p.publicPlayerId,
+                          publicPlayerId: p.publicPlayerId,
+                          name: p.name,
+                          avatar: p.avatar,
+                          socketId: '',
+                          ready: p.ready,
                           isReady: p.ready,
+                          isHost: p.publicPlayerId === room.hostId,
+                          connected: p.connected,
+                          disconnectTime: p.disconnectTime,
+                          isAI: p.isAI,
                           wish: p.wish || null,
+                          capturesMade: p.capturesMade || 0,
+                          timesCaptured: p.timesCaptured || 0,
+                          penalties: p.penalties || 0,
                       }
                     : null,
             ),
@@ -104,16 +171,27 @@ class RoomManager {
             diceUsed: room.diceUsed,
             winner: room.winner,
             rankings: room.rankings,
-            turnTimeSec: room.turnTimeSec || 90,
-            maxPlayers: room.maxPlayers || (room.players.length <= 2 ? 2 : 4),
+            turnTimeSec: room.turnTimeSec ?? 90,
+            maxPlayers: 4,
         };
+    }
+
+    public findPlayerByToken(room: Room, rawToken: string): { player: RoomPlayer; index: number } | null {
+        if (!rawToken) return null;
+        const hash = hashToken(rawToken);
+        const idx = room.players.findIndex(
+            (p) => p && (p.tokenHash === hash || p.tokenHash === rawToken || p.publicPlayerId === rawToken || p.id === rawToken)
+        );
+        if (idx === -1) return null;
+        return { player: room.players[idx]!, index: idx };
     }
 
     public setPlayerWish(code: string, sessionToken: string, wish: [number, number] | null): boolean {
         const room = this.rooms.get(code);
         if (!room) return false;
-        const player = room.players.find((p) => p && p.id === sessionToken);
-        if (!player) return false;
+        const found = this.findPlayerByToken(room, sessionToken);
+        if (!found) return false;
+        const player = found.player;
         if (wish) {
             const [a, b] = wish;
             if (a >= 1 && a <= 6 && b >= 1 && b <= 6 && !(a === 6 && b === 6)) {
@@ -143,26 +221,54 @@ class RoomManager {
 
     public setTurnTime(code: string, sessionToken: string, turnTimeSec: number): boolean {
         const room = this.rooms.get(code);
-        if (!room || room.hostId !== sessionToken || room.phase !== 'lobby') return false;
+        if (!room || room.phase !== 'lobby') return false;
+        const found = this.findPlayerByToken(room, sessionToken);
+        if (!found || found.player.publicPlayerId !== room.hostId) return false;
         room.turnTimeSec = turnTimeSec;
         this.broadcast(room.code, 'room_updated', this.getClientRoomState(room));
         return true;
     }
 
     public createRoom(
-        sessionToken: string,
+        sessionToken: string | undefined,
         name: string,
         avatar: string,
         socketId: string,
         turnTimeSec = 90,
-        maxPlayers = 2,
-    ): { ok: boolean; roomCode?: string; error?: string } {
-        if (!sessionToken) return { ok: false, error: 'Invalid session' };
+        maxPlayers = 4,
+        ip = '127.0.0.1',
+    ): {
+        ok: boolean;
+        roomCode?: string;
+        playerIndex?: number;
+        publicPlayerId?: string;
+        secretSessionToken?: string;
+        error?: string;
+    } {
+        let identity: { publicPlayerId: string; secretSessionToken: string; tokenHash: string };
+        try {
+            if (sessionToken && sessionToken.length >= 24) {
+                identity = {
+                    publicPlayerId: `g_${hashToken(sessionToken).slice(0, 8)}`,
+                    secretSessionToken: sessionToken,
+                    tokenHash: hashToken(sessionToken),
+                };
+            } else {
+                identity = generateGuestIdentity(ip);
+            }
+        } catch (e: any) {
+            return { ok: false, error: e.message };
+        }
+
         const code = this.generateCode();
-        const numSeats = maxPlayers === 4 ? 4 : 2;
+        const numSeats = 4;
+        const sanitized = sanitizeDisplayName(name || 'Host', identity.publicPlayerId);
+
         const hostPlayer: RoomPlayer = {
-            id: sessionToken,
-            name: (name || 'Host').trim().slice(0, 16),
+            id: identity.publicPlayerId,
+            publicPlayerId: identity.publicPlayerId,
+            tokenHash: identity.tokenHash,
+            name: sanitized,
             avatar: avatar || '🤴',
             socketId,
             ready: true,
@@ -171,19 +277,20 @@ class RoomManager {
             connected: true,
             disconnectTime: null,
             isAI: false,
+            capturesMade: 0,
+            timesCaptured: 0,
+            penalties: 0,
         };
-        const players: (RoomPlayer | null)[] = [hostPlayer];
-        for (let i = 1; i < numSeats; i++) {
-            players.push(null);
-        }
+
+        const players: (RoomPlayer | null)[] = [hostPlayer, null, null, null];
 
         const room: Room = {
             code,
-            hostId: sessionToken,
+            hostId: identity.publicPlayerId,
             phase: 'lobby',
             fillBots: true,
             turnTimeSec: turnTimeSec !== undefined ? turnTimeSec : 90,
-            maxPlayers: numSeats,
+            maxPlayers: 4,
             players,
             tokens: newTokens(),
             currentTurn: 0,
@@ -195,55 +302,98 @@ class RoomManager {
             consecutiveSixes: 0,
             rematchVotes: new Set(),
             disconnectTimeouts: new Map(),
+            capturesMade: [0, 0, 0, 0],
+            timesCaptured: [0, 0, 0, 0],
+            penalties: [0, 0, 0, 0],
+            capturePromise: 0,
+            capturesTakenThisTurn: 0,
+            turnAutoPlay: false,
         };
 
         this.rooms.set(code, room);
-        return { ok: true, roomCode: code };
+        return {
+            ok: true,
+            roomCode: code,
+            playerIndex: 0,
+            publicPlayerId: identity.publicPlayerId,
+            secretSessionToken: identity.secretSessionToken,
+        };
     }
 
     public joinRoom(
         code: string,
-        sessionToken: string,
+        sessionToken: string | undefined,
         name: string,
         avatar: string,
         socketId: string,
-    ): { ok: boolean; playerIndex?: number; error?: string } {
+        ip = '127.0.0.1',
+    ): {
+        ok: boolean;
+        playerIndex?: number;
+        publicPlayerId?: string;
+        secretSessionToken?: string;
+        error?: string;
+    } {
         const room = this.rooms.get(code);
         if (!room) return { ok: false, error: 'Room not found' };
 
-        // Check if player is rejoining
-        const existingIdx = room.players.findIndex((p) => p && p.id === sessionToken);
-        if (existingIdx !== -1) {
-            const player = room.players[existingIdx]!;
-            player.socketId = socketId;
-            player.connected = true;
-            player.disconnectTime = null;
-            if (name) player.name = name.trim().slice(0, 16);
-            if (avatar) player.avatar = avatar;
+        // Check if player is rejoining by token hash
+        if (sessionToken) {
+            const found = this.findPlayerByToken(room, sessionToken);
+            if (found) {
+                const player = found.player;
+                player.socketId = socketId;
+                player.connected = true;
+                player.disconnectTime = null;
+                if (avatar) player.avatar = avatar;
 
-            const existingTimeout = room.disconnectTimeouts.get(existingIdx);
-            if (existingTimeout) {
-                clearTimeout(existingTimeout);
-                room.disconnectTimeouts.delete(existingIdx);
+                const existingTimeout = room.disconnectTimeouts.get(found.index);
+                if (existingTimeout) {
+                    clearTimeout(existingTimeout);
+                    room.disconnectTimeouts.delete(found.index);
+                }
+
+                this.broadcast(room.code, 'room_updated', this.getClientRoomState(room));
+                return {
+                    ok: true,
+                    playerIndex: found.index,
+                    publicPlayerId: player.publicPlayerId,
+                    secretSessionToken: sessionToken,
+                };
             }
-
-            this.broadcast(room.code, 'room_updated', this.getClientRoomState(room));
-            return { ok: true, playerIndex: existingIdx };
         }
 
         if (room.phase !== 'lobby') {
             return { ok: false, error: 'Game already in progress' };
         }
 
-        // Find empty seat
         const openIdx = room.players.findIndex((p) => p === null);
         if (openIdx === -1) {
             return { ok: false, error: 'Room is full' };
         }
 
+        let identity: { publicPlayerId: string; secretSessionToken: string; tokenHash: string };
+        try {
+            if (sessionToken && sessionToken.length >= 24) {
+                identity = {
+                    publicPlayerId: `g_${hashToken(sessionToken).slice(0, 8)}`,
+                    secretSessionToken: sessionToken,
+                    tokenHash: hashToken(sessionToken),
+                };
+            } else {
+                identity = generateGuestIdentity(ip);
+            }
+        } catch (e: any) {
+            return { ok: false, error: e.message };
+        }
+
+        const sanitized = sanitizeDisplayName(name || `Player ${openIdx + 1}`, identity.publicPlayerId);
+
         room.players[openIdx] = {
-            id: sessionToken,
-            name: (name || `Player ${openIdx + 1}`).trim().slice(0, 16),
+            id: identity.publicPlayerId,
+            publicPlayerId: identity.publicPlayerId,
+            tokenHash: identity.tokenHash,
+            name: sanitized,
             avatar: avatar || '👑',
             socketId,
             ready: false,
@@ -252,26 +402,65 @@ class RoomManager {
             connected: true,
             disconnectTime: null,
             isAI: false,
+            capturesMade: 0,
+            timesCaptured: 0,
+            penalties: 0,
         };
 
         this.broadcast(room.code, 'room_updated', this.getClientRoomState(room));
-        return { ok: true, playerIndex: openIdx };
+        return {
+            ok: true,
+            playerIndex: openIdx,
+            publicPlayerId: identity.publicPlayerId,
+            secretSessionToken: identity.secretSessionToken,
+        };
+    }
+
+    public reconnectPlayer(
+        code: string,
+        secretSessionToken: string,
+        socketId: string,
+    ): { ok: boolean; playerIndex?: number; publicPlayerId?: string; error?: string } {
+        const room = this.rooms.get(code);
+        if (!room) return { ok: false, error: 'Room not found' };
+        const found = this.findPlayerByToken(room, secretSessionToken);
+        if (!found) return { ok: false, error: 'Invalid session token' };
+
+        const player = found.player;
+        player.socketId = socketId;
+        player.connected = true;
+        player.disconnectTime = null;
+
+        const existingTimeout = room.disconnectTimeouts.get(found.index);
+        if (existingTimeout) {
+            clearTimeout(existingTimeout);
+            room.disconnectTimeouts.delete(found.index);
+        }
+
+        this.broadcast(room.code, 'room_updated', this.getClientRoomState(room));
+        return {
+            ok: true,
+            playerIndex: found.index,
+            publicPlayerId: player.publicPlayerId,
+        };
     }
 
     public toggleReady(code: string, sessionToken: string): boolean {
         const room = this.rooms.get(code);
         if (!room || room.phase !== 'lobby') return false;
-        const player = room.players.find((p) => p && p.id === sessionToken);
-        if (!player) return false;
-        player.ready = !player.ready;
-        player.isReady = player.ready;
+        const found = this.findPlayerByToken(room, sessionToken);
+        if (!found) return false;
+        found.player.ready = !found.player.ready;
+        found.player.isReady = found.player.ready;
         this.broadcast(room.code, 'room_updated', this.getClientRoomState(room));
         return true;
     }
 
     public toggleFillBots(code: string, sessionToken: string, fillBots: boolean): boolean {
         const room = this.rooms.get(code);
-        if (!room || room.hostId !== sessionToken || room.phase !== 'lobby') return false;
+        if (!room || room.phase !== 'lobby') return false;
+        const found = this.findPlayerByToken(room, sessionToken);
+        if (!found || found.player.publicPlayerId !== room.hostId) return false;
         room.fillBots = !!fillBots;
         this.broadcast(room.code, 'room_updated', this.getClientRoomState(room));
         return true;
@@ -280,21 +469,34 @@ class RoomManager {
     public startGame(code: string, sessionToken: string): { ok: boolean; error?: string } {
         const room = this.rooms.get(code);
         if (!room) return { ok: false, error: 'Room not found' };
-        if (room.hostId !== sessionToken) return { ok: false, error: 'Only host can start game' };
+        const found = this.findPlayerByToken(room, sessionToken);
+        if (!found || found.player.publicPlayerId !== room.hostId) {
+            return { ok: false, error: 'Only host can start game' };
+        }
         if (room.phase !== 'lobby') return { ok: false, error: 'Already playing' };
 
-        // Fill remaining seats with bots if enabled
-        const numSeats = room.maxPlayers || room.players.length || 4;
+        const numSeats = 4;
+        while (room.players.length < 4) {
+            room.players.push(null);
+        }
         for (let i = 0; i < numSeats; i++) {
             if (!room.players[i] && room.fillBots) {
+                const botId = `g_bot_${i}_${Date.now().toString(36)}`;
                 room.players[i] = {
-                    id: `bot_${i}_${Date.now()}`,
+                    id: botId,
+                    publicPlayerId: botId,
+                    tokenHash: '',
                     name: BOT_NAMES[i],
                     avatar: BOT_AVATARS[i],
                     socketId: '',
                     ready: true,
+                    isReady: true,
+                    isHost: false,
                     connected: true,
                     isAI: true,
+                    capturesMade: 0,
+                    timesCaptured: 0,
+                    penalties: 0,
                 };
             }
         }
@@ -305,6 +507,9 @@ class RoomManager {
         }
 
         room.phase = 'playing';
+        room.startedAt = Date.now();
+        room.endedAt = undefined;
+        room.matchEnded = false;
         room.tokens = newTokens();
         room.currentTurn = 0;
         room.consecutiveSixes = 0;
@@ -312,13 +517,21 @@ class RoomManager {
         room.rankings = [];
         room.dice = null;
         room.diceUsed = [false, false];
+        room.capturesMade = [0, 0, 0, 0];
+        room.timesCaptured = [0, 0, 0, 0];
+        room.penalties = [0, 0, 0, 0];
+        room.capturePromise = 0;
+        room.capturesTakenThisTurn = 0;
+        room.hadCaptureOrHomeThisTurn = false;
+        room.turnAutoPlay = false;
+        room.initialTurnTokens = room.tokens.map((r) => r.slice());
+
         const turnLimitMs = this.getTurnLimitMs(room);
         room.turnDeadline = room.turnTimeSec > 0 ? Date.now() + turnLimitMs : 0;
 
         this.broadcast(room.code, 'game_started', this.getClientRoomState(room));
         this.startTurnTimer(room);
 
-        // If player 0 is AI, trigger AI roll
         if (room.players[0]?.isAI) {
             this.scheduleBotTurn(room);
         }
@@ -345,82 +558,209 @@ class RoomManager {
         const room = this.rooms.get(code);
         if (!room || room.phase !== 'playing') return;
 
-        // Auto roll and auto move if player didn't act
-        if (!room.dice) {
-            this.rollDice(room.code, room.players[room.currentTurn]?.id || '', true);
-        } else {
-            this.advanceTurn(room, false);
+        const timeoutTurn = room.currentTurn;
+        room.turnAutoPlay = true;
+        room.turnDeadline = 0;
+
+        // Case 1: Player timed out before rolling -> auto-roll and auto-play the token(s)
+        if (room.dice === null) {
+            const rollRes = this.rollDice(room.code, '', true);
+            if (!rollRes.ok || !room.dice) return;
+
+            const activeBools = room.players.map((p) => p !== null);
+            const hasMoves =
+                legalMoves(room.tokens, timeoutTurn, room.dice[0], 0, activeBools).length > 0 ||
+                legalMoves(room.tokens, timeoutTurn, room.dice[1], 1, activeBools).length > 0;
+
+            if (hasMoves) {
+                setTimeout(() => {
+                    const r = this.rooms.get(code);
+                    if (r && r.phase === 'playing' && r.currentTurn === timeoutTurn && r.turnAutoPlay && r.dice) {
+                        this.executeBotMoves(r);
+                    }
+                }, 1800);
+            }
+            return;
         }
+
+        // Case 2: Player already rolled and timed out before finishing moves -> auto-play remaining die(s)
+        const activeBools = room.players.map((p) => p !== null);
+        const hasRemainingMoves =
+            (!room.diceUsed[0] && legalMoves(room.tokens, timeoutTurn, room.dice[0], 0, activeBools).length > 0) ||
+            (!room.diceUsed[1] && legalMoves(room.tokens, timeoutTurn, room.dice[1], 1, activeBools).length > 0);
+
+        if (hasRemainingMoves) {
+            this.executeBotMoves(room);
+            return;
+        }
+
+        // Fallback: no remaining legal moves -> check penalty and advance cleanly
+        const penaltyApplied = this.checkAndApplyMissedCapturePenalty(room);
+        const doubleSix = room.dice[0] === 6 && room.dice[1] === 6;
+        const extraTurn = !penaltyApplied && (doubleSix || !!room.hadCaptureOrHomeThisTurn);
+        room.dice = null;
+        room.diceUsed = [true, true];
+
+        setTimeout(() => {
+            const r = this.rooms.get(code);
+            if (r && r.phase === 'playing' && r.currentTurn === timeoutTurn) {
+                this.advanceTurn(r, extraTurn);
+            }
+        }, penaltyApplied ? 1100 : 350);
     }
 
-    private scheduleBotTurn(room: Room) {
+    public scheduleBotTurn(room: Room) {
+        const turnPlayer = room.players[room.currentTurn];
+        if (!turnPlayer || !turnPlayer.isAI || room.phase !== 'playing') return;
+        const botTurnAtSchedule = room.currentTurn;
+
         setTimeout(() => {
-            const currentRoom = this.rooms.get(room.code);
-            if (!currentRoom || currentRoom.phase !== 'playing') return;
-            const curP = currentRoom.players[currentRoom.currentTurn];
-            if (!curP || !curP.isAI) return;
+            const r = this.rooms.get(room.code);
+            if (!r || r.phase !== 'playing' || r.currentTurn !== botTurnAtSchedule) return;
 
-            // 1) Roll
-            this.rollDice(currentRoom.code, curP.id, true);
+            // If converted to bot mid-turn after already rolling dice, resume remaining die moves
+            if (r.dice !== null && (!r.diceUsed[0] || !r.diceUsed[1])) {
+                const activeBools = r.players.map((p) => p !== null);
+                const hasRem =
+                    (!r.diceUsed[0] && legalMoves(r.tokens, r.currentTurn, r.dice[0], 0, activeBools).length > 0) ||
+                    (!r.diceUsed[1] && legalMoves(r.tokens, r.currentTurn, r.dice[1], 1, activeBools).length > 0);
+                if (hasRem) {
+                    this.executeBotMoves(r);
+                } else {
+                    const penaltyApplied = this.checkAndApplyMissedCapturePenalty(r);
+                    const doubleSix = r.dice[0] === 6 && r.dice[1] === 6;
+                    const extraTurn = !penaltyApplied && (doubleSix || !!r.hadCaptureOrHomeThisTurn);
+                    this.advanceTurn(r, extraTurn);
+                }
+                return;
+            }
 
-            // 2) Move
-            setTimeout(() => {
-                this.executeBotMoves(currentRoom);
-            }, 900);
-        }, 800);
+            // 1. Roll dice for bot
+            const rollRes = this.rollDice(r.code, '', true);
+            if (!rollRes.ok) return;
+
+            // Check if there are legal moves from this roll
+            const activeBools = r.players.map((p) => p !== null);
+            const d1 = r.dice ? r.dice[0] : 0;
+            const d2 = r.dice ? r.dice[1] : 0;
+            const hasMoves =
+                legalMoves(r.tokens, r.currentTurn, d1, 0, activeBools).length > 0 ||
+                legalMoves(r.tokens, r.currentTurn, d2, 1, activeBools).length > 0;
+
+            if (hasMoves) {
+                // Wait 1800ms so connected human clients complete dice roll tumble before token moves
+                setTimeout(() => {
+                    const r2 = this.rooms.get(room.code);
+                    if (r2 && r2.phase === 'playing' && r2.currentTurn === botTurnAtSchedule && r2.dice) {
+                        this.executeBotMoves(r2);
+                    }
+                }, 1800);
+            }
+            // Note: When hasMoves is false, rollDice already schedules advanceTurn after 1800ms.
+        }, 1200);
     }
 
     private executeBotMoves(room: Room) {
-        if (!room.dice || room.phase !== 'playing') return;
-        const curIdx = room.currentTurn;
-        const curPlayer = room.players[curIdx];
-        if (!curPlayer || !curPlayer.isAI) return;
-
+        if (room.phase !== 'playing' || !room.dice) return;
+        const botIdx = room.currentTurn;
         const activeBools = room.players.map((p) => p !== null);
 
-        // Try using die 0 or die 1
+        // Collect all legal moves across unused dice WITHOUT marking unusable dice as used prematurely
+        // (e.g., if dice are [3, 6] and all tokens are in base, die 0 becomes usable AFTER die 1 brings a token out!)
+        const allMoves: Move[] = [];
         for (let d = 0; d < 2; d++) {
-            if (room.diceUsed[d]) continue;
-            const val = room.dice[d];
-            const opts = legalMoves(room.tokens, curIdx, val, d, activeBools);
-            if (opts.length > 0) {
-                const best = pickMove(room.tokens, curIdx, opts, activeBools);
-                this.movePawn(room.code, curPlayer.id, d, best.tok);
-                setTimeout(() => {
-                    this.executeBotMoves(room);
-                }, 800);
-                return;
-            } else {
-                room.diceUsed[d] = true;
+            if (!room.diceUsed[d]) {
+                allMoves.push(...legalMoves(room.tokens, botIdx, room.dice[d], d, activeBools));
             }
         }
 
-        // If both dice used or no moves left, advance
-        if (room.diceUsed[0] && room.diceUsed[1]) {
-            const hasDoubleSix = room.dice[0] === 6 && room.dice[1] === 6;
-            this.advanceTurn(room, hasDoubleSix && room.consecutiveSixes < 3);
+        if (allMoves.length > 0) {
+            // 1. Compulsory capture first
+            const captureMoves = allMoves.filter((m) => m.captures.length > 0);
+            let pool = captureMoves.length > 0 ? captureMoves : allMoves;
+
+            // 2. If no direct single-die capture and both dice are unused, look ahead for a 2-die combined capture
+            if (captureMoves.length === 0 && !room.diceUsed[0] && !room.diceUsed[1]) {
+                const comboSetupMoves = allMoves.filter((m1) => {
+                    const sim = room.tokens.map((row) => row.slice());
+                    sim[botIdx][m1.tok] = m1.to;
+                    const otherDieIdx = m1.die === 0 ? 1 : 0;
+                    const nextMoves = legalMoves(sim, botIdx, room.dice![otherDieIdx], otherDieIdx, activeBools);
+                    return nextMoves.some((m2) => m2.captures.length > 0);
+                });
+                if (comboSetupMoves.length > 0) {
+                    pool = comboSetupMoves;
+                }
+            }
+
+            const chosen = pickMove(room.tokens, botIdx, pool, activeBools);
+            if (chosen) {
+                this.movePawn(room.code, '', chosen.die, chosen.tok, 'gul', true);
+                return;
+            }
         }
+
+        // No legal moves left on remaining die(s)
+        const penaltyApplied = this.checkAndApplyMissedCapturePenalty(room);
+        const doubleSix = room.dice[0] === 6 && room.dice[1] === 6;
+        const extraTurn = !penaltyApplied && (doubleSix || !!room.hadCaptureOrHomeThisTurn);
+        setTimeout(() => {
+            const r = this.rooms.get(room.code);
+            if (r && r.phase === 'playing' && r.currentTurn === botIdx) {
+                this.advanceTurn(r, extraTurn);
+            }
+        }, penaltyApplied ? 1100 : 800);
     }
 
     public rollDice(
         code: string,
         sessionToken: string,
         forced = false,
-    ): { ok: boolean; error?: string } {
+        useWish = false,
+    ): { ok: boolean; dice?: [number, number] | null; lucky?: boolean; streakForfeited?: boolean; error?: string } {
         const room = this.rooms.get(code);
         if (!room || room.phase !== 'playing') return { ok: false, error: 'Not in playing phase' };
 
         const curPlayer = room.players[room.currentTurn];
         if (!curPlayer) return { ok: false, error: 'No player at current turn' };
-        if (!forced && curPlayer.id !== sessionToken) return { ok: false, error: 'Not your turn' };
-        if (room.dice !== null) return { ok: false, error: 'Dice already rolled this turn' };
+        if (!forced) {
+            const found = this.findPlayerByToken(room, sessionToken);
+            if (!found || found.index !== room.currentTurn || room.turnAutoPlay) {
+                return { ok: false, error: room.turnAutoPlay ? 'Turn timed out, auto-playing' : 'Not your turn' };
+            }
+        }
+        if (room.dice !== null) {
+            if (!room.diceUsed[0] || !room.diceUsed[1]) {
+                return { ok: false, error: 'Dice already rolled this turn' };
+            }
+            room.dice = null;
+        }
 
-        const d1 = randDie();
-        const d2 = randDie();
-        room.dice = [d1, d2];
-        room.diceUsed = [false, false];
+        let d1 = randDie();
+        let d2 = randDie();
+
+        // Check if player requested to use their Lucky Wish
+        if (useWish && curPlayer.wish && !curPlayer.wishUsed) {
+            d1 = curPlayer.wish[0];
+            d2 = curPlayer.wish[1];
+            curPlayer.wishUsed = true;
+        }
 
         const lucky = isLuckySum(d1, d2) && luckySevenAllowed(room.tokens, room.currentTurn);
+        if (lucky) {
+            d1 = 6;
+            d2 = 6;
+        }
+
+        room.dice = [d1, d2];
+        room.diceUsed = [false, false];
+        room.initialTurnTokens = room.tokens.map((r) => r.slice());
+        room.capturesTakenThisTurn = 0;
+        room.hadCaptureOrHomeThisTurn = false;
+
+        const activeBools = room.players.map((p) => p !== null);
+        room.capturePromise = maxCaptures(room.tokens, room.currentTurn, [d1, d2], activeBools).taken;
+
         const doubleSix = d1 === 6 && d2 === 6;
         if (doubleSix) {
             room.consecutiveSixes += 1;
@@ -428,21 +768,13 @@ class RoomManager {
             room.consecutiveSixes = 0;
         }
 
-        let streakForfeited = false;
-        if (room.consecutiveSixes >= 3) {
-            streakForfeited = true;
-            room.diceUsed = [true, true];
-        }
-
-        const activeBools = room.players.map((p) => p !== null);
+        const streakForfeited = false;
         const movableTokens: { tok: number; die: number }[] = [];
 
-        if (!streakForfeited) {
-            const moves0 = legalMoves(room.tokens, room.currentTurn, d1, 0, activeBools);
-            for (const m of moves0) movableTokens.push({ tok: m.tok, die: 0 });
-            const moves1 = legalMoves(room.tokens, room.currentTurn, d2, 1, activeBools);
-            for (const m of moves1) movableTokens.push({ tok: m.tok, die: 1 });
-        }
+        const moves0 = legalMoves(room.tokens, room.currentTurn, d1, 0, activeBools);
+        for (const m of moves0) movableTokens.push({ tok: m.tok, die: 0 });
+        const moves1 = legalMoves(room.tokens, room.currentTurn, d2, 1, activeBools);
+        for (const m of moves1) movableTokens.push({ tok: m.tok, die: 1 });
 
         this.broadcast(room.code, 'dice_rolled', {
             p: room.currentTurn,
@@ -452,14 +784,50 @@ class RoomManager {
             streakForfeited,
         });
 
-        // If streak forfeited or no legal moves at all, pass turn
-        if (streakForfeited || movableTokens.length === 0) {
+        const rollTurnAtSchedule = room.currentTurn;
+        if (movableTokens.length === 0) {
             setTimeout(() => {
-                this.advanceTurn(room, false);
-            }, 1200);
+                const r = this.rooms.get(room.code);
+                if (r && r.phase === 'playing' && r.currentTurn === rollTurnAtSchedule) {
+                    this.advanceTurn(r, doubleSix);
+                }
+            }, 1800);
         }
 
-        return { ok: true };
+        return { ok: true, dice: room.dice, lucky, streakForfeited };
+    }
+
+    public checkAndApplyMissedCapturePenalty(room: Room): boolean {
+        const p = room.currentTurn;
+        const promise = room.capturePromise || 0;
+        const taken = room.capturesTakenThisTurn || 0;
+        if (promise > 0 && taken < promise) {
+            const activeBools = room.players.map((pl) => pl !== null);
+            const offendingTok = findOffendingToken(
+                room.initialTurnTokens || room.tokens,
+                room.tokens,
+                p,
+                room.dice || [],
+                activeBools
+            );
+            if (offendingTok !== null && room.tokens[p][offendingTok] >= 0) {
+                room.tokens[p][offendingTok] = -1;
+                room.penalties[p] = (room.penalties[p] || 0) + 1;
+                if (room.players[p]) {
+                    room.players[p]!.penalties = room.penalties[p];
+                }
+                this.broadcast(room.code, 'penalty_applied', {
+                    p,
+                    tokenIndex: offendingTok,
+                    penalties: room.penalties[p],
+                    reason: 'missed_capture',
+                });
+                room.capturePromise = 0;
+                return true;
+            }
+        }
+        room.capturePromise = 0;
+        return false;
     }
 
     public movePawn(
@@ -467,11 +835,20 @@ class RoomManager {
         sessionToken: string,
         dieIndex: number,
         tokenIndex: number,
+        action: 'gul' | 'pass' = 'gul',
+        forced = false,
     ): { ok: boolean; error?: string } {
         const room = this.rooms.get(code);
         if (!room || room.phase !== 'playing') return { ok: false, error: 'Not playing' };
         const curPlayer = room.players[room.currentTurn];
-        if (!curPlayer || curPlayer.id !== sessionToken) return { ok: false, error: 'Not your turn' };
+        if (!curPlayer) return { ok: false, error: 'No player' };
+
+        if (!forced) {
+            const found = this.findPlayerByToken(room, sessionToken);
+            if (!found || found.index !== room.currentTurn || curPlayer.isAI || room.turnAutoPlay) {
+                return { ok: false, error: room.turnAutoPlay ? 'Turn timed out, auto-playing' : 'Not your turn' };
+            }
+        }
         if (!room.dice) return { ok: false, error: 'Dice not rolled' };
         if (room.diceUsed[dieIndex]) return { ok: false, error: 'Die already used' };
 
@@ -481,12 +858,62 @@ class RoomManager {
         const move = legal.find((m) => m.tok === tokenIndex);
         if (!move) return { ok: false, error: 'Illegal move' };
 
-        // Apply move
+        if (action === 'pass') {
+            if (move.to !== 56) {
+                return { ok: false, error: 'Cannot pass non-home move' };
+            }
+            room.diceUsed[dieIndex] = true;
+
+            this.broadcast(room.code, 'pawn_moved', {
+                p: room.currentTurn,
+                dieIndex,
+                tokenIndex,
+                to: room.tokens[room.currentTurn][tokenIndex],
+                captures: [],
+                reachedHome: false,
+                diceUsed: room.diceUsed,
+                passed: true,
+            });
+
+            const otherDieIdx = dieIndex === 0 ? 1 : 0;
+            let canPlayOther = false;
+            if (!room.diceUsed[otherDieIdx]) {
+                const otherVal = room.dice[otherDieIdx];
+                const otherMoves = legalMoves(room.tokens, room.currentTurn, otherVal, otherDieIdx, activeBools);
+                if (otherMoves.length > 0) canPlayOther = true;
+                else room.diceUsed[otherDieIdx] = true;
+            }
+
+            const passTurnAtSchedule = room.currentTurn;
+            if (!canPlayOther) {
+                const penaltyApplied = this.checkAndApplyMissedCapturePenalty(room);
+                const doubleSix = room.dice[0] === 6 && room.dice[1] === 6;
+                const extraTurn = !penaltyApplied && (doubleSix || !!room.hadCaptureOrHomeThisTurn);
+                setTimeout(() => {
+                    const r = this.rooms.get(code);
+                    if (r && r.phase === 'playing' && r.currentTurn === passTurnAtSchedule) {
+                        this.advanceTurn(r, extraTurn);
+                    }
+                }, penaltyApplied ? 1100 : 450);
+            } else if (curPlayer.isAI || room.turnAutoPlay) {
+                setTimeout(() => {
+                    const r = this.rooms.get(code);
+                    if (r && r.phase === 'playing' && r.currentTurn === passTurnAtSchedule) {
+                        this.executeBotMoves(r);
+                    }
+                }, 1400);
+            }
+            return { ok: true };
+        }
+
         room.tokens[room.currentTurn][tokenIndex] = move.to;
         room.diceUsed[dieIndex] = true;
 
         for (const cap of move.captures) {
             room.tokens[cap.p][cap.t] = -1;
+            room.capturesMade[room.currentTurn] = (room.capturesMade[room.currentTurn] || 0) + 1;
+            room.timesCaptured[cap.p] = (room.timesCaptured[cap.p] || 0) + 1;
+            room.capturesTakenThisTurn = (room.capturesTakenThisTurn || 0) + 1;
         }
 
         const reachedHome = move.to === 56;
@@ -499,22 +926,20 @@ class RoomManager {
             captures: move.captures,
             reachedHome,
             diceUsed: room.diceUsed,
+            passed: false,
         });
 
-        // Check if current player won
         if (hasWon(room.tokens, room.currentTurn)) {
-            room.phase = 'game_over';
             room.winner = room.currentTurn;
-            room.rankings = room.players
-                .map((p, idx) => ({ playerIndex: idx, name: p?.name || '', avatar: p?.avatar || '', rank: idx === room.currentTurn ? 1 : 2 }))
-                .filter((_, idx) => room.players[idx] !== null);
-
             if (room.turnTimeout) clearTimeout(room.turnTimeout);
-            this.broadcast(room.code, 'game_over', { winner: room.winner, rankings: room.rankings });
+            void this.endMatchAndRecord(room.code, room.players[0]?.tokenHash || '', '127.0.0.1');
             return { ok: true };
         }
 
-        // Check if other die can still be played
+        if (move.captures.length > 0 || reachedHome) {
+            room.hadCaptureOrHomeThisTurn = true;
+        }
+
         const otherDieIdx = dieIndex === 0 ? 1 : 0;
         let canPlayOther = false;
         if (!room.diceUsed[otherDieIdx]) {
@@ -524,13 +949,25 @@ class RoomManager {
             else room.diceUsed[otherDieIdx] = true;
         }
 
+        const moveTurnAtSchedule = room.currentTurn;
         if (!canPlayOther) {
-            // Check for extra turn bonus (double 6 or capture or reaching home)
-            const doubleSix = room.dice[0] === 6 && room.dice[1] === 6 && room.consecutiveSixes < 3;
-            const extraTurn = doubleSix || move.captures.length > 0 || reachedHome;
+            const penaltyApplied = this.checkAndApplyMissedCapturePenalty(room);
+            const doubleSix = room.dice[0] === 6 && room.dice[1] === 6;
+            const extraTurn = !penaltyApplied && (doubleSix || !!room.hadCaptureOrHomeThisTurn);
             setTimeout(() => {
-                this.advanceTurn(room, extraTurn);
-            }, 800);
+                const r = this.rooms.get(code);
+                if (r && r.phase === 'playing' && r.currentTurn === moveTurnAtSchedule) {
+                    this.advanceTurn(r, extraTurn);
+                }
+            }, penaltyApplied ? 1100 : 450);
+        } else if (curPlayer.isAI || room.turnAutoPlay) {
+            // Bot or timed-out auto-play has a second die to move: wait for the first hop animation, then execute
+            setTimeout(() => {
+                const r = this.rooms.get(code);
+                if (r && r.phase === 'playing' && r.currentTurn === moveTurnAtSchedule) {
+                    this.executeBotMoves(r);
+                }
+            }, 1400);
         }
 
         return { ok: true };
@@ -540,6 +977,7 @@ class RoomManager {
         if (room.phase !== 'playing') return;
         if (room.turnTimeout) clearTimeout(room.turnTimeout);
 
+        room.turnAutoPlay = false;
         if (!extraTurn) {
             const numSeats = room.maxPlayers || room.players.length || 4;
             let next = (room.currentTurn + 1) % numSeats;
@@ -571,16 +1009,16 @@ class RoomManager {
     public sendChat(code: string, sessionToken: string, text: string, emoji?: string): boolean {
         const room = this.rooms.get(code);
         if (!room) return false;
-        const playerIdx = room.players.findIndex((p) => p && p.id === sessionToken);
-        if (playerIdx === -1) return false;
-        const player = room.players[playerIdx]!;
+        const found = this.findPlayerByToken(room, sessionToken);
+        if (!found) return false;
+        const player = found.player;
 
         this.broadcast(room.code, 'chat_received', {
-            p: playerIdx,
+            p: found.index,
             name: player.name,
             avatar: player.avatar,
-            text: (text || '').trim().slice(0, 100),
-            emoji: emoji || '',
+            text: (text || '').slice(0, 80),
+            emoji,
             time: Date.now(),
         });
         return true;
@@ -590,12 +1028,17 @@ class RoomManager {
         const room = this.rooms.get(code);
         if (!room || room.phase !== 'game_over') return { ok: false };
 
-        room.rematchVotes.add(sessionToken);
+        const found = this.findPlayerByToken(room, sessionToken);
+        if (!found) return { ok: false };
+
+        room.rematchVotes.add(found.player.publicPlayerId);
         const humanCount = room.players.filter((p) => p && !p.isAI).length;
 
         if (room.rematchVotes.size >= Math.max(1, humanCount)) {
-            // Start rematch
             room.phase = 'playing';
+            room.startedAt = Date.now();
+            room.endedAt = undefined;
+            room.matchEnded = false;
             room.tokens = newTokens();
             room.winner = null;
             room.rankings = [];
@@ -604,6 +1047,16 @@ class RoomManager {
             room.consecutiveSixes = 0;
             room.rematchVotes.clear();
             room.currentTurn = 0;
+            for (const p of room.players) if (p) p.wishUsed = false;
+            room.capturesMade = [0, 0, 0, 0];
+            room.timesCaptured = [0, 0, 0, 0];
+            room.penalties = [0, 0, 0, 0];
+            room.capturePromise = 0;
+            room.capturesTakenThisTurn = 0;
+            room.hadCaptureOrHomeThisTurn = false;
+            room.turnAutoPlay = false;
+            room.initialTurnTokens = room.tokens.map((r) => r.slice());
+
             const rematchTurnLimitMs = this.getTurnLimitMs(room);
             room.turnDeadline = room.turnTimeSec > 0 ? Date.now() + rematchTurnLimitMs : 0;
 
@@ -618,6 +1071,141 @@ class RoomManager {
         return { ok: true };
     }
 
+    // Step 6: Strict validation and async recording in game4 schema
+    public async endMatchAndRecord(
+        code: string,
+        callerSessionToken: string,
+        ip = '127.0.0.1',
+    ): Promise<{ ok: boolean; matchId?: string; error?: string }> {
+        const room = this.rooms.get(code);
+        if (!room) return { ok: false, error: 'Room not found' };
+
+        const hostPlayer = room.players[0];
+        if (!hostPlayer) return { ok: false, error: 'No host player in room' };
+
+        // Verify caller is seat 0 (or internal game won trigger)
+        if (callerSessionToken) {
+            const found = this.findPlayerByToken(room, callerSessionToken);
+            if (!found || found.index !== 0) {
+                return { ok: false, error: 'Only host (seat 0) can end and record match' };
+            }
+        }
+
+        if (!room.startedAt) {
+            return { ok: false, error: 'Match was not started' };
+        }
+
+        if (room.matchEnded) {
+            return { ok: false, error: 'Match already ended and recorded' };
+        }
+
+        room.endedAt = Date.now();
+        room.phase = 'game_over';
+
+        // Calculate rankings: Winner gets rank 1, remaining sorted by token progress
+        const activeSeats = room.players
+            .map((p, idx) => ({ player: p, seat: idx }))
+            .filter((item): item is { player: RoomPlayer; seat: number } => item.player !== null);
+
+        const winnerSeat = room.winner !== null ? room.winner : 0;
+        const nonWinners = activeSeats
+            .filter((item) => item.seat !== winnerSeat)
+            .sort((a, b) => {
+                const progA = calculateProgress(room.tokens, a.seat);
+                const progB = calculateProgress(room.tokens, b.seat);
+                return progB - progA;
+            });
+
+        const rankedSeats = [activeSeats.find((item) => item.seat === winnerSeat)!, ...nonWinners];
+
+        const rankings = rankedSeats.map((item, rIdx) => ({
+            playerIndex: item.seat,
+            name: item.player.name,
+            avatar: item.player.avatar,
+            rank: rIdx + 1,
+        }));
+
+        room.rankings = rankings;
+
+        const results: SeatResultData[] = rankedSeats.map((item, rIdx) => ({
+            playerId: item.player.publicPlayerId,
+            seat: item.seat,
+            rank: rIdx + 1,
+            progress_percent: calculateProgress(room.tokens, item.seat),
+            captures_made: room.capturesMade[item.seat] || 0,
+            times_captured: room.timesCaptured[item.seat] || 0,
+            penalties: room.penalties[item.seat] || 0,
+        }));
+
+        const playerData: PlayerRecordData[] = activeSeats.map((item) => ({
+            publicPlayerId: item.player.publicPlayerId,
+            displayName: item.player.name,
+            name: item.player.name,
+            isAI: item.player.isAI,
+            tokenHash: item.player.tokenHash,
+        }));
+
+        room.matchEnded = true;
+        this.broadcast(room.code, 'game_over', { winner: room.winner, rankings: room.rankings });
+
+        // Non-blocking async record
+        let recordRes: any = { ok: true };
+        try {
+            recordRes = await recordMatchEnded({
+                roomCode: room.code,
+                startedAt: room.startedAt,
+                endedAt: room.endedAt,
+                callerSeat: 0,
+                roomStarted: true,
+                alreadyEnded: false,
+                players: playerData,
+                results,
+                ip,
+            });
+        } catch (e: any) {
+            console.warn('[Records] Non-blocking match record note:', e?.message);
+        }
+        return { ok: true, matchId: recordRes?.matchId };
+    }
+
+    public leaveRoom(code: string, sessionToken: string): boolean {
+        const room = this.rooms.get(code);
+        if (!room) return false;
+        const found = this.findPlayerByToken(room, sessionToken);
+        if (!found) return false;
+
+        const idx = found.index;
+        const player = found.player;
+        const timeout = room.disconnectTimeouts.get(idx);
+        if (timeout) {
+            clearTimeout(timeout);
+            room.disconnectTimeouts.delete(idx);
+        }
+
+        if (room.phase === 'lobby') {
+            if (room.hostId === player.publicPlayerId) {
+                const nextHost = room.players.find((p) => p && p.publicPlayerId !== player.publicPlayerId && !p.isAI);
+                if (nextHost) room.hostId = nextHost.publicPlayerId;
+            }
+            room.players[idx] = null;
+            const remaining = room.players.filter((p) => p !== null && !p.isAI);
+            if (remaining.length === 0) {
+                this.rooms.delete(room.code);
+                return true;
+            }
+            this.broadcast(room.code, 'room_updated', this.getClientRoomState(room));
+        } else {
+            player.isAI = true;
+            player.name = `${player.name} (Bot)`;
+            player.connected = false;
+            this.broadcast(room.code, 'player_converted_to_bot', { p: idx, name: player.name });
+            if (room.currentTurn === idx && room.phase === 'playing') {
+                this.scheduleBotTurn(room);
+            }
+        }
+        return true;
+    }
+
     public handleSocketDisconnect(socketId: string) {
         for (const room of this.rooms.values()) {
             const idx = room.players.findIndex((p) => p && p.socketId === socketId);
@@ -628,20 +1216,29 @@ class RoomManager {
             player.disconnectTime = Date.now();
 
             if (room.phase === 'lobby') {
-                // If in lobby, remove player (or promote new host)
-                if (room.hostId === player.id) {
-                    const nextHost = room.players.find((p) => p && p.id !== player.id && !p.isAI);
-                    if (nextHost) room.hostId = nextHost.id;
-                }
-                room.players[idx] = null;
-                const remaining = room.players.filter((p) => p !== null && !p.isAI);
-                if (remaining.length === 0) {
-                    this.rooms.delete(room.code);
-                    return;
-                }
                 this.broadcast(room.code, 'room_updated', this.getClientRoomState(room));
+
+                // 45-second grace period for lobby to prevent instant kick on brief network/tab switch
+                const timeout = setTimeout(() => {
+                    const r = this.rooms.get(room.code);
+                    if (r && r.phase === 'lobby' && r.players[idx] && !r.players[idx]!.connected) {
+                        if (r.hostId === r.players[idx]!.publicPlayerId) {
+                            const nextHost = r.players.find((p) => p && p.publicPlayerId !== r.players[idx]!.publicPlayerId && !p.isAI);
+                            if (nextHost) r.hostId = nextHost.publicPlayerId;
+                        }
+                        r.players[idx] = null;
+                        r.disconnectTimeouts.delete(idx);
+                        const remaining = r.players.filter((p) => p !== null && !p.isAI);
+                        if (remaining.length === 0) {
+                            this.rooms.delete(r.code);
+                            return;
+                        }
+                        this.broadcast(r.code, 'room_updated', this.getClientRoomState(r));
+                    }
+                }, 45000);
+
+                room.disconnectTimeouts.set(idx, timeout);
             } else {
-                // In game: grant grace period then convert to bot
                 this.broadcast(room.code, 'player_disconnected', {
                     p: idx,
                     name: player.name,

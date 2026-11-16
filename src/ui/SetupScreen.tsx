@@ -1,6 +1,7 @@
 import { store, useStore, DEFAULT_PLAYERS } from '../state/store';
 import { LANGS, tr, colorName } from '../i18n';
 import { U } from './kit';
+import { multiplayerClient } from '../network/multiplayerClient';
 
 const AVATARS = ['🤴', '👸', '👑', '💎', '🔥', '🏆', '🎩', '🎮', '🌟', '🍀', '🎲'];
 const BORDER = ['#e53935', '#43a047', '#fdd835', '#00bcd4'];
@@ -24,6 +25,7 @@ export function SetupScreen() {
     };
 
     const start = () => {
+        multiplayerClient.leaveRoom();
         const active = mode === 2 ? [false, true, false, true] : [true, true, true, true];
         // make sure at least one human takes a seat: otherwise the first seat becomes human
         if (!seats.some((i) => !players[i].ai)) store.patchPlayer(seats[seats.length - 1], { ai: false });

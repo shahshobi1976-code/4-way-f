@@ -1,5 +1,5 @@
-// Sound effects (all synthesised with WebAudio) and spoken lines (browser speech synthesis).
 import { store } from '../state/store';
+import { removeHahahaOnly } from './banter';
 
 let ctx: AudioContext | null = null;
 let master: GainNode | null = null;
@@ -343,12 +343,12 @@ async function onlineSpeak(text: string, lang: string, player: number): Promise<
     return played;
 }
 
-/** Speak a line; resolves when it ends (or after a safety timeout). Never rejects. */
-export function speak(o: SpeakOpts): Promise<void> {
+/** Raw speech synthesizer for an individual sentence. Resolves when audio ends. */
+function rawSpeak(o: SpeakOpts): Promise<void> {
     return new Promise<void>((resolve) => {
         const fallbackMs = Math.min(4200, 900 + o.text.length * 55);
-        if (!soundOn()) {
-            window.setTimeout(resolve, Math.min(2200, fallbackMs));
+        if (!soundOn() || store.get().settings.aiMute) {
+            resolve();
             return;
         }
         const synth = (() => {
@@ -365,10 +365,10 @@ export function speak(o: SpeakOpts): Promise<void> {
             lang = o.altLang;
             text = o.altText;
         }
-        text = clean(text, lang);
+        text = removeHahahaOnly(clean(text, lang));
         if (!text) {
-            // emoji-only laughter
-            text = lang === 'en' ? 'Ha ha ha ha!' : 'ha ha ha';
+            resolve();
+            return;
         }
         if (o.cancelCurrent) {
             try { synth.cancel(); } catch { /* ignore */ }
@@ -410,6 +410,120 @@ export function speak(o: SpeakOpts): Promise<void> {
     });
 }
 
+export interface SpeechQueueItem extends SpeakOpts {
+    onComplete?: () => void;
+}
+
+/** Immediately clears all previous bubbles from the DOM and state whenever a player speaks or finishes a sentence */
+export function _removeAllSpeechBalloons() {
+    try {
+        if (typeof document !== 'undefined') {
+            const externalBubbles = document.querySelectorAll('.external-speech-balloon, [data-external-balloon="true"]');
+            externalBubbles.forEach((el) => {
+                if (el.parentNode) el.parentNode.removeChild(el);
+            });
+        }
+    } catch {
+        /* ignore */
+    }
+    store.patch({ activeSpeechBalloon: null });
+}
+
+// Global speech state and atomic single-speaker lock
+if (typeof window !== 'undefined') {
+    (window as any)._isSpeaking = false;
+    (window as any)._currentSpeakerIdx = null;
+    (window as any)._aiSpeechQueue = (window as any)._aiSpeechQueue || [];
+    (window as any)._removeAllSpeechBalloons = _removeAllSpeechBalloons;
+}
+
+let isProcessingSpeechQueue = false;
+
+async function processSpeechQueue() {
+    if (typeof window === 'undefined') return;
+    if (isProcessingSpeechQueue) return;
+    isProcessingSpeechQueue = true;
+
+    while (Array.isArray((window as any)._aiSpeechQueue) && (window as any)._aiSpeechQueue.length > 0) {
+        const item: SpeechQueueItem = (window as any)._aiSpeechQueue.shift();
+        if (!item) break;
+
+        // Enforce atomic lock: strict single-speaker turn-taking
+        (window as any)._isSpeaking = true;
+        (window as any)._currentSpeakerIdx = item.player;
+
+        const cleanedText = removeHahahaOnly(item.text);
+        const cleanedAlt = item.altText ? removeHahahaOnly(item.altText) : undefined;
+
+        // Balloon display exclusively for the active speaker: clear previous bubbles first
+        _removeAllSpeechBalloons();
+        if (cleanedText) {
+            store.patch({
+                activeSpeechBalloon: {
+                    idx: item.player,
+                    text: cleanedText,
+                },
+            });
+        }
+
+        // Perform speech synthesis for active speaker
+        await rawSpeak({
+            ...item,
+            text: cleanedText,
+            altText: cleanedAlt,
+        });
+
+        // Clear speech balloon immediately when sentence completes
+        _removeAllSpeechBalloons();
+
+        // Release atomic lock
+        (window as any)._isSpeaking = false;
+        (window as any)._currentSpeakerIdx = null;
+
+        if (item.onComplete) {
+            item.onComplete();
+        }
+
+        // Clean natural pause (350ms) as mandated by spec before next AI in queue speaks
+        if (Array.isArray((window as any)._aiSpeechQueue) && (window as any)._aiSpeechQueue.length > 0) {
+            await new Promise<void>((r) => setTimeout(r, 350));
+        }
+    }
+
+    (window as any)._isSpeaking = false;
+    (window as any)._currentSpeakerIdx = null;
+    isProcessingSpeechQueue = false;
+}
+
+/** Speak a line; safely queues incoming speech while another AI is speaking, ensuring no overlapping speech. */
+export function speak(o: SpeakOpts): Promise<void> {
+    return new Promise<void>((resolve) => {
+        if (typeof window === 'undefined' || store.get().settings.aiMute) {
+            resolve();
+            return;
+        }
+
+        if (!Array.isArray((window as any)._aiSpeechQueue)) {
+            (window as any)._aiSpeechQueue = [];
+        }
+
+        (window as any)._aiSpeechQueue.push({
+            ...o,
+            onComplete: resolve,
+        });
+
+        void processSpeechQueue();
+    });
+}
+
 export function stopSpeech() {
     try { window.speechSynthesis?.cancel(); } catch { /* ignore */ }
+    if (typeof window !== 'undefined') {
+        (window as any)._isSpeaking = false;
+        (window as any)._currentSpeakerIdx = null;
+        if (Array.isArray((window as any)._aiSpeechQueue)) {
+            (window as any)._aiSpeechQueue.length = 0;
+        }
+    }
+    _removeAllSpeechBalloons();
 }

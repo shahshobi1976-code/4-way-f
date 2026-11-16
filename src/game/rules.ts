@@ -117,11 +117,10 @@ export function legalMoves(tokens: Tokens, p: number, value: number, die: number
     return out;
 }
 
-/** Share of the way to a win, 0..100. A token on its coloured path (or home) counts as fully done,
- *  because four tokens on the coloured path / home is a win. */
+/** Share of the way to a win, 0..100. A token in home (position 56) counts as fully done. */
 export function tokenShare(r: number): number {
     if (r < 0) return 0;
-    return Math.min(1, (r + 1) / (PATH_START + 1));
+    return Math.min(1, (r + 1) / (HOME + 1));
 }
 export function percent(tokens: Tokens, p: number): number {
     let s = 0;
@@ -135,7 +134,7 @@ export function fineProgress(tokens: Tokens, p: number): number {
     return s;
 }
 export function hasWon(tokens: Tokens, p: number): boolean {
-    return tokens[p].every((r) => r >= PATH_START);
+    return tokens[p].every((r) => r === HOME);
 }
 /** Lucky Seven: every token is in base, home or on its coloured path (none on the main track). */
 export function luckySevenAllowed(tokens: Tokens, p: number): boolean {
@@ -234,6 +233,8 @@ export function maxCaptures(
 
     const explore = (b: Tokens, unused: number[], victims: { p: number; t: number }[]) => {
         if (victims.length > best.length) best = victims.slice();
+
+        // 1. Single-die capture moves
         for (let i = 0; i < unused.length; i++) {
             const die = unused[i];
             const opts = legalMoves(b, p, dice[die], die, active).filter((m) => m.captures.length > 0);
@@ -245,6 +246,34 @@ export function maxCaptures(
                 explore(nb, unused.filter((d) => d !== die), nextVictims);
             }
         }
+
+        // 2. Combined total sum capture move (e.g. 6 + 1 = 7 step on the same token):
+        // If moving a token with die1 then die2 (or die2 then die1) captures an opponent on the combined landing square
+        if (unused.length >= 2) {
+            for (let i = 0; i < unused.length; i++) {
+                const d1 = unused[i];
+                const d2 = unused.find((d) => d !== d1)!;
+                const firstMoves = legalMoves(b, p, dice[d1], d1, active);
+                for (const m1 of firstMoves) {
+                    const nb1 = b.map((row) => row.slice());
+                    nb1[p][m1.tok] = m1.to;
+                    for (const c of m1.captures) nb1[c.p][c.t] = IN_BASE;
+
+                    const secondMoves = legalMoves(nb1, p, dice[d2], d2, active).filter(
+                        (m2) => m2.tok === m1.tok && m2.captures.length > 0
+                    );
+                    for (const m2 of secondMoves) {
+                        const nb2 = nb1.map((row) => row.slice());
+                        nb2[p][m2.tok] = m2.to;
+                        for (const c of m2.captures) nb2[c.p][c.t] = IN_BASE;
+                        const nextVictims = victims
+                            .concat(m1.captures.map((c) => ({ p: c.p, t: c.t })))
+                            .concat(m2.captures.map((c) => ({ p: c.p, t: c.t })));
+                        explore(nb2, [], nextVictims);
+                    }
+                }
+            }
+        }
     };
 
     explore(tokens.map((row) => row.slice()), dice.map((_, i) => i), []);
@@ -253,4 +282,65 @@ export function maxCaptures(
 
 export function randDie(): number {
     return 1 + Math.floor(Math.random() * 6);
+}
+
+/**
+ * Finds the index of the player's token that missed a mandatory capture.
+ * Evaluates the initial board state against legal capture moves (both single-die and combined sum).
+ */
+export function findOffendingToken(
+    initialTokens: Tokens,
+    currentTokens: Tokens,
+    p: number,
+    dice: number[],
+    active: boolean[]
+): number | null {
+    const candidates: number[] = [];
+    // 1. Single-die direct captures
+    for (let d = 0; d < dice.length; d++) {
+        const moves = legalMoves(initialTokens, p, dice[d], d, active);
+        for (const m of moves) {
+            if (m.captures.length > 0 && !candidates.includes(m.tok)) {
+                candidates.push(m.tok);
+            }
+        }
+    }
+    // 2. Combined total sum capture moves (e.g. 6 + 1 on the same token)
+    if (dice.length >= 2) {
+        for (let d = 0; d < dice.length; d++) {
+            const moves = legalMoves(initialTokens, p, dice[d], d, active);
+            for (const m of moves) {
+                const nb = initialTokens.map((row) => row.slice());
+                nb[p][m.tok] = m.to;
+                for (const c of m.captures) nb[c.p][c.t] = IN_BASE;
+                const rem = dice.filter((_, idx) => idx !== d);
+                for (let d2 = 0; d2 < rem.length; d2++) {
+                    const moves2 = legalMoves(nb, p, rem[d2], d2, active);
+                    if (moves2.some((m2) => m2.tok === m.tok && m2.captures.length > 0)) {
+                        if (!candidates.includes(m.tok)) candidates.push(m.tok);
+                    }
+                }
+            }
+        }
+    }
+    // Prefer candidate still on the board and not home
+    for (const tok of candidates) {
+        if (currentTokens[p][tok] >= 0 && currentTokens[p][tok] < HOME) {
+            return tok;
+        }
+    }
+    // Candidate still anywhere >= 0
+    for (const tok of candidates) {
+        if (currentTokens[p][tok] >= 0) {
+            return tok;
+        }
+    }
+    if (candidates.length > 0) return candidates[0];
+    // Fallback: any active token on track
+    for (let t = 0; t < 4; t++) {
+        if (currentTokens[p][t] >= 0 && currentTokens[p][t] < HOME) {
+            return t;
+        }
+    }
+    return null;
 }

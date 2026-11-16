@@ -6,9 +6,19 @@ import express from 'express';
 import { Server as SocketIOServer } from 'socket.io';
 import { createServer as createViteServer } from 'vite';
 import { roomManager } from './server/roomManager';
+import { fetchLeaderboard } from './server/records';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// Auto-load .env file if present
+try {
+    if (typeof process.loadEnvFile === 'function' && fs.existsSync(path.resolve(__dirname, '.env'))) {
+        process.loadEnvFile(path.resolve(__dirname, '.env'));
+    }
+} catch {
+    // Ignore error if env is already provided by environment
+}
 
 const app = express();
 const server = http.createServer(app);
@@ -58,18 +68,36 @@ app.get('/api/rooms/:code', (req, res) => {
     return res.json({ ok: true, room: roomManager.getClientRoomState(room) });
 });
 
+// Public Leaderboard API from game4.leaderboard view
+app.get('/api/leaderboard', async (_req, res) => {
+    const result = await fetchLeaderboard();
+    if (!result.ok) {
+        return res.status(500).json({ ok: false, error: result.error });
+    }
+    return res.json({ ok: true, leaderboard: result.data });
+});
+
 // Socket.IO event router
 io.on('connection', (socket) => {
-    socket.on('create_room', (data: { name: string; avatar: string; sessionToken: string; turnTimeSec?: number; maxPlayers?: number }, callback) => {
+    const clientIp = socket.handshake.address || '127.0.0.1';
+
+    socket.on('create_room', (data: { name: string; avatar: string; sessionToken?: string; turnTimeSec?: number; maxPlayers?: number }, callback) => {
         try {
             const { name, avatar, sessionToken, turnTimeSec, maxPlayers } = data || {};
-            const res = roomManager.createRoom(sessionToken, name, avatar, socket.id, turnTimeSec, maxPlayers);
+            const res = roomManager.createRoom(sessionToken, name, avatar, socket.id, turnTimeSec, maxPlayers, clientIp);
             if (res.ok && res.roomCode) {
                 socket.join(res.roomCode);
                 const room = roomManager.getRoom(res.roomCode);
                 const clientState = room ? roomManager.getClientRoomState(room) : null;
                 if (typeof callback === 'function') {
-                    callback({ ok: true, roomCode: res.roomCode, playerIndex: 0, roomState: clientState });
+                    callback({
+                        ok: true,
+                        roomCode: res.roomCode,
+                        playerIndex: 0,
+                        publicPlayerId: res.publicPlayerId,
+                        secretSessionToken: res.secretSessionToken,
+                        roomState: clientState,
+                    });
                 }
             } else {
                 if (typeof callback === 'function') callback({ ok: false, error: res.error });
@@ -85,17 +113,24 @@ io.on('connection', (socket) => {
         if (typeof callback === 'function') callback({ ok });
     });
 
-    socket.on('join_room', (data: { roomCode: string; name: string; avatar: string; sessionToken: string }, callback) => {
+    socket.on('join_room', (data: { roomCode: string; name: string; avatar: string; sessionToken?: string }, callback) => {
         try {
             const { roomCode, name, avatar, sessionToken } = data || {};
             const cleanCode = (roomCode || '').toUpperCase().trim();
-            const res = roomManager.joinRoom(cleanCode, sessionToken, name, avatar, socket.id);
+            const res = roomManager.joinRoom(cleanCode, sessionToken, name, avatar, socket.id, clientIp);
             if (res.ok) {
                 socket.join(cleanCode);
                 const room = roomManager.getRoom(cleanCode);
                 const clientState = room ? roomManager.getClientRoomState(room) : null;
                 if (typeof callback === 'function') {
-                    callback({ ok: true, roomCode: cleanCode, playerIndex: res.playerIndex, roomState: clientState });
+                    callback({
+                        ok: true,
+                        roomCode: cleanCode,
+                        playerIndex: res.playerIndex,
+                        publicPlayerId: res.publicPlayerId,
+                        secretSessionToken: res.secretSessionToken,
+                        roomState: clientState,
+                    });
                 }
             } else {
                 if (typeof callback === 'function') callback({ ok: false, error: res.error });
@@ -103,6 +138,33 @@ io.on('connection', (socket) => {
         } catch (e: any) {
             if (typeof callback === 'function') callback({ ok: false, error: e.message });
         }
+    });
+
+    socket.on('ludo:reconnect', (data: { roomCode: string; token: string }, callback) => {
+        const { roomCode, token } = data || {};
+        const cleanCode = (roomCode || '').toUpperCase().trim();
+        const res = roomManager.reconnectPlayer(cleanCode, token, socket.id);
+        if (res.ok) {
+            socket.join(cleanCode);
+            const room = roomManager.getRoom(cleanCode);
+            if (typeof callback === 'function') {
+                callback({
+                    ok: true,
+                    roomCode: cleanCode,
+                    playerIndex: res.playerIndex,
+                    publicPlayerId: res.publicPlayerId,
+                    roomState: room ? roomManager.getClientRoomState(room) : null,
+                });
+            }
+        } else {
+            if (typeof callback === 'function') callback({ ok: false, error: res.error });
+        }
+    });
+
+    socket.on('ludo:match_ended', async (data: { roomCode: string; token: string }, callback) => {
+        const { roomCode, token } = data || {};
+        const res = await roomManager.endMatchAndRecord(roomCode, token, clientIp);
+        if (typeof callback === 'function') callback(res);
     });
 
     socket.on('toggle_ready', (data: { roomCode: string; sessionToken: string }, callback) => {
@@ -129,15 +191,15 @@ io.on('connection', (socket) => {
         if (typeof callback === 'function') callback(res);
     });
 
-    socket.on('dice_roll', (data: { roomCode: string; sessionToken: string }, callback) => {
-        const { roomCode, sessionToken } = data || {};
-        const res = roomManager.rollDice(roomCode, sessionToken);
+    socket.on('dice_roll', (data: { roomCode: string; sessionToken: string; useWish?: boolean }, callback) => {
+        const { roomCode, sessionToken, useWish } = data || {};
+        const res = roomManager.rollDice(roomCode, sessionToken, false, !!useWish);
         if (typeof callback === 'function') callback(res);
     });
 
-    socket.on('move_pawn', (data: { roomCode: string; sessionToken: string; dieIndex: number; tokenIndex: number }, callback) => {
-        const { roomCode, sessionToken, dieIndex, tokenIndex } = data || {};
-        const res = roomManager.movePawn(roomCode, sessionToken, dieIndex, tokenIndex);
+    socket.on('move_pawn', (data: { roomCode: string; sessionToken: string; dieIndex: number; tokenIndex: number; action?: 'gul' | 'pass' }, callback) => {
+        const { roomCode, sessionToken, dieIndex, tokenIndex, action } = data || {};
+        const res = roomManager.movePawn(roomCode, sessionToken, dieIndex, tokenIndex, action);
         if (typeof callback === 'function') callback(res);
     });
 
@@ -163,13 +225,39 @@ io.on('connection', (socket) => {
         }
     });
 
+    socket.on('leave_room', (data: { roomCode: string; sessionToken: string }, callback) => {
+        const { roomCode, sessionToken } = data || {};
+        const ok = roomManager.leaveRoom(roomCode, sessionToken);
+        if (typeof callback === 'function') callback({ ok });
+    });
+
     socket.on('disconnect', () => {
         roomManager.handleSocketDisconnect(socket.id);
     });
 });
 
+server.on('error', (err: any) => {
+    console.error('Server listen error:', err);
+});
+
+process.on('uncaughtException', (err) => {
+    console.error('Uncaught Exception in server process:', err);
+});
+
+process.on('unhandledRejection', (reason) => {
+    console.error('Unhandled Rejection in server process:', reason);
+});
+
 // Vite dev middleware or static dist file serving
 async function startServer() {
+    // Listen immediately so port 3000 and /api/health respond within milliseconds
+    server.listen(PORT, '0.0.0.0', () => {
+        console.log(`  VITE v6 ready in dev server`);
+        console.log(`  ➜  Local:   http://localhost:${PORT}/`);
+        console.log(`  ➜  Network: http://0.0.0.0:${PORT}/`);
+        console.log(`Ludo Dethroned Multiplayer Server running on http://0.0.0.0:${PORT}`);
+    });
+
     if (!isProduction) {
         const vite = await createViteServer({
             server: { middlewareMode: true, host: '0.0.0.0', hmr: false },
@@ -196,12 +284,6 @@ async function startServer() {
             res.sendFile(path.join(distPath, 'index.html'));
         });
     }
-
-    server.listen(PORT, '0.0.0.0', () => {
-        console.log(`  ➜  Local:   http://localhost:${PORT}/`);
-        console.log(`  ➜  Network: http://0.0.0.0:${PORT}/`);
-        console.log(`Ludo Dethroned Multiplayer Server running on http://0.0.0.0:${PORT}`);
-    });
 }
 
 void startServer();

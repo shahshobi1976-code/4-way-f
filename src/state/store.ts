@@ -18,6 +18,7 @@ export interface Settings {
     tilt: number; // camera elevation in degrees, 20 (low) .. 90 (top view)
     sound: boolean;
     music: boolean;
+    aiMute: boolean; // Mute AI talking/speech only
     instrument: number; // 0..9
     bg: number; // 0..9
     lang: string;
@@ -44,6 +45,13 @@ export interface RankRow {
     pct: number;
 }
 
+export interface GulPrompt {
+    p: number;
+    tokenIndex: number;
+    dieIndex: number;
+    value: number;
+}
+
 export interface AppState {
     phase: Phase;
     loadProgress: number;
@@ -67,6 +75,12 @@ export interface AppState {
     turnSecondsLeft: number;
     turnTotalSec: number;
     timerActive: boolean;
+    isWaitingRoll: boolean;
+    gulPrompt: GulPrompt | null;
+    activeSpeechBalloon: { idx: number; text: string } | null;
+    captureNotice: string | null;
+    skipCapturePrompt: { message: string } | null;
+    chatOpen: boolean;
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -74,6 +88,7 @@ const DEFAULT_SETTINGS: Settings = {
     tilt: 55,
     sound: true,
     music: true,
+    aiMute: false,
     instrument: 0,
     bg: 0,
     lang: 'en',
@@ -93,10 +108,10 @@ function loadSettings(): Settings {
 }
 
 export const DEFAULT_PLAYERS: PlayerCfg[] = [
-    { name: 'Red', ai: true, avatar: '🔥', wish: null },
-    { name: 'Green', ai: true, avatar: '🍀', wish: null },
-    { name: 'Yellow', ai: true, avatar: '🌟', wish: null },
-    { name: 'Blue', ai: false, avatar: '🤴', wish: null },
+    { name: 'Shahbaz', ai: false, avatar: '🤴', wish: null },
+    { name: 'Mughal', ai: true, avatar: '🦁', wish: null },
+    { name: 'Zoi', ai: true, avatar: '🌟', wish: null },
+    { name: 'Kajal', ai: true, avatar: '💎', wish: null },
 ];
 
 let state: AppState = {
@@ -121,6 +136,12 @@ let state: AppState = {
     turnSecondsLeft: 90,
     turnTotalSec: 90,
     timerActive: false,
+    isWaitingRoll: false,
+    gulPrompt: null,
+    activeSpeechBalloon: null,
+    captureNotice: null,
+    skipCapturePrompt: null,
+    chatOpen: false,
 };
 
 const listeners = new Set<() => void>();

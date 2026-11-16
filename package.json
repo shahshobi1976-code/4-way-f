@@ -32,6 +32,7 @@
     },
     "dependencies": {
         "@series-inc/rundot-game-sdk": "5.28.1",
+        "@supabase/supabase-js": "^2.118.0",
         "express": "^5.3.0",
         "jimp": "^1.6.1",
         "pixi.js": "8.19.0",
