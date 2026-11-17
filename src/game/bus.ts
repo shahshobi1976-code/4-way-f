@@ -13,7 +13,7 @@ export const bus: {
     /** Remote turn change event */
     onRemoteTurnChanged?: (currentTurn: number, extraTurn: boolean) => void;
     /** Remote penalty applied event */
-    onRemotePenaltyApplied?: (p: number, tokenIndex: number, penalties: number) => void;
+    onRemotePenaltyApplied?: (p: number, tokenIndices: number[], penalties: number) => void;
     /** Player decision for Gul or Pass prompt */
     onGulDecision?: (decision: 'gul' | 'pass') => void;
     /** Player decision for Skip Capture confirmation prompt */

@@ -161,14 +161,14 @@ function Settings() {
 
 function HowTo() {
     const rules = [
-        'Two dice are rolled. Each die is its own move: tap a die to choose it, then tap a glowing token.',
-        'You need a 6 on a die to bring a token out of the yard.',
-        'A double 6, a capture or getting a token home gives you another turn. Double 6s have no limit — keep rolling them.',
-        'Lucky Seven: when none of your tokens is on the main track (all in base, home or on your coloured path), a roll of 1+6, 2+5 or 3+4 counts as 6+6.',
-        'You need an exact roll to reach home. Start squares and star squares are safe.',
-        'Win: get all four tokens onto your coloured path or home, in any mix. 2nd to 4th place follow the progress bar percentages.',
-        'Penalty: if you could capture with a die but move another token, the token that could have captured goes back to base.',
-        'Computer players gang up on whoever is winning, so do not let the winner win the game!',
+        'Two dice are rolled. Tap a die (or tap a glowing token directly) to move. A 6 brings a token out of base.',
+        'Unlimited Double 6s (6+6): Rolling 6+6, capturing an opponent, or entering the centre home (Gul) gives you an extra turn with no consecutive limit.',
+        'Pair / Stack Protection: Two or more tokens of the same colour on a non-safe square form a protected stack. A capture only succeeds if your tokens on the landing square equal or outnumber the opponent stack (myCount >= otherCount).',
+        'Lone Token Full-Total Rule: When you only have 1 active token out on the board, it can only enter its coloured home path or centre home using the full combined total of both dice (partial single-die entry is blocked while 2 dice remain), and it may move by the combined sum when legal.',
+        'Gul or Pass: Landing directly on the centre home (56) asks "Gul or Pass?" — choose Gul to enter and earn an extra turn, or Pass to consume the die and stay on the path.',
+        'Compulsory Capture Penalty: If total (final square) or pair capture options exist, 1 capture is required; otherwise, you must take the maximum independent single-die captures possible. If captures made < required at the end of the turn, every token that had a capture option and did not capture goes back to base. Your first 3 matches warn before skipping.',
+        'Lucky 7: Active only when 0 tokens are on the open track and at least 1 token is still in base — rolling 1+6, 2+5, or 3+4 converts to 6+6 and an extra turn.',
+        'Optional Turn Timer (60s, 90s, 120s, or Off): Choose your timer before starting; if time expires, the move plays automatically.',
     ];
     return (
         <Modal title="📖 How to play" onClose={close} wide>

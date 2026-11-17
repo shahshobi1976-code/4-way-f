@@ -24,7 +24,7 @@ export const HOW_TO_PLAY_CARDS: GuideCard[] = [
         badge: 'STEP 1 OF 5 • QUICK SUMMARY',
         title: 'STEP 1 — The Game in 30 Seconds',
         content:
-            'Play in 4-Way or 2-Way mode with 4 tokens and 2 dice per player. A single 6 brings a token out of base onto the track. Rolling double 6 (6 and 6) awards an extra turn. Capturing opponent tokens on the open track rewards a reroll, but capturing is compulsory—missing an available capture penalizes your token back to base. Star squares and coloured home paths are safe. The first player to bring all 4 tokens onto their coloured home path wins and immediately concludes the match!',
+            'Play in 4-Way or 2-Way mode with 4 tokens and 2 dice per player. A single 6 brings a token out of base. Rolling double 6 (6+6) awards an extra turn with no consecutive limit. Capturing on the open track awards a reroll and is compulsory (1 required if a total/pair option exists, else the max independent single-die captures; failing sends every non-capturing option token to base). Star squares, home paths, and equal/larger stacks are protected. First player to get all 4 tokens home wins!',
         accentColor: '#00f0ff',
     },
     {
@@ -34,7 +34,7 @@ export const HOW_TO_PLAY_CARDS: GuideCard[] = [
         badge: 'STEP 2 OF 5 • MATCH PREPARATION',
         title: 'STEP 2 — Before the Match',
         content:
-            'Before the match begins, choose your Lucky Wish numbers (any two dice numbers except 6 and 6) to use once per match. The room host also sets the turn timer (60s, 90s, 120s, or disabled/off). Ensure your audio and board preferences are ready before hitting start.',
+            'Before the match begins, choose your Lucky Wish numbers (any two dice numbers except 6 and 6) to use once per match. The room host also sets the optional turn timer (60s, 90s, 120s, or Off). Ensure your audio and board preferences are ready before hitting start.',
         accentColor: '#38bdf8',
     },
     {
@@ -47,10 +47,10 @@ export const HOW_TO_PLAY_CARDS: GuideCard[] = [
             'Follow these 6 steps on every turn:',
         bullets: [
             '1. Roll both dice on your turn.',
-            '2. Check for captures first—capturing on the open track is compulsory.',
-            '3. Choose whether to move one token by the total of both dice or split across two tokens.',
-            '4. Make your move (if no legal move exists, your turn passes).',
-            '5. Take an extra turn on a double 6, capture, centre home, or Lucky 7.',
+            '2. Check for captures first—capturing on non-safe open squares is compulsory.',
+            '3. Split dice across two tokens, or move a lone active token by the combined sum of both dice.',
+            '4. Landing on Centre (56) prompts "Gul or Pass?" to enter for an extra turn or pass.',
+            '5. Earn an extra turn on unlimited 6+6, capture, entering Gul, or Lucky 7.',
             '6. Otherwise, play passes clockwise to the next player.',
         ],
         accentColor: '#a855f7',
@@ -64,10 +64,10 @@ export const HOW_TO_PLAY_CARDS: GuideCard[] = [
         content:
             'See how real game situations play out:',
         bullets: [
-            '• Capture & Reroll: Roll 5 and 2, move 7 to capture a lone opponent token, send them to base, and get an immediate reroll.',
-            '• Missed Capture Penalty: Roll 4 and 2 with an available capture; moving another token instead sends the capturing token back to base.',
-            '• Lucky 7 Bonus: With no tokens on open track, rolling 4 + 3 = 7 converts into 6 + 6 with an extra turn.',
-            '• Exit Base: Roll 6 and 2, bring a token out with 6, move 2 spaces, then play passes to the next player.',
+            '• Capture & Reroll: Roll 5 and 2, take a capture on an open square, send the opponent back to base, and get an extra turn.',
+            '• Lone Token Full-Total: With 1 active token near your coloured path and 2 dice left, enter using the full combined sum of both dice.',
+            '• Lucky 7 Bonus: With 0 tokens on the open track and at least 1 token in base, rolling 4 + 3 = 7 converts into 6 + 6 with an extra turn.',
+            '• Exit Base: Roll 6 and 2, bring a token out with 6, move 2 spaces, then play passes clockwise.',
         ],
         accentColor: '#f59e0b',
     },
@@ -81,10 +81,10 @@ export const HOW_TO_PLAY_CARDS: GuideCard[] = [
             'Keep these 5 key tactical rules in mind during play:',
         bullets: [
             '✓ Locate your base, coloured home path, and star safe squares.',
-            '✓ Always inspect the board for compulsory captures before touching a token.',
-            '✓ Pair up tokens of the same colour on a square to create an invincible block.',
+            '✓ Always inspect the board for compulsory captures (your first 3 matches show a confirmation warning if you skip one).',
+            '✓ Stack tokens of the same colour on a square—a single opponent token cannot capture a stack of 2+.',
             '✓ Use star squares for sanctuary when opponents close in.',
-            '✓ Keep an eye on rival progress bars and cooperate to stop the leader from winning!',
+            '✓ Watch rival progress bars and stop the leader from getting all 4 tokens home!',
         ],
         accentColor: '#10b981',
     },
@@ -99,27 +99,27 @@ export const HOW_TO_PLAY_CARDS: GuideCard[] = [
         badge: 'GUIDE 1 OF 12 • THE GOAL',
         title: 'GUIDE 1 — The Goal',
         content:
-            'The first player to get all four of their tokens onto their coloured home path wins. A token does not need to reach the centre home. A token that reaches the centre home also counts.',
+            'Move all four of your tokens clockwise around the track, up your coloured home path, and into the centre home (Gul) with an exact roll. The first player to get all 4 tokens home wins immediately.',
         accentColor: '#10b981',
     },
     {
         part: 'rules',
         guideNumber: 2,
         icon: '🎲🎲',
-        badge: 'GUIDE 2 OF 12 • TWO DICE',
-        title: 'GUIDE 2 — Two Dice',
+        badge: 'GUIDE 2 OF 12 • TWO DICE & LONE TOKEN',
+        title: 'GUIDE 2 — Two Dice & Lone Token Sum',
         content:
-            'On your turn you roll two dice. You can use both dice on one token, which moves the total of the two dice, or use one die on each of two different tokens. Tokens and turns move clockwise around the board.',
+            'Roll two dice each turn and use them across two tokens or together. When you have only 1 active token out on the board, it may move by the combined sum of both dice and can only enter your coloured home path or centre home using the full combined total while 2 dice remain.',
         accentColor: '#00f0ff',
     },
     {
         part: 'rules',
         guideNumber: 3,
         icon: '🎲',
-        badge: 'GUIDE 3 OF 12 • SIXES & LEAVING BASE',
-        title: 'GUIDE 3 — Sixes and Leaving Base',
+        badge: 'GUIDE 3 OF 12 • UNLIMITED SIXES',
+        title: 'GUIDE 3 — Sixes & Unlimited Double 6s',
         content:
-            'All four tokens start in base. A single 6 brings one token out of base onto the open track. Rolling a double 6 (6 and 6) awards an extra turn, while a single 6 does not award an extra turn.',
+            'A single 6 brings one token out of base onto your start square. Rolling a double 6 (6 and 6) awards an extra turn—with no consecutive limit! A single 6 does not award an extra turn.',
         accentColor: '#eab308',
     },
     {
@@ -129,7 +129,7 @@ export const HOW_TO_PLAY_CARDS: GuideCard[] = [
         badge: 'GUIDE 4 OF 12 • CAPTURING & REROLL',
         title: 'GUIDE 4 — Capturing and the Reroll',
         content:
-            'If your token lands on a square where a single opponent token stands on the open track, that token is captured and returns to its base. A capture can be made with one die or the total of both dice. Every capture gives you a reroll.',
+            'Landing on a non-safe open square captures opponent tokens there when your tokens on that square equal or outnumber theirs (myCount >= otherCount). Every capture sends opponents back to base and grants you an extra turn.',
         accentColor: '#f43f5e',
     },
     {
@@ -139,17 +139,17 @@ export const HOW_TO_PLAY_CARDS: GuideCard[] = [
         badge: 'GUIDE 5 OF 12 • SAFE PLACES',
         title: 'GUIDE 5 — Safe Places',
         content:
-            'A token cannot be captured when it is on a star square, on its coloured home path, or in base. Star squares are safe for every player on the board.',
+            'A token cannot be captured when it is on a start square, on a star square, on its coloured home path, or in base. Star squares are safe for every player on the board.',
         accentColor: '#ffd84a',
     },
     {
         part: 'rules',
         guideNumber: 6,
         icon: '🛡️',
-        badge: 'GUIDE 6 OF 12 • PAIRS & BLOCKS',
-        title: 'GUIDE 6 — Pairs',
+        badge: 'GUIDE 6 OF 12 • STACK & PAIR PROTECTION',
+        title: 'GUIDE 6 — Stack & Pair Protection',
         content:
-            'Two tokens of the same colour on the same square form a pair. A single token cannot capture a pair. A pair is only captured when two opponent tokens land on that square together, one with each die, giving one reroll. Pairs on star squares are always safe, and you can split your pair freely.',
+            'Two or more tokens of the same colour on a non-safe square form a protected stack. A single opponent token cannot capture a stack of 2 or more; a capture only succeeds when the attacker has myCount >= otherCount on that square (counting the moving token plus friendly tokens already there).',
         accentColor: '#38bdf8',
     },
     {
@@ -157,19 +157,19 @@ export const HOW_TO_PLAY_CARDS: GuideCard[] = [
         guideNumber: 7,
         icon: '⚠️',
         badge: 'GUIDE 7 OF 12 • MISSED CAPTURE PENALTY',
-        title: 'GUIDE 7 — The Missed Capture Penalty',
+        title: 'GUIDE 7 — Compulsory Capture Penalty',
         content:
-            'Capturing is compulsory. If one of your tokens could capture an opponent’s token on the open track and you finish your move without capturing, the token that could have captured is sent back to its base.',
+            'Capturing on non-safe open squares is compulsory. Options include single-die captures, 2-die total captures (final square only), and 2-token pair captures. If a total or pair option exists, 1 capture is required; otherwise you must achieve the most independent single-die captures possible (each die used once). If captures made < required after your move, every token that had an option and did not capture goes back to base. Your first 3 matches warn before skipping.',
         accentColor: '#ef4444',
     },
     {
         part: 'rules',
         guideNumber: 8,
         icon: '👑',
-        badge: 'GUIDE 8 OF 12 • CENTRE HOME BONUS',
-        title: 'GUIDE 8 — Centre Home Bonus',
+        badge: 'GUIDE 8 OF 12 • GUL OR PASS?',
+        title: 'GUIDE 8 — Centre Home (Gul or Pass?)',
         content:
-            'Moving a token into the centre home requires an exact roll and rewards you with an extra turn. Reaching the centre home counts toward victory, though reaching the coloured home path is already enough to win.',
+            'Reaching the centre home (Gul) requires an exact roll (or the full combined total for a lone active token). When your move reaches the centre, a "Gul or Pass?" prompt lets you enter for an extra turn or pass to stay on the path.',
         accentColor: '#ec4899',
     },
     {
@@ -179,7 +179,7 @@ export const HOW_TO_PLAY_CARDS: GuideCard[] = [
         badge: 'GUIDE 9 OF 12 • LUCKY 7',
         title: 'GUIDE 9 — Lucky 7',
         content:
-            'If none of your tokens are on the open track (all are in base, on your coloured home path, or in centre home), rolling a total of 7 counts as 6+6 and gives you an extra turn so two tokens can leave base together.',
+            'When zero tokens are on the open track AND at least 1 token is still in base (1–4 in base, remaining tokens on the coloured home path or in centre home), rolling 1+6, 2+5, or 3+4 converts to 6+6 with an extra turn.',
         accentColor: '#ffd84a',
     },
     {
@@ -197,9 +197,9 @@ export const HOW_TO_PLAY_CARDS: GuideCard[] = [
         guideNumber: 11,
         icon: '⏳',
         badge: 'GUIDE 11 OF 12 • TURN TIMER',
-        title: 'GUIDE 11 — Turn Timer',
+        title: 'GUIDE 11 — Optional Turn Timer',
         content:
-            'The room host chooses the optional turn timer before play: 60, 90, or 120 seconds, or turns it off completely. When the timer is active and runs out, your turn automatically passes to the next player.',
+            'Choose an optional turn timer before play: 60s, 90s, 120s, or Off. When the timer is active and reaches 0, the game automatically plays the turn to keep the match moving.',
         accentColor: '#a855f7',
     },
     {
@@ -209,7 +209,7 @@ export const HOW_TO_PLAY_CARDS: GuideCard[] = [
         badge: 'GUIDE 12 OF 12 • HOW MATCH ENDS',
         title: 'GUIDE 12 — How the Match Ends',
         content:
-            'The match ends immediately as soon as one player wins. Remaining players are ranked by the percentage on the progress bar. Because play stops the instant someone wins, every rival fights to win or stop the leader.',
+            'The match ends immediately as soon as one player gets all 4 tokens home. Remaining players are ranked by their progress percentage.',
         accentColor: '#10b981',
     },
 ];

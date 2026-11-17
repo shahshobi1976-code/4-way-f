@@ -53,8 +53,6 @@ const en: Dict = {
     luckyS: 'It counts as 6 + 6',
     penT: 'Penalty!',
     penS: '{n} missed a capture and goes back to base',
-    sixT: 'Three double sixes!',
-    sixS: '{n} loses the turn',
     winT: '{n} wins!',
     again: 'Play again',
     menu: 'Menu',
@@ -76,7 +74,7 @@ const T: Record<string, Dict> = {
         four: '4名玩家', two: '2名玩家', setupTitle: '本地游戏设置', gender: '头像', male: '男', female: '女', language: '语言', ai: '电脑',
         setWish: '设置幸运愿望 ✨', wishSet: '愿望', start: '开始比赛', back: '← 返回主菜单', name: '名字',
         red: '红', green: '绿', yellow: '黄', cyan: '青', turn: '{n}的回合', luckyT: '幸运七！', luckyS: '算作 6 + 6',
-        penT: '处罚！', penS: '{n} 没有吃子，棋子回到基地', sixT: '连续三次双六！', sixS: '{n} 失去回合', winT: '{n} 获胜！',
+        penT: '处罚！', penS: '{n} 没有吃子，棋子回到基地', winT: '{n} 获胜！',
         again: '再玩一次', menu: '菜单', noMoves: '无法移动', sayLucky: '恭喜！你获得了幸运七！', sayPen: '{n}，抱歉，你要受到处罚！', ok: '好',
     },
     hi: {
@@ -86,7 +84,7 @@ const T: Record<string, Dict> = {
         four: '4 खिलाड़ी', two: '2 खिलाड़ी', setupTitle: 'लोकल गेम सेटअप', gender: 'अवतार', male: 'पुरुष', female: 'महिला', language: 'भाषा', ai: 'AI',
         setWish: 'लकी विश सेट करें ✨', wishSet: 'विश', start: 'मैच शुरू करें', back: '← मुख्य मेनू पर वापस', name: 'नाम',
         red: 'लाल', green: 'हरा', yellow: 'पीला', cyan: 'आसमानी', turn: '{n} की बारी', luckyT: 'लकी सेवन!', luckyS: 'यह 6 + 6 गिना जाएगा',
-        penT: 'जुर्माना!', penS: '{n} ने कटाई चूक दी, गोटी बेस पर लौटी', sixT: 'तीन बार डबल छक्का!', sixS: '{n} की बारी गई', winT: '{n} जीता!',
+        penT: 'जुर्माना!', penS: '{n} ने कटाई चूक दी, गोटी बेस पर लौटी', winT: '{n} जीता!',
         again: 'फिर खेलें', menu: 'मेनू', noMoves: 'कोई चाल नहीं', sayLucky: 'बधाई हो! आपको लकी सेवन मिला है!', sayPen: '{n}, माफ़ कीजिए, आप पर जुर्माना लगेगा!', ok: 'ठीक है',
     },
     es: {
@@ -96,7 +94,7 @@ const T: Record<string, Dict> = {
         four: '4 jugadores', two: '2 jugadores', setupTitle: 'CONFIGURACIÓN LOCAL', gender: 'Avatar', male: 'HOMBRE', female: 'MUJER', language: 'Idioma', ai: 'IA',
         setWish: 'ELEGIR DESEO DE LA SUERTE ✨', wishSet: 'DESEO', start: 'EMPEZAR PARTIDA', back: '← VOLVER AL MENÚ', name: 'Nombre',
         red: 'Rojo', green: 'Verde', yellow: 'Amarillo', cyan: 'Cian', turn: 'Turno de {n}', luckyT: '¡Siete de la suerte!', luckyS: 'Cuenta como 6 + 6',
-        penT: '¡Penalización!', penS: '{n} no capturó y vuelve a la base', sixT: '¡Tres dobles seis!', sixS: '{n} pierde el turno', winT: '¡{n} gana!',
+        penT: '¡Penalización!', penS: '{n} no capturó y vuelve a la base', winT: '¡{n} gana!',
         again: 'Jugar de nuevo', menu: 'Menú', noMoves: 'Sin movimientos', sayLucky: '¡Felicidades! ¡Has recibido el Siete de la suerte!', sayPen: '{n}, lo siento, ¡vas a ser penalizado!', ok: 'OK',
     },
     fr: {
@@ -106,7 +104,7 @@ const T: Record<string, Dict> = {
         four: '4 joueurs', two: '2 joueurs', setupTitle: 'CONFIGURATION LOCALE', gender: 'Avatar', male: 'HOMME', female: 'FEMME', language: 'Langue', ai: 'IA',
         setWish: 'DÉFINIR UN VŒU CHANCEUX ✨', wishSet: 'VŒU', start: 'LANCER LA PARTIE', back: '← RETOUR AU MENU', name: 'Nom',
         red: 'Rouge', green: 'Vert', yellow: 'Jaune', cyan: 'Cyan', turn: 'Tour de {n}', luckyT: 'Sept chanceux !', luckyS: 'Compte comme 6 + 6',
-        penT: 'Pénalité !', penS: '{n} a raté une capture et retourne à la base', sixT: 'Trois doubles six !', sixS: '{n} perd son tour', winT: '{n} gagne !',
+        penT: 'Pénalité !', penS: '{n} a raté une capture et retourne à la base', winT: '{n} gagne !',
         again: 'Rejouer', menu: 'Menu', noMoves: 'Aucun coup', sayLucky: 'Félicitations ! Vous recevez le Sept chanceux !', sayPen: '{n}, désolé, vous êtes pénalisé !', ok: 'OK',
     },
     ar: {
@@ -116,7 +114,7 @@ const T: Record<string, Dict> = {
         four: '4 لاعبين', two: 'لاعبان', setupTitle: 'إعداد اللعبة المحلية', gender: 'الصورة', male: 'ذكر', female: 'أنثى', language: 'اللغة', ai: 'ذكاء',
         setWish: 'تحديد أمنية الحظ ✨', wishSet: 'أمنية', start: 'ابدأ المباراة', back: '← العودة للقائمة', name: 'الاسم',
         red: 'أحمر', green: 'أخضر', yellow: 'أصفر', cyan: 'سماوي', turn: 'دور {n}', luckyT: 'سبعة الحظ!', luckyS: 'تُحسب 6 + 6',
-        penT: 'عقوبة!', penS: '{n} فوّت الأكل ويعود إلى القاعدة', sixT: 'ثلاث ستات مزدوجة!', sixS: '{n} يخسر دوره', winT: 'فاز {n}!',
+        penT: 'عقوبة!', penS: '{n} فوّت الأكل ويعود إلى القاعدة', winT: 'فاز {n}!',
         again: 'العب مجدداً', menu: 'القائمة', noMoves: 'لا حركات', sayLucky: 'تهانينا! حصلت على سبعة الحظ!', sayPen: '{n}، آسف، ستتم معاقبتك!', ok: 'حسناً',
     },
     bn: {
@@ -126,7 +124,7 @@ const T: Record<string, Dict> = {
         four: '৪ জন', two: '২ জন', setupTitle: 'লোকাল গেম সেটআপ', gender: 'অবতার', male: 'পুরুষ', female: 'মহিলা', language: 'ভাষা', ai: 'AI',
         setWish: 'লাকি উইশ সেট করুন ✨', wishSet: 'উইশ', start: 'ম্যাচ শুরু', back: '← মূল মেনুতে ফিরুন', name: 'নাম',
         red: 'লাল', green: 'সবুজ', yellow: 'হলুদ', cyan: 'আকাশি', turn: '{n} এর পালা', luckyT: 'লাকি সেভেন!', luckyS: 'এটি ৬ + ৬ ধরা হবে',
-        penT: 'জরিমানা!', penS: '{n} কাটতে ভুলেছে, ঘুঁটি বেসে ফিরল', sixT: 'তিনবার ডাবল ছক্কা!', sixS: '{n} এর পালা গেল', winT: '{n} জিতেছে!',
+        penT: 'জরিমানা!', penS: '{n} কাটতে ভুলেছে, ঘুঁটি বেসে ফিরল', winT: '{n} জিতেছে!',
         again: 'আবার খেলুন', menu: 'মেনু', noMoves: 'কোনো চাল নেই', sayLucky: 'অভিনন্দন! আপনি লাকি সেভেন পেয়েছেন!', sayPen: '{n}, দুঃখিত, আপনাকে জরিমানা করা হবে!', ok: 'ঠিক আছে',
     },
     pt: {
@@ -136,7 +134,7 @@ const T: Record<string, Dict> = {
         four: '4 jogadores', two: '2 jogadores', setupTitle: 'CONFIGURAÇÃO LOCAL', gender: 'Avatar', male: 'HOMEM', female: 'MULHER', language: 'Idioma', ai: 'IA',
         setWish: 'DEFINIR DESEJO DA SORTE ✨', wishSet: 'DESEJO', start: 'INICIAR PARTIDA', back: '← VOLTAR AO MENU', name: 'Nome',
         red: 'Vermelho', green: 'Verde', yellow: 'Amarelo', cyan: 'Ciano', turn: 'Vez de {n}', luckyT: 'Sete da sorte!', luckyS: 'Conta como 6 + 6',
-        penT: 'Penalidade!', penS: '{n} deixou de capturar e volta à base', sixT: 'Três duplos seis!', sixS: '{n} perde a vez', winT: '{n} venceu!',
+        penT: 'Penalidade!', penS: '{n} deixou de capturar e volta à base', winT: '{n} venceu!',
         again: 'Jogar de novo', menu: 'Menu', noMoves: 'Sem jogadas', sayLucky: 'Parabéns! Você ganhou o Sete da sorte!', sayPen: '{n}, desculpe, você será penalizado!', ok: 'OK',
     },
     ru: {
@@ -146,7 +144,7 @@ const T: Record<string, Dict> = {
         four: '4 игрока', two: '2 игрока', setupTitle: 'ЛОКАЛЬНАЯ ИГРА', gender: 'Аватар', male: 'МУЖ.', female: 'ЖЕН.', language: 'Язык', ai: 'ИИ',
         setWish: 'ЗАГАДАТЬ ЖЕЛАНИЕ ✨', wishSet: 'ЖЕЛАНИЕ', start: 'НАЧАТЬ МАТЧ', back: '← В ГЛАВНОЕ МЕНЮ', name: 'Имя',
         red: 'Красный', green: 'Зелёный', yellow: 'Жёлтый', cyan: 'Голубой', turn: 'Ход: {n}', luckyT: 'Счастливая семёрка!', luckyS: 'Считается как 6 + 6',
-        penT: 'Штраф!', penS: '{n} не побил фишку и возвращается на базу', sixT: 'Три дубля шесть!', sixS: '{n} пропускает ход', winT: 'Победил {n}!',
+        penT: 'Штраф!', penS: '{n} не побил фишку и возвращается на базу', winT: 'Победил {n}!',
         again: 'Играть снова', menu: 'Меню', noMoves: 'Нет ходов', sayLucky: 'Поздравляем! Вам выпала счастливая семёрка!', sayPen: '{n}, извините, вы получаете штраф!', ok: 'ОК',
     },
     ur: {
@@ -156,7 +154,7 @@ const T: Record<string, Dict> = {
         four: '4 کھلاڑی', two: '2 کھلاڑی', setupTitle: 'لوکل گیم سیٹ اپ', gender: 'اوتار', male: 'مرد', female: 'خاتون', language: 'زبان', ai: 'AI',
         setWish: 'لکی وش سیٹ کریں ✨', wishSet: 'وش', start: 'میچ شروع کریں', back: '← مین مینو پر واپس', name: 'نام',
         red: 'لال', green: 'ہرا', yellow: 'پیلا', cyan: 'آسمانی', turn: '{n} کی باری', luckyT: 'لکی سیون!', luckyS: 'یہ 6 + 6 گنا جائے گا',
-        penT: 'جرمانہ!', penS: '{n} نے کاٹنا چھوڑ دیا، گوٹی بیس پر واپس', sixT: 'تین بار ڈبل چھکّہ!', sixS: '{n} کی باری گئی', winT: '{n} جیت گیا!',
+        penT: 'جرمانہ!', penS: '{n} نے کاٹنا چھوڑ دیا، گوٹی بیس پر واپس', winT: '{n} جیت گیا!',
         again: 'دوبارہ کھیلیں', menu: 'مینو', noMoves: 'کوئی چال نہیں', sayLucky: 'مبارک ہو! آپ کو لکی سیون ملا ہے!', sayPen: '{n}، معذرت، آپ پر جرمانہ ہوگا!', ok: 'ٹھیک ہے',
     },
 };

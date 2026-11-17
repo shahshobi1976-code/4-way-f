@@ -9,8 +9,8 @@ import { bus } from './bus';
 import { tr, colorName } from '../i18n';
 import {
     BASE_CENTER, BASE_SPOTS, COLORS, HOME, HOME_COL, IN_BASE, LAST_TRACK, PATH_START, SAFE, STAR_IDX, START_IDX, TRACK,
-    boardPos, fineProgress, globalIdx, hasWon, isLuckySum, legalMoves, luckySevenAllowed, maxCaptures, newTokens,
-    percent, pickMove, randDie, findOffendingToken, type Move, type Tokens,
+    boardPos, evaluateCaptureObligation, fineProgress, globalIdx, hasWon, isLuckySum, legalMovesForTurn, luckySevenAllowed,
+    newTokens, offendingTokensForPenalty, percent, pickMove, randDie, type CaptureObligation, type Move, type Tokens,
 } from './rules';
 import { BG_BASE, circlePts, drawBackground, drawDie, drawPawn, mix, shade, starPts } from './draw';
 import { TOKEN_URLS_BY_PLAYER, getCachedPawnTexture, loadPawnTexture } from './tokenAssets';
@@ -101,13 +101,14 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     let winner = -1;
     let ranking: { idx: number; pct: number }[] = [];
     const wishUsed = [false, false, false, false];
-    const sixStreak = [0, 0, 0, 0];
 
     // Count matches in browser (localStorage): in the first 3 matches only, show capture hints and skip confirmations
     const matchCount = recordMatchStarted();
     const isFirst3Matches = matchCount <= 3;
     let turnCapturePromise = 0;
     let turnCapturesTaken = 0;
+    let turnObligation: CaptureObligation | null = null;
+    const turnTokensCaptured = new Set<number>();
 
     let dice: [number, number] = [5, 2];
     let diceUsed: [boolean, boolean] = [true, true];
@@ -634,6 +635,9 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     let adG: Graphics;
     let diceTrayC: Container;
     let diceTrayG: Graphics;
+    let sumC: Container;
+    let sumG: Graphics;
+    let sumTxt: Text;
 
     function buildUi() {
         if (!uiBuilt) {
@@ -674,6 +678,23 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                 dieC.push(c);
                 dieG.push(g);
             }
+
+            // Combined sum selector button shown between the two dice when the Lone Token combined move is legal
+            sumC = new Container();
+            sumG = new Graphics();
+            sumG.eventMode = 'none';
+            sumTxt = new Text({
+                text: '',
+                style: { fontFamily: 'Arial, sans-serif', fontSize: 13, fontWeight: '900', fill: 0xffffff },
+            });
+            sumTxt.anchor.set(0.5);
+            sumTxt.eventMode = 'none';
+            sumC.addChild(sumG, sumTxt);
+            sumC.eventMode = 'static';
+            sumC.cursor = 'pointer';
+            sumC.visible = false;
+            sumC.on('pointertap', () => triggerDieTap(2));
+            uiLayer.addChild(sumC);
             // Central HOME text on board hub (clean white bold text, no orange circle)
             homeCenterTxt = new Text({
                 text: 'HOME',
@@ -730,6 +751,10 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                 dieC[i].hitArea = new Circle(0, 0, diceSize * 1.35);
             }
         }
+        if (sumC) {
+            sumC.position.set((diceCX[0] + diceCX[1]) / 2, diceCY + diceSize * 0.75);
+            sumC.hitArea = new Rectangle(-44, -16, 88, 32);
+        }
         if (turnTxt && !turnTxt.destroyed) {
             turnTxt.position.set(diceCX[0] / 2 + diceCX[1] / 2, turnY);
         }
@@ -776,13 +801,27 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             const used = diceUsed[i];
             const choosingDie = !!waitChoice && !used && !dieConfirmed && isMyTurn;
             const pulse = (rollingIdle || dieFlash > 0 ? 1 + 0.08 * Math.sin(now / 160) : 1) * (choosingDie ? 1 + 0.04 * Math.sin(now / 220) : 1);
-            const sel = !used && selDie === i && !!waitChoice;
+            const sel = !used && (selDie === i || selDie === 2) && !!waitChoice;
             const dimDice = !isMyTurn || (used && !waitRoll);
             if (dieG[i]) {
                 drawDie(dieG[i], diceSize, dice[i], diceColor, current === 2 ? 0x2a2a2a : 0xffffff, { dim: dimDice, glow: sel || rollingIdle });
             }
             if (dieC[i]?.scale) {
                 dieC[i].scale.set(pulse);
+            }
+        }
+        if (sumC && sumG && sumTxt) {
+            const hasCombined = !!waitChoice && isMyTurn && !diceUsed[0] && !diceUsed[1] && optionsNow.some((m) => m.die === 2);
+            sumC.visible = hasCombined;
+            if (hasCombined) {
+                const activeSum = selDie === 2;
+                const total = dice[0] + dice[1];
+                sumTxt.text = `${dice[0]}+${dice[1]} = ${total}`;
+                sumTxt.style.fill = activeSum ? 0x0f172a : 0xfef08a;
+                sumG.clear()
+                    .roundRect(-42, -13, 84, 26, 13)
+                    .fill({ color: activeSum ? 0xfacc15 : 0x0f172a, alpha: 0.95 })
+                    .stroke({ width: activeSum ? 2.5 : 1.5, color: 0xfacc15, alpha: 0.95 });
             }
         }
         if (dieFlash > 0) dieFlash = Math.max(0, dieFlash - 16);
@@ -821,8 +860,11 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             handGap = 24;
         } else if (waitChoice) {
             const usable = optionsNow.filter((m) => m.die === selDie);
+            const targetDieIdx = selDie === 2 ? 0 : selDie;
             if (!dieConfirmed) {
-                handTarget = dieCenter(selDie); // step 1: which number
+                handTarget = selDie === 2 && sumC?.visible
+                    ? { x: sumC.position.x, y: sumC.position.y }
+                    : dieCenter(targetDieIdx); // step 1: which number
                 handGap = 24;
             } else if (usable.length && views[current]?.[usable[0].tok]?.c?.position) {
                 // step 2: point down at the piece to move (follows the board)
@@ -830,7 +872,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                 handTarget = { x: vc.position.x, y: vc.position.y };
                 handGap = 16;
             } else {
-                handTarget = dieCenter(selDie);
+                handTarget = dieCenter(targetDieIdx);
                 handGap = 24;
             }
         } else {
@@ -1023,28 +1065,28 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     }
 
     function buildMoveFromServer(rp: number, dieIndex: number, tokenIndex: number, to: number, captures: { p: number; t: number }[], reachedHome: boolean, passed?: boolean): Move {
+        const moveVal = dieIndex === 2 ? (dice[0] || 0) + (dice[1] || 0) : (dice[dieIndex] || 0);
         if (passed) {
-            return { tok: tokenIndex, die: dieIndex, value: dice[dieIndex] || 0, to: tokens[rp][tokenIndex], captures: [], fromBase: false, reachesHome: false, passed: true } as any;
+            return { tok: tokenIndex, die: dieIndex, value: moveVal, to: tokens[rp][tokenIndex], captures: [], fromBase: false, reachesHome: false, combined: dieIndex === 2, passed: true } as any;
         }
         return optionsNow.find((o) => o.die === dieIndex && o.tok === tokenIndex)
-            || legalMoves(tokens, rp, dice[dieIndex], dieIndex, active).find((o) => o.tok === tokenIndex)
+            || legalMovesForTurn(tokens, rp, dice, diceUsed, active).find((o) => o.die === dieIndex && o.tok === tokenIndex)
             || {
                 tok: tokenIndex,
                 to,
                 die: dieIndex,
-                value: dice[dieIndex] || 0,
+                value: moveVal,
                 captures: captures || [],
                 fromBase: tokens[rp][tokenIndex] === IN_BASE,
                 reachesHome: !!reachedHome,
+                combined: dieIndex === 2,
             };
     }
 
-    bus.onRemoteDiceRolled = (rp, rolledDice, lucky, streakForfeited) => {
+    bus.onRemoteDiceRolled = (rp, rolledDice, lucky, _streakForfeited) => {
         if (lucky) {
             popup('lucky', 'LUCKY 7!', `${nameOf(rp)} rolled Lucky 7 (counts as 6+6)!`, 2500);
             sfx.fanfare();
-        } else if (streakForfeited) {
-            popup('penalty', 'PENALTY', `${nameOf(rp)} rolled 3 consecutive double sixes! Turn forfeited.`, 2500);
         }
 
         // If current was desynced from active roller, abort stale turn cleanly and align to rp
@@ -1103,7 +1145,8 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             store.patch({ gulPrompt: null, captureNotice: null, skipCapturePrompt: null });
         }
         if (passed) {
-            diceUsed[dieIndex] = true;
+            if (dieIndex === 2) diceUsed = [true, true];
+            else diceUsed[dieIndex] = true;
             popup('info', 'PASSED', `${nameOf(rp)} passed the Gul!`, 2000);
             if (waitChoice && current === rp) {
                 const r = waitChoice;
@@ -1126,8 +1169,8 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         syncHand();
     };
 
-    bus.onRemotePenaltyApplied = (rp: number, tokenIndex: number) => {
-        void penalize(rp, tokenIndex);
+    bus.onRemotePenaltyApplied = (rp: number, tokenIndices: number[]) => {
+        void penalize(rp, tokenIndices);
     };
 
     bus.onRemoteGameOver = (remoteWinner: number) => {
@@ -1328,8 +1371,18 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             r();
             return;
         }
-        if (waitChoice && !diceUsed[i] && (!isOnline() ? !isAI(current) : multiplayerClient.myPlayerIndex === current)) {
-            if (!optionsNow.some((m) => m.die === i)) return;
+        if (waitChoice && (!isOnline() ? !isAI(current) : multiplayerClient.myPlayerIndex === current)) {
+            if (i === 2) {
+                if (diceUsed[0] || diceUsed[1] || !optionsNow.some((m) => m.die === 2)) return;
+            } else if (diceUsed[i]) {
+                return;
+            } else if (!optionsNow.some((m) => m.die === i)) {
+                if (!diceUsed[0] && !diceUsed[1] && optionsNow.some((m) => m.die === 2)) {
+                    i = 2;
+                } else {
+                    return;
+                }
+            }
             sfx.tap();
             selDie = i;
             dieConfirmed = true;
@@ -1359,11 +1412,17 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         // Smart die resolution:
         // 1) Does currently selected die work for this token?
         let m = optionsNow.find((o) => o.die === selDie && o.tok === v.t);
-        // 2) If not, does the other available die work for this token?
-        if (!m) {
-            m = optionsNow.find((o) => o.tok === v.t);
-            if (m) {
-                selDie = m.die;
+        // 2) If user hasn't locked a single die, prefer a combined capture on this token if available
+        if (!m || (!dieConfirmed && optionsNow.some((o) => o.tok === v.t && o.die === 2 && o.captures.length > 0))) {
+            const capCombined = !dieConfirmed ? optionsNow.find((o) => o.tok === v.t && o.die === 2 && o.captures.length > 0) : undefined;
+            if (capCombined) {
+                m = capCombined;
+                selDie = 2;
+            } else if (!m) {
+                m = optionsNow.find((o) => o.tok === v.t);
+                if (m) {
+                    selDie = m.die;
+                }
             }
         }
 
@@ -1377,74 +1436,108 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         sfx.tap();
 
         const proceedWithMove = () => {
-            if (m.reachesHome) {
+            if (m!.reachesHome) {
+                store.patch({
+                    gulPrompt: {
+                        p: current,
+                        tokenIndex: v.t,
+                        dieIndex: m!.die,
+                        value: m!.value,
+                    },
+                });
+                bus.onGulDecision = (decision: 'gul' | 'pass') => {
+                    bus.onGulDecision = undefined;
+                    if (decision === 'gul') {
+                        dieConfirmed = true;
+                        sfx.tap();
+                        if (isOnline()) {
+                            pendingLocalMoves.push({ dieIndex: m!.die, tokenIndex: v.t });
+                            void multiplayerClient.movePawn(m!.die, v.t, 'gul').then((res) => {
+                                if (res && !res.ok && !dead) void multiplayerClient.syncState();
+                            });
+                        }
+                        const r = waitChoice;
+                        waitChoice = null;
+                        if (r) r(m!);
+                    } else {
+                        dieConfirmed = true;
+                        sfx.tap();
+                        if (isOnline()) {
+                            pendingLocalMoves.push({ dieIndex: m!.die, tokenIndex: v.t });
+                            void multiplayerClient.movePawn(m!.die, v.t, 'pass').then((res) => {
+                                if (res && !res.ok && !dead) {
+                                    const idx = pendingLocalMoves.findIndex((pm) => pm.dieIndex === m!.die && pm.tokenIndex === v.t);
+                                    if (idx !== -1) pendingLocalMoves.splice(idx, 1);
+                                    void multiplayerClient.syncState();
+                                }
+                            });
+                        }
+                        if (m!.die === 2 || m!.combined) diceUsed = [true, true];
+                        else diceUsed[m!.die] = true;
+                        clearHighlights();
+                        popup('info', 'PASSED', `${nameOf(current)} passed the Gul!`, 2000);
+                        const r = waitChoice;
+                        waitChoice = null;
+                        if (r) r({ ...m!, reachesHome: false, to: tokens[current][v.t], passed: true } as any);
+                    }
+                };
+                return;
+            }
+
+            if (isOnline()) {
+                // Track local move so server echo does not double-move or consume next die
+                pendingLocalMoves.push({ dieIndex: m!.die, tokenIndex: v.t });
+                void multiplayerClient.movePawn(m!.die, v.t).then((res) => {
+                    if (res && !res.ok && !dead) {
+                        const idx = pendingLocalMoves.findIndex((pm) => pm.dieIndex === m!.die && pm.tokenIndex === v.t);
+                        if (idx !== -1) pendingLocalMoves.splice(idx, 1);
+                        void multiplayerClient.syncState();
+                    }
+                });
+                // Execute move locally immediately for zero-latency instant response!
+                const r = waitChoice;
+                waitChoice = null;
+                if (r) r(m!);
+                return;
+            }
+
+            const r = waitChoice;
+            waitChoice = null;
+            if (r) r(m!);
+        };
+
+        // First 3 matches: show confirmation warning before skipping a required capture
+        const wouldSkipCapture = (() => {
+            if (!isFirst3Matches || !turnObligation || turnObligation.required <= 0) return false;
+            if (turnCapturesTaken >= turnObligation.required) return false;
+            const afterCaps = turnCapturesTaken + (m.captures.length > 0 ? 1 : 0);
+            if (afterCaps >= turnObligation.required) return false;
+            if (m.combined || m.die === 2) return true;
+            const sim = tokens.map((row) => row.slice());
+            sim[current][m.tok] = m.to;
+            for (const c of m.captures) sim[c.p][c.t] = IN_BASE;
+            const nextUsed: [boolean, boolean] = [diceUsed[0], diceUsed[1]];
+            nextUsed[m.die] = true;
+            if (nextUsed[0] && nextUsed[1]) return true;
+            const remMoves = legalMovesForTurn(sim, current, dice, nextUsed, active);
+            const remCanCap = remMoves.some((m2) => m2.captures.length > 0);
+            return afterCaps + (remCanCap ? 1 : 0) < turnObligation.required;
+        })();
+
+        if (wouldSkipCapture) {
             store.patch({
-                gulPrompt: {
-                    p: current,
-                    tokenIndex: v.t,
-                    dieIndex: m.die,
-                    value: m.value,
+                skipCapturePrompt: {
+                    message: 'This move leaves your capture requirement unmet. Every token with a capture option that did not capture will go back to base. Continue anyway?',
                 },
             });
-            bus.onGulDecision = (decision: 'gul' | 'pass') => {
-                bus.onGulDecision = undefined;
-                if (decision === 'gul') {
-                    dieConfirmed = true;
-                    sfx.tap();
-                    if (isOnline()) {
-                        pendingLocalMoves.push({ dieIndex: m.die, tokenIndex: v.t });
-                        void multiplayerClient.movePawn(m.die, v.t, 'gul').then((res) => {
-                            if (res && !res.ok && !dead) void multiplayerClient.syncState();
-                        });
-                    }
-                    const r = waitChoice;
-                    waitChoice = null;
-                    if (r) r(m);
-                } else {
-                    dieConfirmed = true;
-                    sfx.tap();
-                    if (isOnline()) {
-                        pendingLocalMoves.push({ dieIndex: m.die, tokenIndex: v.t });
-                        void multiplayerClient.movePawn(m.die, v.t, 'pass').then((res) => {
-                            if (res && !res.ok && !dead) {
-                                const idx = pendingLocalMoves.findIndex((pm) => pm.dieIndex === m.die && pm.tokenIndex === v.t);
-                                if (idx !== -1) pendingLocalMoves.splice(idx, 1);
-                                void multiplayerClient.syncState();
-                            }
-                        });
-                    }
-                    diceUsed[m.die] = true;
-                    clearHighlights();
-                    popup('info', 'PASSED', `${nameOf(current)} passed the Gul!`, 2000);
-                    const r = waitChoice;
-                    waitChoice = null;
-                    if (r) r({ ...m, reachesHome: false, to: tokens[current][v.t], passed: true } as any);
+            bus.onSkipCaptureDecision = (decision: 'continue' | 'back') => {
+                bus.onSkipCaptureDecision = undefined;
+                if (decision === 'continue') {
+                    proceedWithMove();
                 }
             };
             return;
         }
-
-        if (isOnline()) {
-            // Track local move so server echo does not double-move or consume next die
-            pendingLocalMoves.push({ dieIndex: m.die, tokenIndex: v.t });
-            void multiplayerClient.movePawn(m.die, v.t).then((res) => {
-                if (res && !res.ok && !dead) {
-                    const idx = pendingLocalMoves.findIndex((pm) => pm.dieIndex === m.die && pm.tokenIndex === v.t);
-                    if (idx !== -1) pendingLocalMoves.splice(idx, 1);
-                    void multiplayerClient.syncState();
-                }
-            });
-            // Execute move locally immediately for zero-latency instant response!
-            const r = waitChoice;
-            waitChoice = null;
-            if (r) r(m);
-            return;
-        }
-
-        const r = waitChoice;
-        waitChoice = null;
-        if (r) r(m);
-    };
 
         proceedWithMove();
     }
@@ -1574,26 +1667,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     }
 
     function movesFor(p: number): Move[] {
-        const out: Move[] = [];
-        for (let i = 0; i < 2; i++) if (!diceUsed[i]) out.push(...legalMoves(tokens, p, dice[i], i, active));
-        return out;
-    }
-
-    /**
-     * Penalty check for the capture obligation.
-     *
-     * `atStart` is the number of captures the whole roll could deliver from the
-     * opening position -- the promise the turn began with. `taken` is what the
-     * player actually collected. Falling short means a capture was thrown away.
-     *
-     * Using the START figure (rather than the board after each move) is what makes
-     * a duplicate die forgiven: with 5 + 5 and one capture, spending the first 5
-     * innocently drops the figure that is still reachable to 1, so taking it with
-     * the second 5 finishes level and nothing is owed. Waste BOTH 5s and the
-     * player ends on 0 against a promise of 1, which is the penalty.
-     */
-    function captureDebt(atStart: number, taken: number): boolean {
-        return taken < atStart;
+        return legalMovesForTurn(tokens, p, dice, diceUsed, active);
     }
 
     async function moveToken(p: number, m: Move, expectedEpoch?: number) {
@@ -1648,23 +1722,32 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     }
 
     let isPenalizing = false;
-    async function penalize(p: number, t: number) {
-        if (isPenalizing) return;
+    async function penalize(p: number, tokenIndices: number[]) {
+        if (isPenalizing || tokenIndices.length === 0) return;
         isPenalizing = true;
         try {
-            const v = views[p]?.[t];
             const name = nameOf(p);
-            if (v) v.flash = 500;
+            for (const t of tokenIndices) {
+                const v = views[p]?.[t];
+                if (v) v.flash = 500;
+            }
             sfx.buzzer();
             popup('penalty', tr(lang, 'penT'), tr(lang, 'penS', { n: name }), 2500);
             if (turnTxt && !turnTxt.destroyed) {
-                turnTxt.text = `⚠️ PENALTY: ${name} missed a capture! Pawn sent back to base!`;
+                turnTxt.text = tokenIndices.length > 1
+                    ? `⚠️ PENALTY: ${name} missed required captures! ${tokenIndices.length} pawns sent back to base!`
+                    : `⚠️ PENALTY: ${name} missed a capture! Pawn sent back to base!`;
             }
-            if (v && tokens[p][t] !== IN_BASE) {
-                await sendHome(p, t, 600);
-            }
-            if (v) v.flash = 0;
-            tokens[p][t] = IN_BASE;
+            await Promise.all(
+                tokenIndices.map(async (t) => {
+                    const v = views[p]?.[t];
+                    if (v && tokens[p][t] !== IN_BASE) {
+                        await sendHome(p, t, 600);
+                    }
+                    if (v) v.flash = 0;
+                    tokens[p][t] = IN_BASE;
+                }),
+            );
             publish();
             anyAI('laughAt', p, { n: name }, 0.8);
             ai('excuse', p, undefined, 0.5);
@@ -1801,21 +1884,18 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                 diceUsed = initialDiceUsedFromServer;
             }
             const double6 = roll.a === 6 && roll.b === 6;
-            if (double6) {
-                sixStreak[p]++;
-                if (!roll.lucky) ai('sixes', p, undefined, 0.7);
-            } else sixStreak[p] = 0;
+            if (double6 && !roll.lucky) {
+                ai('sixes', p, undefined, 0.7);
+            }
             // Double 6 awards an extra turn unconditionally every time
             let extra = double6;
 
             // --- use each die
-            // Capture obligation: the player must take EVERY capture this roll allows
-            // (one per die, since each die is spent on its own move). The opening
-            // promise is measured once; the moves are then counted against it.
-            const initialTurnTokens = tokens.map((r) => r.slice());
-            const capturePromise = maxCaptures(tokens, p, dice, active).taken;
+            turnObligation = evaluateCaptureObligation(tokens, p, dice, active);
+            const capturePromise = turnObligation.required;
             turnCapturePromise = capturePromise;
             turnCapturesTaken = 0;
+            turnTokensCaptured.clear();
             let capturesTaken = 0;
             for (let guard = 0; guard < 4 && (!diceUsed[0] || !diceUsed[1]); guard++) {
                 if (turnAborted()) break;
@@ -1828,9 +1908,12 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                     break;
                 }
 
-                if (!isAI(p) && optionsNow.some((opt) => opt.captures.length > 0)) {
+                if (!isAI(p) && capturesTaken < capturePromise) {
                     store.patch({
-                        captureNotice: "Capture available! You must take it, or the token that could have captured goes back to base.",
+                        captureNotice:
+                            capturePromise >= 2
+                                ? `Multiple captures available! Complete at least ${capturePromise} captures or remaining option tokens go back to base.`
+                                : 'Capture available! Complete a capture or every token with a capture option goes back to base.',
                     });
                 } else {
                     store.patch({ captureNotice: null });
@@ -1841,13 +1924,18 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                 if (pmIdx !== -1) {
                     const pm = pendingRemoteMoves.splice(pmIdx, 1)[0];
                     setStatus('');
-                    diceUsed[pm.dieIndex] = true;
+                    if (pm.dieIndex === 2) diceUsed = [true, true];
+                    else diceUsed[pm.dieIndex] = true;
                     if (pm.passed) {
                         optionsNow = [];
                         continue;
                     }
                     const preChosen = buildMoveFromServer(p, pm.dieIndex, pm.tokenIndex, pm.to, pm.captures, pm.reachedHome, false);
-                    capturesTaken += preChosen.captures.length;
+                    if (preChosen.captures.length > 0) {
+                        capturesTaken += 1;
+                        turnCapturesTaken = capturesTaken;
+                        turnTokensCaptured.add(preChosen.tok);
+                    }
                     const res = await applyMove(p, preChosen, myTurnEpoch);
                     if (turnAborted()) break;
                     if (res.captured || res.home) extra = true;
@@ -1869,12 +1957,17 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                         break;
                     }
                     setStatus('');
-                    diceUsed[chosen.die] = true;
+                    if (chosen.die === 2 || chosen.combined) diceUsed = [true, true];
+                    else diceUsed[chosen.die] = true;
                     if ((chosen as any).passed) {
                         optionsNow = [];
                         continue;
                     }
-                    capturesTaken += chosen.captures.length;
+                    if (chosen.captures.length > 0) {
+                        capturesTaken += 1;
+                        turnCapturesTaken = capturesTaken;
+                        turnTokensCaptured.add(chosen.tok);
+                    }
                     const res = await applyMove(p, chosen, myTurnEpoch);
                     if (turnAborted()) break;
                     if (res.captured || res.home) extra = true;
@@ -1886,15 +1979,29 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                     continue;
                 }
                 if (!isOnline() && isAI(p)) {
-                    // the AI takes every capture it can, including 2-die combined captures
+                    // the AI takes every capture it can, including 2-die combined, stack, and multi-capture routes
                     const caps = optionsNow.filter((m) => m.captures.length);
                     let pool = caps.length ? caps : optionsNow;
-                    if (caps.length === 0 && !diceUsed[0] && !diceUsed[1]) {
-                        const comboSetup = optionsNow.filter((m1) => {
+                    if (caps.length > 1 && capturePromise >= 2 && !diceUsed[0] && !diceUsed[1]) {
+                        const keepSecond = caps.filter((m1) => {
+                            if (m1.combined || m1.die === 2) return false;
                             const sim = tokens.map((row) => row.slice());
                             sim[p][m1.tok] = m1.to;
-                            const otherDie = m1.die === 0 ? 1 : 0;
-                            return legalMoves(sim, p, dice[otherDie], otherDie, active).some((m2) => m2.captures.length > 0);
+                            for (const c of m1.captures) sim[c.p][c.t] = IN_BASE;
+                            const nextUsed: [boolean, boolean] = [diceUsed[0], diceUsed[1]];
+                            nextUsed[m1.die] = true;
+                            return legalMovesForTurn(sim, p, dice, nextUsed, active).some((m2) => m2.captures.length > 0);
+                        });
+                        if (keepSecond.length > 0) pool = keepSecond;
+                    }
+                    if (caps.length === 0 && !diceUsed[0] && !diceUsed[1]) {
+                        const comboSetup = optionsNow.filter((m1) => {
+                            if (m1.combined || m1.die === 2) return false;
+                            const sim = tokens.map((row) => row.slice());
+                            sim[p][m1.tok] = m1.to;
+                            const nextUsed: [boolean, boolean] = [diceUsed[0], diceUsed[1]];
+                            nextUsed[m1.die] = true;
+                            return legalMovesForTurn(sim, p, dice, nextUsed, active).some((m2) => m2.captures.length > 0);
                         });
                         if (comboSetup.length > 0) pool = comboSetup;
                     }
@@ -1902,8 +2009,13 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                     selDie = chosen.die;
                     refreshHighlights();
                     await delay(900);
-                    diceUsed[chosen.die] = true;
-                    capturesTaken += chosen.captures.length;
+                    if (chosen.die === 2 || chosen.combined) diceUsed = [true, true];
+                    else diceUsed[chosen.die] = true;
+                    if (chosen.captures.length > 0) {
+                        capturesTaken += 1;
+                        turnCapturesTaken = capturesTaken;
+                        turnTokensCaptured.add(chosen.tok);
+                    }
                     const res = await applyMove(p, chosen, myTurnEpoch);
                     if (res.captured || res.home) extra = true;
                     if (hasWon(tokens, p)) {
@@ -1915,10 +2027,15 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                 }
 
                 if (turnAborted()) break;
-                // --- human: tap a die to choose it, then tap a token to move it
+                // --- human: tap a die (or combined sum) to choose it, then tap a token to move it
                 setStatus(tr(lang, 'pickDie'));
                 const usableDies = [0, 1].filter((i) => !diceUsed[i] && optionsNow.some((m) => m.die === i));
-                if (!usableDies.includes(selDie)) selDie = usableDies[0];
+                const hasCombined = !diceUsed[0] && !diceUsed[1] && optionsNow.some((m) => m.die === 2);
+                if (usableDies.length > 0) {
+                    if (!usableDies.includes(selDie) && !(selDie === 2 && hasCombined)) selDie = usableDies[0];
+                } else if (hasCombined) {
+                    selDie = 2;
+                }
                 refreshHighlights();
                 if (Math.random() < 0.25) anyAI('advice', p, undefined, 0.5);
                 const chosen = await new Promise<Move | undefined>((res) => {
@@ -1929,12 +2046,17 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                     break;
                 }
                 setStatus('');
-                diceUsed[chosen.die] = true;
+                if (chosen.die === 2 || chosen.combined) diceUsed = [true, true];
+                else diceUsed[chosen.die] = true;
                 if ((chosen as any).passed) {
                     optionsNow = [];
                     continue;
                 }
-                capturesTaken += chosen.captures.length;
+                if (chosen.captures.length > 0) {
+                    capturesTaken += 1;
+                    turnCapturesTaken = capturesTaken;
+                    turnTokensCaptured.add(chosen.tok);
+                }
                 const res = await applyMove(p, chosen, myTurnEpoch);
                 if (turnAborted()) break;
                 if (res.captured || res.home) extra = true;
@@ -1945,15 +2067,16 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                 optionsNow = [];
             }
             store.patch({ captureNotice: null, skipCapturePrompt: null });
-            // Settle up: any capture the roll promised and the player did not take.
-            // In online multiplayer, server is authoritative and broadcasts penalty_applied
-            if (!isOnline() && captureDebt(capturePromise, capturesTaken)) {
-                const offendingTok = findOffendingToken(initialTurnTokens, tokens, p, dice, active);
-                if (offendingTok !== null) {
-                    await penalize(p, offendingTok);
+            // Settle up: if captures made < required, every token that had a capture option and did not capture returns to base.
+            // In online multiplayer, server is authoritative and broadcasts penalty_applied.
+            if (!isOnline() && turnObligation && turnObligation.required > 0 && capturesTaken < turnObligation.required) {
+                const offending = offendingTokensForPenalty(turnObligation, tokens, p, turnTokensCaptured);
+                if (offending.length > 0) {
+                    await penalize(p, offending);
                     extra = false;
                 }
             }
+            turnObligation = null;
             diceUsed = [true, true];
             clearHighlights();
             return extra;

@@ -74,15 +74,55 @@ export type Tokens = number[][]; // [player][token] -> r
 export interface Move {
     tok: number;
     to: number;
-    die: number; // index of the die used (0/1)
+    die: number; // index of the die used (0, 1, or 2 = combined both dice)
     value: number;
     captures: { p: number; t: number }[];
     fromBase: boolean;
     reachesHome: boolean;
+    combined?: boolean;
 }
 
 export function newTokens(): Tokens {
     return [0, 1, 2, 3].map(() => [IN_BASE, IN_BASE, IN_BASE, IN_BASE]);
+}
+
+function countColorOnGlobal(tokens: Tokens, color: number, g: number, excludeTok = -1): number {
+    let count = 0;
+    for (let u = 0; u < 4; u++) {
+        if (u === excludeTok) continue;
+        const rr = tokens[color][u];
+        if (rr >= 0 && rr <= LAST_TRACK && globalIdx(color, rr) === g) count++;
+    }
+    return count;
+}
+
+/**
+ * Computes captures for player `p` landing token `tok` at relative square `to`.
+ * Stack / Pair Protection: a capture only succeeds if `myCount >= otherCount`
+ * on the target non-safe square (counting the moving token plus any friendly
+ * tokens of `p` already standing on that square).
+ */
+function capturesOnSquare(tokens: Tokens, p: number, tok: number, to: number, active: boolean[]): { p: number; t: number }[] {
+    const captures: { p: number; t: number }[] = [];
+    if (to < 0 || to > LAST_TRACK) return captures;
+    const g = globalIdx(p, to);
+    if (SAFE.has(g)) return captures;
+
+    const myCount = 1 + countColorOnGlobal(tokens, p, g, tok);
+    for (let q = 0; q < 4; q++) {
+        if (q === p || !active[q]) continue;
+        const oppTokens: { p: number; t: number }[] = [];
+        for (let u = 0; u < 4; u++) {
+            const rr = tokens[q][u];
+            if (rr >= 0 && rr <= LAST_TRACK && globalIdx(q, rr) === g) {
+                oppTokens.push({ p: q, t: u });
+            }
+        }
+        if (oppTokens.length > 0 && myCount >= oppTokens.length) {
+            captures.push(...oppTokens);
+        }
+    }
+    return captures;
 }
 
 /** Legal moves for player p with a single die value. */
@@ -99,21 +139,72 @@ export function legalMoves(tokens: Tokens, p: number, value: number, die: number
             to = r + value;
             if (to > HOME) continue;
         }
-        const captures: { p: number; t: number }[] = [];
-        if (to <= LAST_TRACK) {
-            const g = globalIdx(p, to);
-            if (!SAFE.has(g)) {
-                for (let q = 0; q < 4; q++) {
-                    if (q === p || !active[q]) continue;
-                    for (let u = 0; u < 4; u++) {
-                        const rr = tokens[q][u];
-                        if (rr >= 0 && rr <= LAST_TRACK && globalIdx(q, rr) === g) captures.push({ p: q, t: u });
-                    }
-                }
-            }
-        }
+        const captures = capturesOnSquare(tokens, p, t, to, active);
         out.push({ tok: t, to, die, value, captures, fromBase: r === IN_BASE, reachesHome: to === HOME });
     }
+    return out;
+}
+
+/**
+ * All legal moves for player `p` given the current `[d0, d1]` and `diceUsed` state.
+ * Enforces the Lone Token Full-Total Rule:
+ * - When player `p` has only 1 active token out on the board (`0 <= r < HOME`)
+ *   and both dice remain unused:
+ *   - Partial entry of that lone token into its coloured home path (`>= PATH_START`)
+ *     or centre home (`HOME`) with a single die is blocked.
+ *   - That lone token may move by the full combined total (`dice[0] + dice[1]`,
+ *     with `die: 2, combined: true`) whenever legal (`to <= HOME`).
+ */
+export function legalMovesForTurn(
+    tokens: Tokens,
+    p: number,
+    dice: [number, number],
+    diceUsed: [boolean, boolean],
+    active: boolean[],
+): Move[] {
+    const bothRemaining = !diceUsed[0] && !diceUsed[1];
+    const outIndices: number[] = [];
+    for (let t = 0; t < 4; t++) {
+        const r = tokens[p][t];
+        if (r >= 0 && r < HOME) outIndices.push(t);
+    }
+    const isLoneToken = outIndices.length === 1;
+    const loneTok = isLoneToken ? outIndices[0] : -1;
+
+    const out: Move[] = [];
+    for (let i = 0; i < 2; i++) {
+        if (diceUsed[i]) continue;
+        const single = legalMoves(tokens, p, dice[i], i, active);
+        for (const m of single) {
+            if (bothRemaining && isLoneToken && m.tok === loneTok) {
+                const r = tokens[p][loneTok];
+                if ((r <= LAST_TRACK && m.to >= PATH_START) || (r >= PATH_START && m.to === HOME)) {
+                    continue;
+                }
+            }
+            out.push(m);
+        }
+    }
+
+    if (bothRemaining && isLoneToken) {
+        const r = tokens[p][loneTok];
+        const total = dice[0] + dice[1];
+        const to = r + total;
+        if (to <= HOME) {
+            const captures = capturesOnSquare(tokens, p, loneTok, to, active);
+            out.push({
+                tok: loneTok,
+                to,
+                die: 2,
+                value: total,
+                captures,
+                fromBase: false,
+                reachesHome: to === HOME,
+                combined: true,
+            });
+        }
+    }
+
     return out;
 }
 
@@ -136,9 +227,14 @@ export function fineProgress(tokens: Tokens, p: number): number {
 export function hasWon(tokens: Tokens, p: number): boolean {
     return tokens[p].every((r) => r === HOME);
 }
-/** Lucky Seven: every token is in base, home or on its coloured path (none on the main track). */
+/**
+ * Lucky Seven: active only when zero tokens are on the open track AND
+ * at least 1 token is still in base (1-4 in base, others on coloured path or centre home).
+ */
 export function luckySevenAllowed(tokens: Tokens, p: number): boolean {
-    return tokens[p].every((r) => r < 0 || r >= PATH_START) && !hasWon(tokens, p);
+    const hasBaseToken = tokens[p].some((r) => r === IN_BASE);
+    const noneOnOpenTrack = tokens[p].every((r) => r === IN_BASE || r >= PATH_START);
+    return hasBaseToken && noneOnOpenTrack && !hasWon(tokens, p);
 }
 export function isLuckySum(a: number, b: number): boolean {
     return a + b === 7;
@@ -174,6 +270,10 @@ export function scoreMove(tokens: Tokens, p: number, m: Move, active: boolean[])
     if (m.to <= LAST_TRACK) {
         const g = globalIdx(p, m.to);
         if (SAFE.has(g)) s += 18;
+        else if (countColorOnGlobal(tokens, p, g, m.tok) >= 1) {
+            // Forming or reinforcing a protected friendly stack on an open square
+            s += 14;
+        }
         // chase the leader: sit 1..6 squares behind a leader token on the track
         if (leader >= 0 && leader !== p) {
             for (let u = 0; u < 4; u++) {
@@ -184,8 +284,8 @@ export function scoreMove(tokens: Tokens, p: number, m: Move, active: boolean[])
                 if (dist >= 1 && dist <= 6 && !SAFE.has(lg)) s += 22 + 26 * leaderPct;
             }
         }
-        // avoid landing right in front of an opponent
-        if (!SAFE.has(g)) {
+        // avoid landing right in front of an opponent unless protected in a friendly stack
+        if (!SAFE.has(g) && countColorOnGlobal(tokens, p, g, m.tok) === 0) {
             for (let q = 0; q < 4; q++) {
                 if (q === p || !active[q]) continue;
                 for (let u = 0; u < 4; u++) {
@@ -213,15 +313,9 @@ export function pickMove(tokens: Tokens, p: number, options: Move[], active: boo
 
 /**
  * Largest number of captures the player can still make from `dice`.
- *
- * Each die is spent on its own move (a Lucky Seven is just 6 + 6 here), so this
- * explores capture-only sequences: pick an unused die that can capture, take the
- * capture, then continue with the rest. The obligation is to collect them all,
- * so missing any of them is what earns the penalty.
- *
- * Capture-only exploration is deliberate. A non-capturing move could in theory
- * line up a later capture, but that is a vanishingly rare edge and chasing it
- * would make the penalty unpredictable.
+ * Explores single-die captures, same-token combined-sum captures,
+ * and two-token pair/stack captures (where two friendly tokens land on an
+ * opponent stack so myCount >= otherCount).
  */
 export function maxCaptures(
     tokens: Tokens,
@@ -247,8 +341,9 @@ export function maxCaptures(
             }
         }
 
-        // 2. Combined total sum capture move (e.g. 6 + 1 = 7 step on the same token):
-        // If moving a token with die1 then die2 (or die2 then die1) captures an opponent on the combined landing square
+        // 2. Two-die sequences:
+        //    (a) Same-token combined total capture (e.g. 6 + 1 on the same token)
+        //    (b) Two-token pair/stack capture (tok1 lands on opponent stack, then tok2 joins to make myCount >= otherCount)
         if (unused.length >= 2) {
             for (let i = 0; i < unused.length; i++) {
                 const d1 = unused[i];
@@ -259,8 +354,11 @@ export function maxCaptures(
                     nb1[p][m1.tok] = m1.to;
                     for (const c of m1.captures) nb1[c.p][c.t] = IN_BASE;
 
+                    const g1 = m1.to <= LAST_TRACK ? globalIdx(p, m1.to) : -1;
                     const secondMoves = legalMoves(nb1, p, dice[d2], d2, active).filter(
-                        (m2) => m2.tok === m1.tok && m2.captures.length > 0
+                        (m2) =>
+                            m2.captures.length > 0 &&
+                            (m2.tok === m1.tok || (g1 >= 0 && m2.to <= LAST_TRACK && globalIdx(p, m2.to) === g1))
                     );
                     for (const m2 of secondMoves) {
                         const nb2 = nb1.map((row) => row.slice());
@@ -286,7 +384,8 @@ export function randDie(): number {
 
 /**
  * Finds the index of the player's token that missed a mandatory capture.
- * Evaluates the initial board state against legal capture moves (both single-die and combined sum).
+ * Evaluates the initial board state against legal capture moves (single-die,
+ * combined-sum, and two-token stack captures).
  */
 export function findOffendingToken(
     initialTokens: Tokens,
@@ -305,7 +404,7 @@ export function findOffendingToken(
             }
         }
     }
-    // 2. Combined total sum capture moves (e.g. 6 + 1 on the same token)
+    // 2. Combined total sum or 2-token stack capture moves
     if (dice.length >= 2) {
         for (let d = 0; d < dice.length; d++) {
             const moves = legalMoves(initialTokens, p, dice[d], d, active);
@@ -313,10 +412,17 @@ export function findOffendingToken(
                 const nb = initialTokens.map((row) => row.slice());
                 nb[p][m.tok] = m.to;
                 for (const c of m.captures) nb[c.p][c.t] = IN_BASE;
+                const g1 = m.to <= LAST_TRACK ? globalIdx(p, m.to) : -1;
                 const rem = dice.filter((_, idx) => idx !== d);
                 for (let d2 = 0; d2 < rem.length; d2++) {
                     const moves2 = legalMoves(nb, p, rem[d2], d2, active);
-                    if (moves2.some((m2) => m2.tok === m.tok && m2.captures.length > 0)) {
+                    if (
+                        moves2.some(
+                            (m2) =>
+                                m2.captures.length > 0 &&
+                                (m2.tok === m.tok || (g1 >= 0 && m2.to <= LAST_TRACK && globalIdx(p, m2.to) === g1))
+                        )
+                    ) {
                         if (!candidates.includes(m.tok)) candidates.push(m.tok);
                     }
                 }
@@ -343,4 +449,119 @@ export function findOffendingToken(
         }
     }
     return null;
+}
+
+export interface CaptureObligation {
+    required: number;
+    optionTokens: number[];
+    hasSingle: boolean;
+    hasTotal: boolean;
+    hasPair: boolean;
+}
+
+/**
+ * Evaluates capture obligation at the start of a roll `[d0, d1]`:
+ * - options = single-die captures, total captures (final square only), pair captures (two tokens, one die each)
+ * - if no options: required = 0
+ * - if a total or pair option exists: required = 1
+ * - else: required = most independent single-die captures possible (each die used once)
+ */
+export function evaluateCaptureObligation(
+    tokens: Tokens,
+    p: number,
+    dice: number[],
+    active: boolean[],
+): CaptureObligation {
+    const optionSet = new Set<number>();
+    let hasSingle = false;
+    let hasTotal = false;
+    let hasPair = false;
+
+    // 1. Single-die captures
+    for (let d = 0; d < dice.length; d++) {
+        const moves = legalMoves(tokens, p, dice[d], d, active);
+        for (const m of moves) {
+            if (m.captures.length > 0) {
+                hasSingle = true;
+                optionSet.add(m.tok);
+            }
+        }
+    }
+
+    // 2. Two-die options: total captures (final square only) and pair captures (two tokens, one die each)
+    if (dice.length >= 2) {
+        for (let d1 = 0; d1 < dice.length; d1++) {
+            const d2 = d1 === 0 ? 1 : 0;
+            const firstMoves = legalMoves(tokens, p, dice[d1], d1, active);
+            for (const m1 of firstMoves) {
+                const nb1 = tokens.map((row) => row.slice());
+                nb1[p][m1.tok] = m1.to;
+                for (const c of m1.captures) nb1[c.p][c.t] = IN_BASE;
+
+                const g1 = m1.to <= LAST_TRACK ? globalIdx(p, m1.to) : -1;
+                const secondMoves = legalMoves(nb1, p, dice[d2], d2, active);
+                for (const m2 of secondMoves) {
+                    if (m2.captures.length === 0) continue;
+                    if (m2.tok === m1.tok) {
+                        // Total capture (final square only)
+                        hasTotal = true;
+                        optionSet.add(m1.tok);
+                    } else if (g1 >= 0 && m2.to <= LAST_TRACK && globalIdx(p, m2.to) === g1) {
+                        // Pair capture (two tokens, one die each)
+                        hasPair = true;
+                        optionSet.add(m1.tok);
+                        optionSet.add(m2.tok);
+                    }
+                }
+            }
+        }
+    }
+
+    let required = 0;
+    if (hasSingle || hasTotal || hasPair) {
+        if (hasTotal || hasPair) {
+            required = 1;
+        } else {
+            // Most independent single-die captures possible (each die used once)
+            let bestCount = 0;
+            const exploreSingle = (b: Tokens, unused: number[], count: number) => {
+                if (count > bestCount) bestCount = count;
+                for (let i = 0; i < unused.length; i++) {
+                    const dieIdx = unused[i];
+                    const opts = legalMoves(b, p, dice[dieIdx], dieIdx, active).filter((m) => m.captures.length > 0);
+                    for (const m of opts) {
+                        const nb = b.map((row) => row.slice());
+                        nb[p][m.tok] = m.to;
+                        for (const c of m.captures) nb[c.p][c.t] = IN_BASE;
+                        exploreSingle(nb, unused.filter((d) => d !== dieIdx), count + 1);
+                    }
+                }
+            };
+            exploreSingle(tokens.map((row) => row.slice()), dice.map((_, idx) => idx), 0);
+            required = bestCount;
+        }
+    }
+
+    return {
+        required,
+        optionTokens: Array.from(optionSet).sort((a, b) => a - b),
+        hasSingle,
+        hasTotal,
+        hasPair,
+    };
+}
+
+/**
+ * Returns every token that had a capture option at the start of the turn and did
+ * NOT make a capture during the turn (provided it is currently out of base).
+ */
+export function offendingTokensForPenalty(
+    obligation: CaptureObligation,
+    currentTokens: Tokens,
+    p: number,
+    tokensThatCaptured: Set<number>,
+): number[] {
+    return obligation.optionTokens.filter(
+        (tok) => !tokensThatCaptured.has(tok) && currentTokens[p][tok] >= 0,
+    );
 }

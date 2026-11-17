@@ -156,9 +156,14 @@ class MultiplayerClient {
             }
         });
 
-        this.socket.on('penalty_applied', (data: { p: number; tokenIndex: number; penalties: number; reason?: string }) => {
+        this.socket.on('penalty_applied', (data: { p: number; tokenIndex: number; tokenIndices?: number[]; penalties: number; reason?: string }) => {
+            const list = data.tokenIndices && data.tokenIndices.length > 0 ? data.tokenIndices : [data.tokenIndex];
             if (this.roomState && this.roomState.tokens[data.p]) {
-                this.roomState.tokens[data.p][data.tokenIndex] = -1;
+                for (const tok of list) {
+                    if (tok >= 0 && tok < 4) {
+                        this.roomState.tokens[data.p][tok] = -1;
+                    }
+                }
                 if (this.roomState.players[data.p]) {
                     this.roomState.players[data.p]!.penalties = data.penalties;
                 }
@@ -166,7 +171,7 @@ class MultiplayerClient {
             this.notify();
 
             if (bus.onRemotePenaltyApplied) {
-                bus.onRemotePenaltyApplied(data.p, data.tokenIndex, data.penalties);
+                bus.onRemotePenaltyApplied(data.p, list, data.penalties);
             }
         });
 
