@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
     legalMovesForTurn,
     newTokens,
@@ -19,7 +22,11 @@ import {
     recordMatchEnded,
     type PlayerRecordData,
     type SeatResultData,
-} from './records';
+} from './supabaseRecords';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const SNAPSHOT_FILE = path.resolve(__dirname, '../tmp/ludo-rooms-snapshot.json');
 
 export interface RoomPlayer {
     id: string; // publicPlayerId e.g. g_a1b2c3d4
@@ -71,7 +78,7 @@ export interface ClientRoomState {
     dice: [number, number] | null;
     diceUsed: [boolean, boolean];
     winner: number | null;
-    rankings: { playerIndex: number; name: string; avatar: string; rank: number }[];
+    rankings: { playerIndex: number; name: string; avatar: string; rank: number; progress?: number }[];
     turnTimeSec?: number;
     maxPlayers?: number;
 }
@@ -90,7 +97,7 @@ export interface Room {
     dice: [number, number] | null;
     diceUsed: [boolean, boolean];
     winner: number | null;
-    rankings: { playerIndex: number; name: string; avatar: string; rank: number }[];
+    rankings: { playerIndex: number; name: string; avatar: string; rank: number; progress?: number }[];
     rematchVotes: Set<string>;
     startedAt?: number;
     endedAt?: number;
@@ -127,12 +134,187 @@ function calculateProgress(tokens: Tokens, p: number): number {
     return Math.min(100, Math.max(0, Math.round(sum * 100) / 100));
 }
 
+const MAX_ROOMS_IN_MEMORY = 500;
+const MAX_ROOM_CREATES_PER_5MIN = 12;
+const MAX_ROOM_JOINS_PER_MIN = 30;
+const SNAPSHOT_MAX_AGE_MS = 2 * 60 * 60 * 1000;
+
 class RoomManager {
     private rooms = new Map<string, Room>();
     private broadcast: BroadcastFn = () => {};
+    private roomCreateWindows = new Map<string, number[]>();
+    private roomJoinWindows = new Map<string, number[]>();
+    private snapshotTimer: NodeJS.Timeout | null = null;
+
+    constructor() {
+        this.restoreFromSnapshot();
+    }
 
     public setBroadcastCallback(cb: BroadcastFn) {
         this.broadcast = cb;
+    }
+
+    private checkSlidingRateLimit(storeMap: Map<string, number[]>, ip: string, limit: number, windowMs: number): boolean {
+        const now = Date.now();
+        const key = ip || '127.0.0.1';
+        const recent = (storeMap.get(key) || []).filter((t) => now - t < windowMs);
+        if (recent.length >= limit) {
+            storeMap.set(key, recent);
+            return false;
+        }
+        recent.push(now);
+        storeMap.set(key, recent);
+        if (storeMap.size > 2000) {
+            for (const [k, v] of storeMap.entries()) {
+                if (v.every((t) => now - t >= windowMs)) storeMap.delete(k);
+            }
+        }
+        return true;
+    }
+
+    private serializeRoom(room: Room) {
+        return {
+            code: room.code,
+            hostId: room.hostId,
+            phase: room.phase,
+            fillBots: room.fillBots,
+            turnTimeSec: room.turnTimeSec,
+            maxPlayers: room.maxPlayers,
+            players: room.players,
+            tokens: room.tokens,
+            currentTurn: room.currentTurn,
+            turnDeadline: room.turnDeadline,
+            dice: room.dice,
+            diceUsed: room.diceUsed,
+            winner: room.winner,
+            rankings: room.rankings,
+            rematchVotes: Array.from(room.rematchVotes),
+            startedAt: room.startedAt,
+            endedAt: room.endedAt,
+            matchEnded: room.matchEnded,
+            capturesMade: room.capturesMade,
+            timesCaptured: room.timesCaptured,
+            penalties: room.penalties,
+            capturePromise: room.capturePromise,
+            capturesTakenThisTurn: room.capturesTakenThisTurn,
+            tokensCapturedThisTurn: room.tokensCapturedThisTurn,
+            turnObligation: room.turnObligation,
+            hadCaptureOrHomeThisTurn: room.hadCaptureOrHomeThisTurn,
+            turnAutoPlay: room.turnAutoPlay,
+            initialTurnTokens: room.initialTurnTokens,
+            savedAt: Date.now(),
+        };
+    }
+
+    private scheduleSnapshotSave() {
+        if (this.snapshotTimer) return;
+        this.snapshotTimer = setTimeout(() => {
+            this.snapshotTimer = null;
+            this.saveSnapshotSync();
+        }, 2500);
+        this.snapshotTimer.unref?.();
+    }
+
+    public saveSnapshotSync() {
+        try {
+            const dir = path.dirname(SNAPSHOT_FILE);
+            if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+            const payload = {
+                savedAt: Date.now(),
+                rooms: Array.from(this.rooms.values()).map((r) => this.serializeRoom(r)),
+            };
+            const tmpFile = `${SNAPSHOT_FILE}.tmp`;
+            fs.writeFileSync(tmpFile, JSON.stringify(payload), 'utf8');
+            fs.renameSync(tmpFile, SNAPSHOT_FILE);
+        } catch (err: any) {
+            console.warn('[RoomManager] Snapshot write skipped:', err?.message);
+        }
+    }
+
+    private restoreFromSnapshot() {
+        try {
+            if (!fs.existsSync(SNAPSHOT_FILE)) return;
+            const raw = fs.readFileSync(SNAPSHOT_FILE, 'utf8');
+            const parsed = JSON.parse(raw);
+            const now = Date.now();
+            if (!parsed?.rooms || !Array.isArray(parsed.rooms)) return;
+            if (parsed.savedAt && now - parsed.savedAt > SNAPSHOT_MAX_AGE_MS) return;
+
+            for (const item of parsed.rooms) {
+                if (!item?.code || (item.savedAt && now - item.savedAt > SNAPSHOT_MAX_AGE_MS)) continue;
+                const players: (RoomPlayer | null)[] = Array.isArray(item.players)
+                    ? item.players.map((p: any) =>
+                          p
+                              ? {
+                                    ...p,
+                                    socketId: '',
+                                    connected: !!p.isAI,
+                                    disconnectTime: p.isAI ? null : now,
+                                }
+                              : null
+                      )
+                    : [null, null, null, null];
+
+                const room: Room = {
+                    code: item.code,
+                    hostId: item.hostId,
+                    phase: item.phase || 'lobby',
+                    fillBots: item.fillBots !== undefined ? !!item.fillBots : true,
+                    turnTimeSec: item.turnTimeSec ?? 90,
+                    maxPlayers: item.maxPlayers ?? 4,
+                    players,
+                    tokens: item.tokens || newTokens(),
+                    currentTurn: item.currentTurn ?? 0,
+                    turnDeadline: 0,
+                    dice: item.dice || null,
+                    diceUsed: item.diceUsed || [false, false],
+                    winner: item.winner ?? null,
+                    rankings: Array.isArray(item.rankings) ? item.rankings : [],
+                    rematchVotes: new Set(Array.isArray(item.rematchVotes) ? item.rematchVotes : []),
+                    startedAt: item.startedAt,
+                    endedAt: item.endedAt,
+                    matchEnded: item.matchEnded,
+                    capturesMade: item.capturesMade || [0, 0, 0, 0],
+                    timesCaptured: item.timesCaptured || [0, 0, 0, 0],
+                    penalties: item.penalties || [0, 0, 0, 0],
+                    capturePromise: item.capturePromise || 0,
+                    capturesTakenThisTurn: item.capturesTakenThisTurn || 0,
+                    tokensCapturedThisTurn: item.tokensCapturedThisTurn || [],
+                    turnObligation: item.turnObligation,
+                    hadCaptureOrHomeThisTurn: item.hadCaptureOrHomeThisTurn,
+                    turnAutoPlay: false,
+                    initialTurnTokens: item.initialTurnTokens,
+                    disconnectTimeouts: new Map(),
+                };
+                this.rooms.set(room.code, room);
+            }
+            if (this.rooms.size > 0) {
+                console.log(`[RoomManager] Restored ${this.rooms.size} room(s) from snapshot`);
+            }
+        } catch (err: any) {
+            console.warn('[RoomManager] Could not restore snapshot:', err?.message);
+        }
+    }
+
+    public shutdown() {
+        if (this.snapshotTimer) {
+            clearTimeout(this.snapshotTimer);
+            this.snapshotTimer = null;
+        }
+        this.saveSnapshotSync();
+    }
+
+    private reassignHostIfNeeded(room: Room, leavingPlayerId: string) {
+        if (room.hostId !== leavingPlayerId) return;
+        const nextHuman =
+            room.players.find((p) => p && p.publicPlayerId !== leavingPlayerId && !p.isAI && p.connected) ||
+            room.players.find((p) => p && p.publicPlayerId !== leavingPlayerId && !p.isAI);
+        if (nextHuman) {
+            room.hostId = nextHuman.publicPlayerId;
+            for (const p of room.players) {
+                if (p) p.isHost = p.publicPlayerId === room.hostId;
+            }
+        }
     }
 
     public getRoom(code: string): Room | undefined {
@@ -247,6 +429,12 @@ class RoomManager {
         secretSessionToken?: string;
         error?: string;
     } {
+        if (!this.checkSlidingRateLimit(this.roomCreateWindows, ip, MAX_ROOM_CREATES_PER_5MIN, 5 * 60 * 1000)) {
+            return { ok: false, error: 'Too many rooms created from this IP. Please wait a moment.' };
+        }
+        if (this.rooms.size >= MAX_ROOMS_IN_MEMORY) {
+            return { ok: false, error: 'Server room capacity reached. Please try again shortly.' };
+        }
         let identity: { publicPlayerId: string; secretSessionToken: string; tokenHash: string };
         try {
             if (sessionToken && sessionToken.length >= 24) {
@@ -312,6 +500,7 @@ class RoomManager {
         };
 
         this.rooms.set(code, room);
+        this.scheduleSnapshotSave();
         return {
             ok: true,
             roomCode: code,
@@ -335,6 +524,9 @@ class RoomManager {
         secretSessionToken?: string;
         error?: string;
     } {
+        if (!this.checkSlidingRateLimit(this.roomJoinWindows, ip, MAX_ROOM_JOINS_PER_MIN, 60 * 1000)) {
+            return { ok: false, error: 'Too many join attempts. Please slow down.' };
+        }
         const room = this.rooms.get(code);
         if (!room) return { ok: false, error: 'Room not found' };
 
@@ -533,6 +725,7 @@ class RoomManager {
 
         this.broadcast(room.code, 'game_started', this.getClientRoomState(room));
         this.startTurnTimer(room);
+        this.scheduleSnapshotSave();
 
         if (room.players[0]?.isAI) {
             this.scheduleBotTurn(room);
@@ -1023,6 +1216,7 @@ class RoomManager {
         });
 
         this.startTurnTimer(room);
+        this.scheduleSnapshotSave();
 
         if (room.players[room.currentTurn]?.isAI) {
             this.scheduleBotTurn(room);
@@ -1147,6 +1341,7 @@ class RoomManager {
             name: item.player.name,
             avatar: item.player.avatar,
             rank: rIdx + 1,
+            progress: rIdx === 0 ? 100 : Math.round(calculateProgress(room.tokens, item.seat)),
         }));
 
         room.rankings = rankings;
@@ -1170,6 +1365,7 @@ class RoomManager {
         }));
 
         room.matchEnded = true;
+        this.scheduleSnapshotSave();
         this.broadcast(room.code, 'game_over', { winner: room.winner, rankings: room.rankings });
 
         // Non-blocking async record
@@ -1207,22 +1403,25 @@ class RoomManager {
         }
 
         if (room.phase === 'lobby') {
-            if (room.hostId === player.publicPlayerId) {
-                const nextHost = room.players.find((p) => p && p.publicPlayerId !== player.publicPlayerId && !p.isAI);
-                if (nextHost) room.hostId = nextHost.publicPlayerId;
-            }
+            this.reassignHostIfNeeded(room, player.publicPlayerId);
             room.players[idx] = null;
             const remaining = room.players.filter((p) => p !== null && !p.isAI);
             if (remaining.length === 0) {
                 this.rooms.delete(room.code);
+                this.scheduleSnapshotSave();
                 return true;
             }
             this.broadcast(room.code, 'room_updated', this.getClientRoomState(room));
+            this.scheduleSnapshotSave();
         } else {
             player.isAI = true;
+            player.isHost = false;
             player.name = `${player.name} (Bot)`;
             player.connected = false;
+            this.reassignHostIfNeeded(room, player.publicPlayerId);
             this.broadcast(room.code, 'player_converted_to_bot', { p: idx, name: player.name });
+            this.broadcast(room.code, 'room_updated', this.getClientRoomState(room));
+            this.scheduleSnapshotSave();
             if (room.currentTurn === idx && room.phase === 'playing') {
                 this.scheduleBotTurn(room);
             }
@@ -1246,18 +1445,17 @@ class RoomManager {
                 const timeout = setTimeout(() => {
                     const r = this.rooms.get(room.code);
                     if (r && r.phase === 'lobby' && r.players[idx] && !r.players[idx]!.connected) {
-                        if (r.hostId === r.players[idx]!.publicPlayerId) {
-                            const nextHost = r.players.find((p) => p && p.publicPlayerId !== r.players[idx]!.publicPlayerId && !p.isAI);
-                            if (nextHost) r.hostId = nextHost.publicPlayerId;
-                        }
+                        this.reassignHostIfNeeded(r, r.players[idx]!.publicPlayerId);
                         r.players[idx] = null;
                         r.disconnectTimeouts.delete(idx);
                         const remaining = r.players.filter((p) => p !== null && !p.isAI);
                         if (remaining.length === 0) {
                             this.rooms.delete(r.code);
+                            this.scheduleSnapshotSave();
                             return;
                         }
                         this.broadcast(r.code, 'room_updated', this.getClientRoomState(r));
+                        this.scheduleSnapshotSave();
                     }
                 }, 45000);
 
@@ -1272,12 +1470,17 @@ class RoomManager {
                 const timeout = setTimeout(() => {
                     const r = this.rooms.get(room.code);
                     if (r && r.players[idx] && !r.players[idx]!.connected) {
+                        const timedOutId = r.players[idx]!.publicPlayerId;
                         r.players[idx]!.isAI = true;
+                        r.players[idx]!.isHost = false;
                         r.players[idx]!.name = `${r.players[idx]!.name} (Bot)`;
+                        this.reassignHostIfNeeded(r, timedOutId);
                         this.broadcast(r.code, 'player_converted_to_bot', {
                             p: idx,
                             name: r.players[idx]!.name,
                         });
+                        this.broadcast(r.code, 'room_updated', this.getClientRoomState(r));
+                        this.scheduleSnapshotSave();
                         if (r.currentTurn === idx && r.phase === 'playing') {
                             this.scheduleBotTurn(r);
                         }

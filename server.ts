@@ -6,7 +6,7 @@ import express from 'express';
 import { Server as SocketIOServer } from 'socket.io';
 import { createServer as createViteServer } from 'vite';
 import { roomManager } from './server/roomManager';
-import { fetchLeaderboard } from './server/records';
+import { fetchLeaderboard } from './server/supabaseRecords';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -52,6 +52,29 @@ app.use(express.json());
 // Broadcast callback so RoomManager can push events directly to Socket.io rooms
 roomManager.setBroadcastCallback((roomCode: string, event: string, payload: any) => {
     io.to(roomCode).emit(event, payload);
+});
+
+// Strict per-IP sliding window rate limiter for REST / proxy endpoints
+const apiRateWindows = new Map<string, number[]>();
+const API_RATE_LIMIT_MAX = 60;
+const API_RATE_WINDOW_MS = 60_000;
+
+app.use('/api', (req, res, next) => {
+    const ip = req.ip || req.socket.remoteAddress || '127.0.0.1';
+    const now = Date.now();
+    const history = (apiRateWindows.get(ip) || []).filter((t) => now - t < API_RATE_WINDOW_MS);
+    if (history.length >= API_RATE_LIMIT_MAX) {
+        apiRateWindows.set(ip, history);
+        return res.status(429).json({ ok: false, error: 'Too many API requests. Please slow down.' });
+    }
+    history.push(now);
+    apiRateWindows.set(ip, history);
+    if (apiRateWindows.size > 2000) {
+        for (const [k, v] of apiRateWindows.entries()) {
+            if (v.every((t) => now - t >= API_RATE_WINDOW_MS)) apiRateWindows.delete(k);
+        }
+    }
+    return next();
 });
 
 // REST Health and Room endpoints
@@ -247,6 +270,14 @@ process.on('uncaughtException', (err) => {
 process.on('unhandledRejection', (reason) => {
     console.error('Unhandled Rejection in server process:', reason);
 });
+
+const handleGracefulShutdown = (signal: string) => {
+    console.log(`[Server] Received ${signal}, saving room snapshots...`);
+    roomManager.shutdown();
+    process.exit(0);
+};
+process.once('SIGINT', () => handleGracefulShutdown('SIGINT'));
+process.once('SIGTERM', () => handleGracefulShutdown('SIGTERM'));
 
 // Vite dev middleware or static dist file serving
 async function startServer() {

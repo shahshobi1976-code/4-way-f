@@ -14,8 +14,15 @@ GRANT USAGE ON SCHEMA game4 TO anon, authenticated, service_role;
 CREATE TABLE IF NOT EXISTS game4.players (
     id TEXT PRIMARY KEY,
     display_name TEXT NOT NULL,
+    tournament_balance INTEGER DEFAULT 1000 NOT NULL,
+    matches_played INTEGER DEFAULT 0 NOT NULL,
+    wins INTEGER DEFAULT 0 NOT NULL,
     created_at TIMESTAMPTZ DEFAULT now() NOT NULL
 );
+
+ALTER TABLE game4.players ADD COLUMN IF NOT EXISTS tournament_balance INTEGER DEFAULT 1000 NOT NULL;
+ALTER TABLE game4.players ADD COLUMN IF NOT EXISTS matches_played INTEGER DEFAULT 0 NOT NULL;
+ALTER TABLE game4.players ADD COLUMN IF NOT EXISTS wins INTEGER DEFAULT 0 NOT NULL;
 
 -- 3.2 Matches table
 CREATE TABLE IF NOT EXISTS game4.matches (

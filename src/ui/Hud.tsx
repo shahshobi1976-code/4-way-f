@@ -5,7 +5,7 @@ import { tr, colorName } from '../i18n';
 import { COLORS } from '../game/rules';
 import { U } from './kit';
 import { multiplayerClient } from '../network/multiplayerClient';
-import { CelebrationCanvas } from './CelebrationCanvas';
+import { WinnerOverlay } from './WinnerOverlay';
 import * as sfx from '../game/sfx';
 
 const hex = (c: number) => `#${c.toString(16).padStart(6, '0')}`;
@@ -263,7 +263,6 @@ function LandscapeTopHud() {
 export function Hud() {
     const lang = useStore((s) => s.settings.lang);
     const popup = useStore((s) => s.popup);
-    const result = useStore((s) => s.result);
     const players = useStore((s) => s.players);
     const wishNums = useStore((s) => s.wishNums);
     const wishUsable = useStore((s) => s.wishUsable);
@@ -343,14 +342,6 @@ export function Hud() {
         }
         setCustomChat('');
         store.patch({ chatOpen: false });
-    };
-
-    const handleRematchClick = async () => {
-        if (isMultiplayer) {
-            await multiplayerClient.voteRematch();
-        } else {
-            store.patch({ gameId: store.get().gameId + 1, result: null });
-        }
     };
 
     const aiMute = useStore((s) => s.settings.aiMute);
@@ -720,133 +711,8 @@ export function Hud() {
                 </div>
             )}
 
-            {/* Grand Victory Celebration ("Jashan") and Full Result Window */}
-            {result && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md overflow-y-auto p-4 select-none">
-                    {/* Festive fireworks & confetti particle celebration */}
-                    <CelebrationCanvas />
-
-                    <div
-                        className="pop relative z-10 w-full rounded-3xl border-3 border-amber-400/80 bg-gradient-to-b from-[#141b3d]/98 via-[#0c122e]/98 to-[#060817]/98 text-center shadow-[0_0_60px_rgba(245,158,11,0.5)] overflow-hidden"
-                        style={{ maxWidth: U(580), padding: `${U(20)} ${U(24)}` }}
-                    >
-                        {/* Celebration ribbon header */}
-                        <div className="inline-flex items-center gap-2 px-4 py-1 rounded-full bg-gradient-to-r from-amber-500/30 via-yellow-400/40 to-amber-500/30 border border-amber-300/60 text-amber-200 font-black text-sm tracking-widest uppercase mb-2 shadow-[0_0_15px_rgba(245,158,11,0.3)] animate-pulse">
-                            <span>🎊</span> <span>JASHAN-E-FATEH • VICTORY CELEBRATION</span> <span>🎊</span>
-                        </div>
-
-                        {/* Glowing Trophy & Crown */}
-                        <div className="relative my-1">
-                            <div className="text-6xl sm:text-7xl drop-shadow-[0_0_20px_rgba(250,204,21,0.9)] animate-bounce">
-                                🏆
-                            </div>
-                            <div className="absolute top-0 right-1/2 translate-x-7 -translate-y-2 text-2xl animate-pulse">
-                                👑
-                            </div>
-                        </div>
-
-                        <div className="font-black text-transparent bg-clip-text bg-gradient-to-r from-amber-200 via-yellow-300 to-amber-400 tracking-wide" style={{ fontSize: U(34) }}>
-                            {nm(result[0].idx)} WINS!
-                        </div>
-                        <div className="text-amber-100/80 font-bold text-sm tracking-wide mt-1">
-                            🎉 Congratulations! Grand Champion of the Match 🎉
-                        </div>
-
-                        {/* Complete Results Leaderboard Table */}
-                        <div className="flex flex-col gap-2.5 my-4">
-                            {result.map((r, k) => {
-                                const isWinner = k === 0;
-                                const medals = ['🥇 1st', '🥈 2nd', '🥉 3rd', '4th'];
-                                return (
-                                    <div
-                                        key={r.idx}
-                                        className={`flex items-center justify-between rounded-2xl border transition-all ${
-                                            isWinner
-                                                ? 'bg-gradient-to-r from-amber-500/25 via-yellow-500/15 to-transparent border-amber-400/70 shadow-[0_0_16px_rgba(245,158,11,0.3)]'
-                                                : 'bg-white/5 border-white/10'
-                                        }`}
-                                        style={{
-                                            padding: `${U(10)} ${U(14)}`,
-                                            borderLeftWidth: U(6),
-                                            borderLeftColor: hex(COLORS[r.idx]),
-                                        }}
-                                    >
-                                        {/* Rank & Player Info */}
-                                        <div className="flex items-center gap-2.5 min-w-0">
-                                            <span className={`font-black ${isWinner ? 'text-amber-300 text-lg' : 'text-slate-300 text-base'}`}>
-                                                {medals[k]}
-                                            </span>
-                                            <span className="text-2xl">{players[r.idx]?.avatar || '👤'}</span>
-                                            <div className="text-left min-w-0">
-                                                <div className="font-black text-white text-base truncate flex items-center gap-1.5">
-                                                    <span>{nm(r.idx)}</span>
-                                                    {isWinner && <span className="text-amber-400 text-xs">👑 Champion</span>}
-                                                </div>
-                                                <div className="text-xs text-white/60 font-semibold">
-                                                    Color: {colorName(lang, r.idx)}
-                                                </div>
-                                            </div>
-                                        </div>
-
-                                        {/* Percentage & Progress Bar */}
-                                        <div className="flex items-center gap-3 shrink-0">
-                                            <div className="w-24 sm:w-28 h-3 rounded-full bg-black/60 overflow-hidden border border-white/20">
-                                                <div
-                                                    className="h-full rounded-full transition-all duration-700"
-                                                    style={{
-                                                        width: `${r.pct}%`,
-                                                        backgroundColor: hex(COLORS[r.idx]),
-                                                    }}
-                                                />
-                                            </div>
-                                            <span className={`font-black font-mono text-base ${isWinner ? 'text-amber-300 font-extrabold' : 'text-white/90'}`}>
-                                                {r.pct}%
-                                            </span>
-                                        </div>
-                                    </div>
-                                );
-                            })}
-                        </div>
-
-                        {/* Action Buttons: Rematch, Jashan Confetti, Main Menu */}
-                        <div className="flex flex-col sm:flex-row gap-2.5 mt-4">
-                            <button
-                                onClick={handleRematchClick}
-                                className="flex-1 rounded-2xl bg-gradient-to-r from-emerald-400 via-teal-400 to-cyan-400 hover:from-emerald-300 hover:to-cyan-300 font-black text-slate-950 shadow-[0_0_20px_rgba(52,211,153,0.4)] hover:brightness-110 active:scale-[0.98] transition-all cursor-pointer flex items-center justify-center gap-2"
-                                style={{ padding: U(12), fontSize: U(20) }}
-                            >
-                                <span>🔄</span>
-                                <span>{isMultiplayer ? 'Play Again (Rematch)' : tr(lang, 'again')}</span>
-                            </button>
-
-                            <button
-                                onClick={() => {
-                                    window.dispatchEvent(new CustomEvent('launch-jashan'));
-                                    sfx.fanfare();
-                                }}
-                                className="rounded-2xl bg-gradient-to-r from-amber-400 to-orange-500 hover:from-amber-300 hover:to-orange-400 font-black text-slate-950 shadow-md active:scale-[0.98] transition-all cursor-pointer flex items-center justify-center gap-1.5 px-4"
-                                style={{ padding: U(12), fontSize: U(18) }}
-                                title="Launch more celebration fireworks!"
-                            >
-                                <span>🎊</span>
-                                <span>Jashan!</span>
-                            </button>
-
-                            <button
-                                onClick={() => {
-                                    if (isMultiplayer) multiplayerClient.leaveRoom();
-                                    store.patch({ phase: 'menu', result: null });
-                                }}
-                                className="flex-1 rounded-2xl bg-white/10 hover:bg-white/20 border border-white/20 font-bold text-white active:scale-[0.98] transition-all cursor-pointer flex items-center justify-center gap-2"
-                                style={{ padding: U(12), fontSize: U(20) }}
-                            >
-                                <span>🏠</span>
-                                <span>{tr(lang, 'menu')}</span>
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            )}
+            {/* Dedicated Winner Celebration & All-4-Players Percentage Overlay */}
+            <WinnerOverlay />
         </>
     );
 }

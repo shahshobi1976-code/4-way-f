@@ -316,5 +316,35 @@ console.log('--- RUNNING LUDO RULES & PENALTY & GUL TEST SUITE ---');
     assert(offOne.length === 1 && offOne[0] === 1, 'offendingTokensForPenalty excludes tokens that actually captured');
 }
 
+// Test 12: Server host disconnect reassignment & room creation rate limiting
+{
+    const hostTok = 'tok_test_host_resilience_12345678';
+    const guestTok = 'tok_test_guest_resilience_1234567';
+    const cRes = roomManager.createRoom(hostTok, 'HostA', '👑', 'sock_host_a', 90, 4, '10.0.0.1');
+    assert(cRes.ok && !!cRes.roomCode, 'Created room for resilience test');
+    const jRes = roomManager.joinRoom(cRes.roomCode!, guestTok, 'GuestB', '🦁', 'sock_guest_b', '10.0.0.2');
+    assert(jRes.ok && jRes.playerIndex === 1, 'Guest joined seat 1');
+
+    const startRes = roomManager.startGame(cRes.roomCode!, hostTok);
+    assert(startRes.ok, 'Match started for resilience test');
+
+    const r = roomManager.getRoom(cRes.roomCode!)!;
+    const guestPubId = r.players[1]!.publicPlayerId;
+    roomManager.leaveRoom(cRes.roomCode!, hostTok);
+    assert(r.hostId === guestPubId && r.players[1]!.isHost === true, 'Host ownership transfers to connected human when host leaves mid-match');
+    assert(r.players[0]!.isAI === true && r.players[0]!.isHost === false, 'Departed host becomes Bot and loses host flag');
+
+    // Rate-limit test on isolated IP
+    let blocked = false;
+    for (let k = 0; k < 15; k++) {
+        const rr = roomManager.createRoom(`tok_ratelimit_${k}_123456789012345`, `RL${k}`, '👑', `sock_rl_${k}`, 90, 4, '192.168.77.77');
+        if (!rr.ok && rr.error?.includes('Too many rooms')) {
+            blocked = true;
+            break;
+        }
+    }
+    assert(blocked, 'Room creation enforces per-IP sliding window rate limit');
+}
+
 console.log('🎉 ALL LUDO RULES & PENALTY & GUL TESTS PASSED SUCCESSFULLY!');
 process.exit(0);
