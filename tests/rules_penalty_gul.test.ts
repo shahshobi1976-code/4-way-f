@@ -27,14 +27,20 @@ function assert(condition: boolean, msg: string) {
 
 console.log('--- RUNNING LUDO RULES & PENALTY & GUL TEST SUITE ---');
 
-// Test 1: Win condition requires reaching centre HOME (56), NOT PATH_START (51)
+// Test 1: Coloured Path Win condition — all 4 pawns reaching coloured home stretch (>= path.length - 6) or centre HOME wins immediately
 {
     const tokens: Tokens = newTokens();
-    tokens[0] = [PATH_START, PATH_START, PATH_START, PATH_START]; // 51, 51, 51, 51
-    assert(!hasWon(tokens, 0), 'hasWon returns false when pawns are on coloured path (51..55)');
+    tokens[0] = [50, PATH_START, PATH_START, PATH_START]; // one pawn still on open track (50)
+    assert(!hasWon(tokens, 0), 'hasWon returns false when any pawn is still on open track (50)');
 
-    tokens[0] = [55, 55, 55, 55];
-    assert(!hasWon(tokens, 0), 'hasWon returns false when pawns are on square 55');
+    tokens[0] = [IN_BASE, PATH_START, 53, HOME]; // one pawn still in base
+    assert(!hasWon(tokens, 0), 'hasWon returns false when any pawn is still in base (-1)');
+
+    tokens[0] = [PATH_START, PATH_START, PATH_START, PATH_START]; // 51, 51, 51, 51
+    assert(hasWon(tokens, 0), 'hasWon returns true when all 4 pawns reach coloured path start (51)');
+
+    tokens[0] = [PATH_START, 53, 55, HOME]; // mixed coloured path + finished
+    assert(hasWon(tokens, 0), 'hasWon returns true when all 4 pawns are on coloured home path (51..55) or centre HOME (56)');
 
     tokens[0] = [HOME, HOME, HOME, HOME]; // 56
     assert(hasWon(tokens, 0), 'hasWon returns true when all 4 pawns reach centre HOME (56)');
@@ -43,8 +49,9 @@ console.log('--- RUNNING LUDO RULES & PENALTY & GUL TEST SUITE ---');
 // Test 2: tokenShare progress computation
 {
     assert(tokenShare(-1) === 0, 'tokenShare is 0 for base token');
+    assert(tokenShare(50) < 1, 'tokenShare is < 1 for token on last open-track square (50)');
+    assert(tokenShare(PATH_START) === 1, 'tokenShare is 1 (100%) once token reaches coloured path start (51)');
     assert(tokenShare(HOME) === 1, 'tokenShare is 1 (100%) for token at centre HOME (56)');
-    assert(tokenShare(PATH_START) < 1, 'tokenShare is < 1 for token on path start (51)');
 }
 
 // Test 3: maxCaptures and findOffendingToken detection
@@ -309,11 +316,13 @@ console.log('--- RUNNING LUDO RULES & PENALTY & GUL TEST SUITE ---');
     const midOnlyOb = evaluateCaptureObligation(midOnlyToks, 0, [4, 2], active);
     assert(!midOnlyOb.hasTotal && midOnlyOb.hasSingle && midOnlyOb.required === 1, 'Intermediate square capture does NOT count as total capture (final square only)');
 
-    // 11E: offendingTokensForPenalty excludes tokens that captured and base tokens
-    const offAll = offendingTokensForPenalty(sharedOb, sharedDieToks, 0, new Set());
-    assert(offAll.length === 2 && offAll[0] === 0 && offAll[1] === 1, 'offendingTokensForPenalty returns all uncaptured option tokens when required not met');
-    const offOne = offendingTokensForPenalty(sharedOb, sharedDieToks, 0, new Set([0]));
+    // 11E: offendingTokensForPenalty excludes tokens that captured, base tokens, and finished HOME tokens
+    const offAll = offendingTokensForPenalty(sharedOb, 0, new Set(), sharedDieToks[0]);
+    assert(offAll.length === 2 && offAll[0] === 0 && offAll[1] === 1, 'offendingTokensForPenalty returns all uncaptured candidate tokens when required not met');
+    const offOne = offendingTokensForPenalty(sharedOb, 0, new Set([0]), sharedDieToks[0]);
     assert(offOne.length === 1 && offOne[0] === 1, 'offendingTokensForPenalty excludes tokens that actually captured');
+    const offMet = offendingTokensForPenalty(sharedOb, 1, new Set([0]), sharedDieToks[0]);
+    assert(offMet.length === 0, 'offendingTokensForPenalty returns [] once capturesMade >= required');
 }
 
 // Test 12: Server host disconnect reassignment & room creation rate limiting
@@ -344,6 +353,138 @@ console.log('--- RUNNING LUDO RULES & PENALTY & GUL TEST SUITE ---');
         }
     }
     assert(blocked, 'Room creation enforces per-IP sliding window rate limit');
+}
+
+// Test 13: Immunity & Edge Capture Obligation Rules (safe squares, home stretch, 2-stack block, shared target, combined precedence, dodging into home stretch)
+{
+    const active = [true, true, true, true];
+
+    // 13A: Safe/Star squares, start squares, home stretch, and protected 2-stack give required = 0
+    const immuneToks = newTokens();
+    immuneToks[0][0] = 5;
+    immuneToks[1][0] = (8 - 13 + 52) % 52; // Star square global 8
+    immuneToks[2][0] = 52; // Enemy in their own coloured home stretch
+    // Enemy 2-stack at global 10 (only 1 friendly token can reach -> Stack Protected)
+    immuneToks[3][0] = (10 - 39 + 52) % 52;
+    immuneToks[3][1] = (10 - 39 + 52) % 52;
+    const immuneOb = evaluateCaptureObligation(immuneToks, 0, [3, 5], active);
+    assert(
+        immuneOb.required === 0 && immuneOb.candidateTokenIndices.length === 0,
+        'Safe/star squares, home stretch, and protected 2-stacks impose required = 0',
+    );
+
+    // 13B: Shared single target reached by two tokens -> required = 1 (NOT 2)
+    const sharedEnemyToks = newTokens();
+    sharedEnemyToks[0][0] = 6; // +4 -> 10
+    sharedEnemyToks[0][1] = 8; // +2 -> 10
+    sharedEnemyToks[1][0] = (10 - 13 + 52) % 52;
+    const sharedEnemyOb = evaluateCaptureObligation(sharedEnemyToks, 0, [4, 2], active);
+    assert(
+        sharedEnemyOb.required === 1 && sharedEnemyOb.singleDieCaptures.length === 2,
+        'Two tokens targeting the SAME lone enemy require only 1 capture (not 2)',
+    );
+    assert(
+        offendingTokensForPenalty(sharedEnemyOb, 1, new Set([0]), [10, 8, -1, -1]).length === 0,
+        'When Token 0 captures shared enemy, Token 1 is NOT penalized',
+    );
+
+    // 13C: Both a combined-total capture AND two independent single-die captures exist -> required = 1
+    const combAndDualToks = newTokens();
+    combAndDualToks[0][0] = 6; // +4->10 (P1[0]), +2->8; combined +6->12 (P3[0])!
+    combAndDualToks[0][1] = 20; // +2->22 (P2[0])
+    combAndDualToks[1][0] = (10 - 13 + 52) % 52;
+    combAndDualToks[2][0] = (22 - 26 + 52) % 52;
+    combAndDualToks[3][0] = (12 - 39 + 52) % 52;
+    const combAndDualOb = evaluateCaptureObligation(combAndDualToks, 0, [4, 2], active);
+    assert(
+        combAndDualOb.combinedCaptures.length > 0 && combAndDualOb.required === 1,
+        'When combinedCaptures exists alongside dual single-die options, required = 1 so executing combined capture is unpenalized',
+    );
+
+    // 13D: Dodging into coloured home stretch (pos 52) still returns offending token to base
+    const dodgeToks = newTokens();
+    dodgeToks[0][0] = 46; // +2 -> 48 captures P1[0] at global 48, OR +6 -> 52 dodges into coloured home stretch!
+    dodgeToks[1][0] = (48 - 13 + 52) % 52;
+    const dodgeOb = evaluateCaptureObligation(dodgeToks, 0, [2, 6], active);
+    assert(dodgeOb.required === 1 && dodgeOb.candidateTokenIndices.includes(0), 'Capture at 48 detected before dodge');
+    const dodgeOffenders = offendingTokensForPenalty(dodgeOb, 0, new Set(), [52, IN_BASE, IN_BASE, IN_BASE]);
+    assert(
+        dodgeOffenders.length === 1 && dodgeOffenders[0] === 0,
+        'Dodging capture into coloured home stretch (pos 52) still flags token for return to base',
+    );
+}
+
+// Test 14: End-to-End Server 2-Token Pair Capture & Mid-Turn Newly Unlocked Capture
+{
+    const hostTok = 'tok_test_pair_and_mid_1234567890';
+    const res = roomManager.createRoom(hostTok, 'HostPair', '👑', 'sock_pair', 90, 4, '10.0.0.9');
+    assert(res.ok && !!res.roomCode, 'Created room for server pair & mid-turn tests');
+    const started = roomManager.startGame(res.roomCode!, hostTok);
+    assert(started.ok, 'Started room match so seats 1..3 are active');
+    const room = roomManager.getRoom(res.roomCode!)!;
+    room.currentTurn = 0;
+
+    // 14A: Server Pair Capture (Die 0 moves tok 0 to 10, Die 1 moves tok 1 to 10 breaking enemy pair -> 0 penalties)
+    room.tokens = newTokens();
+    room.tokens[0] = [6, 8, IN_BASE, IN_BASE];
+    const targetG10 = (10 - 13 + 52) % 52;
+    room.tokens[1] = [targetG10, targetG10, IN_BASE, IN_BASE];
+    room.dice = [4, 2];
+    room.diceUsed = [false, false];
+    room.capturesTakenThisTurn = 0;
+    room.tokensCapturedThisTurn = [];
+    room.turnMovedToSquare = {};
+    room.turnObligation = evaluateCaptureObligation(room.tokens, 0, room.dice, [true, true, true, true]);
+    room.capturePromise = room.turnObligation.required;
+    assert(
+        room.turnObligation.pairCaptures.length === 1 &&
+            room.turnObligation.required === 1 &&
+            room.turnObligation.candidateTokenIndices.join(',') === '0,1',
+        'Server detects PairCaptureOption [0,1] on enemy 2-stack with required = 1',
+    );
+
+    const m1 = roomManager.movePawn(room.code, hostTok, 0, 0, 'gul', false);
+    assert(m1.ok && room.tokens[0][0] === 10 && room.capturesTakenThisTurn === 0, 'Step 1 of pair capture lands token 0 on square 10');
+    const m2 = roomManager.movePawn(room.code, hostTok, 1, 1, 'gul', false);
+    assert(
+        m2.ok &&
+            room.tokens[0][1] === 10 &&
+            room.capturesTakenThisTurn === 1 &&
+            room.tokens[1][0] === IN_BASE &&
+            room.tokens[1][1] === IN_BASE,
+        'Step 2 of pair capture breaks opponent 2-stack on square 10',
+    );
+    assert(
+        room.tokensCapturedThisTurn!.includes(0) && room.tokensCapturedThisTurn!.includes(1),
+        'Both cooperating pair tokens [0, 1] credited in tokensCapturedThisTurn',
+    );
+    assert(room.penalties[0] === 0, 'Zero penalties applied after executing 2-token pair capture');
+
+    // 14B: Base-deploy + capture ([6, 4] deploys token 0 from base on 6 and reaches enemy at 4 on 4; skipping Die 2 penalizes token 0)
+    room.currentTurn = 0;
+    room.tokens = newTokens();
+    room.tokens[0] = [IN_BASE, 15, HOME, HOME];
+    room.tokens[1] = [(4 - 13 + 52) % 52, IN_BASE, IN_BASE, IN_BASE]; // Enemy sitting at global 4
+    room.dice = [6, 4];
+    room.diceUsed = [false, false];
+    room.capturesTakenThisTurn = 0;
+    room.tokensCapturedThisTurn = [];
+    room.turnMovedToSquare = {};
+    room.penalties = [0, 0, 0, 0];
+    room.turnObligation = evaluateCaptureObligation(room.tokens, 0, room.dice, [true, true, true, true]);
+    room.capturePromise = room.turnObligation.required;
+    assert(
+        room.turnObligation.combinedCaptures.length === 1 &&
+            room.turnObligation.required === 1 &&
+            room.turnObligation.candidateTokenIndices.includes(0),
+        'Deploy-on-6 + move-4 capture is detected in combinedCaptures (required = 1, candidate = [0])',
+    );
+
+    const deployRes = roomManager.movePawn(room.code, hostTok, 0, 0, 'gul', false);
+    assert(deployRes.ok && room.tokens[0][0] === 0, 'Deploying token 0 on 6 succeeds cleanly');
+    // Now player skips capture on token 0 and moves token 1 (+4 -> 19) instead
+    const skipRes = roomManager.movePawn(room.code, hostTok, 1, 1, 'gul', false);
+    assert(skipRes.ok && room.tokens[0][0] === IN_BASE && room.penalties[0] === 1, 'Skipping capture after deploying on 6 sends token 0 back to base');
 }
 
 console.log('🎉 ALL LUDO RULES & PENALTY & GUL TESTS PASSED SUCCESSFULLY!');

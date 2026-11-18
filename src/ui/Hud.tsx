@@ -357,12 +357,12 @@ export function Hud() {
             {landscape ? (
                 <LandscapeTopHud />
             ) : (
-                /* Vertical Top: Progress bar + Centered Timer + AI Voice button */
-                <div className="absolute top-2.5 inset-x-3 z-20 pointer-events-auto flex flex-col items-center gap-1">
+                /* Vertical Top: Progress bar + Left-aligned Timer & Right-aligned AI Voice button */
+                <div className="absolute top-2.5 inset-x-3 z-20 pointer-events-auto flex flex-col items-stretch gap-1">
                     <div className="w-full">
                         <JointPercentageBar />
                     </div>
-                    <div className="flex items-center justify-center gap-2">
+                    <div className="w-full flex items-center justify-between">
                         <TurnTimer compact />
                         <button
                             type="button"
@@ -422,7 +422,7 @@ export function Hud() {
             {chatOpen && (
                 <div
                     className="absolute z-35 bg-slate-900/95 border border-cyan-500/40 rounded-2xl p-3 shadow-2xl backdrop-blur-md flex flex-col gap-2 max-w-[280px] sm:max-w-[320px] pointer-events-auto"
-                    style={{ left: U(12), bottom: U(72) }}
+                    style={{ left: U(12), bottom: U(48) }}
                 >
                     <div className="flex items-center justify-between pb-1 border-b border-slate-800">
                         <span className="text-xs font-black uppercase text-cyan-400">Quick Banter & Reactions</span>

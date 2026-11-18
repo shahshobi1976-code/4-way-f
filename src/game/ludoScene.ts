@@ -10,7 +10,7 @@ import { tr, colorName } from '../i18n';
 import {
     BASE_CENTER, BASE_SPOTS, COLORS, HOME, HOME_COL, IN_BASE, LAST_TRACK, PATH_START, SAFE, STAR_IDX, START_IDX, TRACK,
     boardPos, evaluateCaptureObligation, fineProgress, globalIdx, hasWon, isLuckySum, legalMovesForTurn, luckySevenAllowed,
-    newTokens, offendingTokensForPenalty, percent, pickMove, randDie, type CaptureObligation, type Move, type Tokens,
+    newTokens, offendingTokensForPenalty, percent, pickMove, pickObligationAwarePool, randDie, type CaptureObligation, type Move, type Tokens,
 } from './rules';
 import { BG_BASE, circlePts, drawBackground, drawDie, drawPawn, mix, shade, starPts } from './draw';
 import { TOKEN_URLS_BY_PLAYER, getCachedPawnTexture, loadPawnTexture } from './tokenAssets';
@@ -109,6 +109,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     let turnCapturesTaken = 0;
     let turnObligation: CaptureObligation | null = null;
     const turnTokensCaptured = new Set<number>();
+    const turnMovedToSquare = new Map<number, string>();
 
     let dice: [number, number] = [5, 2];
     let diceUsed: [boolean, boolean] = [true, true];
@@ -1513,15 +1514,34 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             const afterCaps = turnCapturesTaken + (m.captures.length > 0 ? 1 : 0);
             if (afterCaps >= turnObligation.required) return false;
             if (m.combined || m.die === 2) return true;
+
+            // Never warn when playing Step 1 of a valid combinedCaptures or pairCaptures plan
+            if (!diceUsed[0] && !diceUsed[1]) {
+                const isStep1OfCombined = turnObligation.combinedCaptures.some(
+                    (c) => c.tokenIdx === m.tok && c.diceOrder[0] === m.die,
+                );
+                if (isStep1OfCombined) return false;
+
+                const destKey = m.to >= 0 && m.to <= LAST_TRACK ? String(globalIdx(current, m.to)) : null;
+                if (destKey) {
+                    const isStep1OfPair = turnObligation.pairCaptures.some(
+                        (pc) =>
+                            pc.targetSquareKey === destKey &&
+                            ((pc.tokens[0] === m.tok && m.die === 0) || (pc.tokens[1] === m.tok && m.die === 1)),
+                    );
+                    if (isStep1OfPair) return false;
+                }
+            }
+
             const sim = tokens.map((row) => row.slice());
             sim[current][m.tok] = m.to;
             for (const c of m.captures) sim[c.p][c.t] = IN_BASE;
             const nextUsed: [boolean, boolean] = [diceUsed[0], diceUsed[1]];
             nextUsed[m.die] = true;
             if (nextUsed[0] && nextUsed[1]) return true;
-            const remMoves = legalMovesForTurn(sim, current, dice, nextUsed, active);
-            const remCanCap = remMoves.some((m2) => m2.captures.length > 0);
-            return afterCaps + (remCanCap ? 1 : 0) < turnObligation.required;
+
+            const remOb = evaluateCaptureObligation(sim, current, dice, active, nextUsed);
+            return afterCaps + remOb.required < turnObligation.required;
         })();
 
         if (wouldSkipCapture) {
@@ -1891,12 +1911,54 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             let extra = double6;
 
             // --- use each die
-            turnObligation = evaluateCaptureObligation(tokens, p, dice, active);
-            const capturePromise = turnObligation.required;
+            turnObligation = evaluateCaptureObligation(tokens, p, dice, active, diceUsed);
+            let capturePromise = turnObligation.required;
             turnCapturePromise = capturePromise;
             turnCapturesTaken = 0;
             turnTokensCaptured.clear();
+            turnMovedToSquare.clear();
             let capturesTaken = 0;
+
+            const recordMoveCaptureAndUpgrade = (moveChosen: Move) => {
+                const destKey =
+                    moveChosen.to >= 0 && moveChosen.to <= LAST_TRACK
+                        ? String(globalIdx(p, moveChosen.to))
+                        : null;
+                if (moveChosen.captures.length > 0) {
+                    capturesTaken += 1;
+                    turnCapturesTaken = capturesTaken;
+                    turnTokensCaptured.add(moveChosen.tok);
+                    if (destKey) {
+                        for (const [partnerTok, partnerKey] of turnMovedToSquare.entries()) {
+                            if (partnerTok !== moveChosen.tok && partnerKey === destKey) {
+                                turnTokensCaptured.add(partnerTok);
+                            }
+                        }
+                    }
+                }
+                if (destKey) turnMovedToSquare.set(moveChosen.tok, destKey);
+                else turnMovedToSquare.delete(moveChosen.tok);
+
+                // Mid-turn newly unlocked capture check when 1 die remains and initial obligation was 0
+                if ((!diceUsed[0] || !diceUsed[1]) && !(diceUsed[0] && diceUsed[1])) {
+                    if (turnObligation && turnObligation.required === 0) {
+                        const remOb = evaluateCaptureObligation(tokens, p, dice, active, diceUsed);
+                        if (remOb.required > 0) {
+                            turnObligation.required = remOb.required;
+                            turnObligation.singleDieCaptures.push(...remOb.singleDieCaptures);
+                            const merged = Array.from(
+                                new Set([...turnObligation.candidateTokenIndices, ...remOb.candidateTokenIndices]),
+                            ).sort((a, b) => a - b);
+                            turnObligation.candidateTokenIndices = merged;
+                            turnObligation.optionTokens = merged;
+                            turnObligation.hasSingle = turnObligation.hasSingle || remOb.hasSingle;
+                            capturePromise = remOb.required;
+                            turnCapturePromise = capturePromise;
+                        }
+                    }
+                }
+            };
+
             for (let guard = 0; guard < 4 && (!diceUsed[0] || !diceUsed[1]); guard++) {
                 if (turnAborted()) break;
                 optionsNow = movesFor(p);
@@ -1931,13 +1993,9 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                         continue;
                     }
                     const preChosen = buildMoveFromServer(p, pm.dieIndex, pm.tokenIndex, pm.to, pm.captures, pm.reachedHome, false);
-                    if (preChosen.captures.length > 0) {
-                        capturesTaken += 1;
-                        turnCapturesTaken = capturesTaken;
-                        turnTokensCaptured.add(preChosen.tok);
-                    }
                     const res = await applyMove(p, preChosen, myTurnEpoch);
                     if (turnAborted()) break;
+                    recordMoveCaptureAndUpgrade(preChosen);
                     if (res.captured || res.home) extra = true;
                     if (hasWon(tokens, p)) {
                         winner = p;
@@ -1963,13 +2021,9 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                         optionsNow = [];
                         continue;
                     }
-                    if (chosen.captures.length > 0) {
-                        capturesTaken += 1;
-                        turnCapturesTaken = capturesTaken;
-                        turnTokensCaptured.add(chosen.tok);
-                    }
                     const res = await applyMove(p, chosen, myTurnEpoch);
                     if (turnAborted()) break;
+                    recordMoveCaptureAndUpgrade(chosen);
                     if (res.captured || res.home) extra = true;
                     if (hasWon(tokens, p)) {
                         winner = p;
@@ -1979,44 +2033,24 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                     continue;
                 }
                 if (!isOnline() && isAI(p)) {
-                    // the AI takes every capture it can, including 2-die combined, stack, and multi-capture routes
-                    const caps = optionsNow.filter((m) => m.captures.length);
-                    let pool = caps.length ? caps : optionsNow;
-                    if (caps.length > 1 && capturePromise >= 2 && !diceUsed[0] && !diceUsed[1]) {
-                        const keepSecond = caps.filter((m1) => {
-                            if (m1.combined || m1.die === 2) return false;
-                            const sim = tokens.map((row) => row.slice());
-                            sim[p][m1.tok] = m1.to;
-                            for (const c of m1.captures) sim[c.p][c.t] = IN_BASE;
-                            const nextUsed: [boolean, boolean] = [diceUsed[0], diceUsed[1]];
-                            nextUsed[m1.die] = true;
-                            return legalMovesForTurn(sim, p, dice, nextUsed, active).some((m2) => m2.captures.length > 0);
-                        });
-                        if (keepSecond.length > 0) pool = keepSecond;
-                    }
-                    if (caps.length === 0 && !diceUsed[0] && !diceUsed[1]) {
-                        const comboSetup = optionsNow.filter((m1) => {
-                            if (m1.combined || m1.die === 2) return false;
-                            const sim = tokens.map((row) => row.slice());
-                            sim[p][m1.tok] = m1.to;
-                            const nextUsed: [boolean, boolean] = [diceUsed[0], diceUsed[1]];
-                            nextUsed[m1.die] = true;
-                            return legalMovesForTurn(sim, p, dice, nextUsed, active).some((m2) => m2.captures.length > 0);
-                        });
-                        if (comboSetup.length > 0) pool = comboSetup;
-                    }
+                    const pool = pickObligationAwarePool(
+                        tokens,
+                        p,
+                        dice,
+                        diceUsed,
+                        active,
+                        optionsNow,
+                        turnObligation,
+                        capturesTaken,
+                    );
                     const chosen = pickMove(tokens, p, pool, active);
                     selDie = chosen.die;
                     refreshHighlights();
                     await delay(900);
                     if (chosen.die === 2 || chosen.combined) diceUsed = [true, true];
                     else diceUsed[chosen.die] = true;
-                    if (chosen.captures.length > 0) {
-                        capturesTaken += 1;
-                        turnCapturesTaken = capturesTaken;
-                        turnTokensCaptured.add(chosen.tok);
-                    }
                     const res = await applyMove(p, chosen, myTurnEpoch);
+                    recordMoveCaptureAndUpgrade(chosen);
                     if (res.captured || res.home) extra = true;
                     if (hasWon(tokens, p)) {
                         winner = p;
@@ -2052,13 +2086,9 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                     optionsNow = [];
                     continue;
                 }
-                if (chosen.captures.length > 0) {
-                    capturesTaken += 1;
-                    turnCapturesTaken = capturesTaken;
-                    turnTokensCaptured.add(chosen.tok);
-                }
                 const res = await applyMove(p, chosen, myTurnEpoch);
                 if (turnAborted()) break;
+                recordMoveCaptureAndUpgrade(chosen);
                 if (res.captured || res.home) extra = true;
                 if (hasWon(tokens, p)) {
                     winner = p;
@@ -2067,10 +2097,10 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                 optionsNow = [];
             }
             store.patch({ captureNotice: null, skipCapturePrompt: null });
-            // Settle up: if captures made < required, every token that had a capture option and did not capture returns to base.
+            // Settle up: if captures made < required, every candidate token that did not capture returns to base.
             // In online multiplayer, server is authoritative and broadcasts penalty_applied.
             if (!isOnline() && turnObligation && turnObligation.required > 0 && capturesTaken < turnObligation.required) {
-                const offending = offendingTokensForPenalty(turnObligation, tokens, p, turnTokensCaptured);
+                const offending = offendingTokensForPenalty(turnObligation, capturesTaken, turnTokensCaptured, tokens[p]);
                 if (offending.length > 0) {
                     await penalize(p, offending);
                     extra = false;

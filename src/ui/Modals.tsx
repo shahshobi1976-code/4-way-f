@@ -161,6 +161,7 @@ function Settings() {
 
 function HowTo() {
     const rules = [
+        'Coloured Path Win: Move your 4 tokens clockwise around the track and onto your coloured home path (or centre home). The first player to get all 4 tokens onto their coloured home path wins immediately!',
         'Two dice are rolled. Tap a die (or tap a glowing token directly) to move. A 6 brings a token out of base.',
         'Unlimited Double 6s (6+6): Rolling 6+6, capturing an opponent, or entering the centre home (Gul) gives you an extra turn with no consecutive limit.',
         'Pair / Stack Protection: Two or more tokens of the same colour on a non-safe square form a protected stack. A capture only succeeds if your tokens on the landing square equal or outnumber the opponent stack (myCount >= otherCount).',

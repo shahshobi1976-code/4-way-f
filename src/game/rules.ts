@@ -86,14 +86,18 @@ export function newTokens(): Tokens {
     return [0, 1, 2, 3].map(() => [IN_BASE, IN_BASE, IN_BASE, IN_BASE]);
 }
 
-function countColorOnGlobal(tokens: Tokens, color: number, g: number, excludeTok = -1): number {
+function countColorOnGlobalExcluding(tokens: Tokens, color: number, g: number, excludeA = -1, excludeB = -1): number {
     let count = 0;
     for (let u = 0; u < 4; u++) {
-        if (u === excludeTok) continue;
+        if (u === excludeA || u === excludeB) continue;
         const rr = tokens[color][u];
         if (rr >= 0 && rr <= LAST_TRACK && globalIdx(color, rr) === g) count++;
     }
     return count;
+}
+
+function countColorOnGlobal(tokens: Tokens, color: number, g: number, excludeTok = -1): number {
+    return countColorOnGlobalExcluding(tokens, color, g, excludeTok);
 }
 
 /**
@@ -208,14 +212,25 @@ export function legalMovesForTurn(
     return out;
 }
 
-/** Share of the way to a win, 0..100. A token in home (position 56) counts as fully done. */
-export function tokenShare(r: number): number {
+/** Full path length for a player's colour: open track (51) + coloured home stretch (5) + centre home (1) = 57. */
+export function getPathLength(color = 0): number {
+    return (LAST_TRACK + 1) + (HOME_COL[color]?.length ?? 5) + 1;
+}
+
+/** Dynamic index where the player's coloured home stretch begins (last 6 indices = 5 home-stretch + 1 centre). */
+export function coloredPathStartIndex(color = 0): number {
+    return getPathLength(color) - 6;
+}
+
+/** Share of the way to a win, 0..1. Any token on or past the coloured home path counts as 100% done. */
+export function tokenShare(r: number, color = 0): number {
     if (r < 0) return 0;
-    return Math.min(1, (r + 1) / (HOME + 1));
+    const winTarget = coloredPathStartIndex(color);
+    return Math.min(1, (r + 1) / (winTarget + 1));
 }
 export function percent(tokens: Tokens, p: number): number {
     let s = 0;
-    for (let t = 0; t < 4; t++) s += tokenShare(tokens[p][t]);
+    for (let t = 0; t < 4; t++) s += tokenShare(tokens[p][t], p);
     return Math.round((s / 4) * 100);
 }
 /** Finer progress used for tie-breaks and ranking (counts the whole route including the path). */
@@ -224,9 +239,17 @@ export function fineProgress(tokens: Tokens, p: number): number {
     for (let t = 0; t < 4; t++) s += tokens[p][t] + 1;
     return s;
 }
+/**
+ * Coloured Path Win: returns true as soon as all 4 tokens of player `p` have reached
+ * their coloured home stretch (pos >= coloredPathStartIndex) or centre home (HOME).
+ */
 export function hasWon(tokens: Tokens, p: number): boolean {
-    return tokens[p].every((r) => r === HOME);
+    const list = tokens[p];
+    if (!list || list.length === 0) return false;
+    const startIdx = coloredPathStartIndex(p);
+    return list.every((r) => r >= startIdx);
 }
+export const checkForWin = hasWon;
 /**
  * Lucky Seven: active only when zero tokens are on the open track AND
  * at least 1 token is still in base (1-4 in base, others on coloured path or centre home).
@@ -257,15 +280,25 @@ export const getMatchLeader = leaderOf;
 export function scoreMove(tokens: Tokens, p: number, m: Move, active: boolean[]): number {
     const leader = leaderOf(tokens, active);
     const leaderPct = leader >= 0 ? percent(tokens, leader) / 100 : 0;
+    const winStart = coloredPathStartIndex(p);
+    const r0 = tokens[p][m.tok];
     let s = Math.random() * 6;
+
+    // Immediate winning move: gets the final token onto the coloured home stretch
+    if (r0 < winStart && m.to >= winStart) {
+        const sim = tokens[p].slice();
+        sim[m.tok] = m.to;
+        if (sim.every((r) => r >= winStart)) s += 2000;
+    }
+
     for (const c of m.captures) {
         const victimProg = tokens[c.p][c.t];
         s += 100 + victimProg * 0.8;
         if (c.p === leader && c.p !== p) s += 70 + 60 * leaderPct;
     }
-    if (m.reachesHome) s += 95;
+    if (r0 < winStart && m.to >= winStart) s += 130;
+    if (m.reachesHome) s += 30;
     if (m.fromBase) s += 58;
-    if (m.to >= PATH_START && !m.reachesHome) s += 40;
     s += m.to * 0.35;
     if (m.to <= LAST_TRACK) {
         const g = globalIdx(p, m.to);
@@ -297,7 +330,6 @@ export function scoreMove(tokens: Tokens, p: number, m: Move, active: boolean[])
             }
         }
     }
-    const r0 = tokens[p][m.tok];
     if (r0 >= 0 && r0 <= LAST_TRACK && SAFE.has(globalIdx(p, r0))) s -= 9;
     return s;
 }
@@ -451,8 +483,41 @@ export function findOffendingToken(
     return null;
 }
 
+export interface SingleDieCaptureOption {
+    tokenIdx: number;
+    dieIndex: 0 | 1;
+    steps: number;
+    destPos: number;
+    targetSquareKey: string;
+    targetPlayer: number;
+    defenderCount: number;
+}
+
+export interface CombinedCaptureOption {
+    tokenIdx: number;
+    diceOrder: [0, 1] | [1, 0];
+    intermediatePos: number;
+    finalPos: number;
+    targetSquareKey: string;
+    targetPlayer: number;
+    defenderCount: number;
+}
+
+export interface PairCaptureOption {
+    tokens: [number, number];
+    diceIndices: [0, 1];
+    targetSquareKey: string;
+    targetPlayer: number;
+    defenderCount: number;
+}
+
 export interface CaptureObligation {
-    required: number;
+    required: 0 | 1 | 2;
+    singleDieCaptures: SingleDieCaptureOption[];
+    combinedCaptures: CombinedCaptureOption[];
+    pairCaptures: PairCaptureOption[];
+    candidateTokenIndices: number[];
+    // Compatibility aliases
     optionTokens: number[];
     hasSingle: boolean;
     hasTotal: boolean;
@@ -460,91 +525,170 @@ export interface CaptureObligation {
 }
 
 /**
- * Evaluates capture obligation at the start of a roll `[d0, d1]`:
- * - options = single-die captures, total captures (final square only), pair captures (two tokens, one die each)
- * - if no options: required = 0
- * - if a total or pair option exists: required = 1
- * - else: required = most independent single-die captures possible (each die used once)
+ * Evaluates all compulsory capture options for player `p` across single-die,
+ * final-square combined-total, and 2-token pair captures while enforcing safe
+ * squares, home-stretch immunity, and Stack Protection (`myCount >= defenderCount`).
  */
 export function evaluateCaptureObligation(
     tokens: Tokens,
     p: number,
     dice: number[],
     active: boolean[],
+    diceUsed: [boolean, boolean] = [false, false],
 ): CaptureObligation {
-    const optionSet = new Set<number>();
-    let hasSingle = false;
-    let hasTotal = false;
-    let hasPair = false;
+    const singleDieCaptures: SingleDieCaptureOption[] = [];
+    const combinedCaptures: CombinedCaptureOption[] = [];
+    const pairCaptures: PairCaptureOption[] = [];
+    const candidateSet = new Set<number>();
 
-    // 1. Single-die captures
-    for (let d = 0; d < dice.length; d++) {
-        const moves = legalMoves(tokens, p, dice[d], d, active);
-        for (const m of moves) {
-            if (m.captures.length > 0) {
-                hasSingle = true;
-                optionSet.add(m.tok);
+    // 1. Single-die captures across available dice
+    for (let d = 0; d < dice.length && d < 2; d++) {
+        if (diceUsed[d]) continue;
+        const steps = dice[d];
+        for (let tokenIdx = 0; tokenIdx < 4; tokenIdx++) {
+            const r = tokens[p][tokenIdx];
+            if (r >= HOME) continue;
+            const destPos = r === IN_BASE ? (steps === 6 ? 0 : -1) : r + steps;
+            if (destPos < 0 || destPos > LAST_TRACK) continue;
+
+            const g = globalIdx(p, destPos);
+            if (SAFE.has(g)) continue;
+
+            const myCount = 1 + countColorOnGlobalExcluding(tokens, p, g, tokenIdx);
+            for (let o = 0; o < 4; o++) {
+                if (o === p || !active[o]) continue;
+                const oppCount = countColorOnGlobalExcluding(tokens, o, g);
+                if (oppCount > 0 && myCount >= oppCount) {
+                    singleDieCaptures.push({
+                        tokenIdx,
+                        dieIndex: d as 0 | 1,
+                        steps,
+                        destPos,
+                        targetSquareKey: String(g),
+                        targetPlayer: o,
+                        defenderCount: oppCount,
+                    });
+                    candidateSet.add(tokenIdx);
+                }
             }
         }
     }
 
-    // 2. Two-die options: total captures (final square only) and pair captures (two tokens, one die each)
-    if (dice.length >= 2) {
-        for (let d1 = 0; d1 < dice.length; d1++) {
+    const bothRemaining = dice.length >= 2 && !diceUsed[0] && !diceUsed[1];
+
+    // 2. Final-square combined-total captures (only when 2 dice remain)
+    if (bothRemaining) {
+        const orders: ([0, 1] | [1, 0])[] = dice[0] === dice[1] ? [[0, 1]] : [[0, 1], [1, 0]];
+        for (let tokenIdx = 0; tokenIdx < 4; tokenIdx++) {
+            const r = tokens[p][tokenIdx];
+            if (r >= HOME) continue;
+            for (const diceOrder of orders) {
+                const [d1, d2] = diceOrder;
+                const pos1 = r === IN_BASE ? (dice[d1] === 6 ? 0 : -1) : r + dice[d1];
+                if (pos1 < 0 || pos1 >= HOME) continue;
+                const pos2 = pos1 + dice[d2];
+                if (pos2 < 0 || pos2 > LAST_TRACK) continue;
+
+                const g2 = globalIdx(p, pos2);
+                if (SAFE.has(g2)) continue;
+
+                const myCountAtS2 = 1 + countColorOnGlobalExcluding(tokens, p, g2, tokenIdx);
+                for (let o = 0; o < 4; o++) {
+                    if (o === p || !active[o]) continue;
+                    const oppCount = countColorOnGlobalExcluding(tokens, o, g2);
+                    if (oppCount > 0 && myCountAtS2 >= oppCount) {
+                        combinedCaptures.push({
+                            tokenIdx,
+                            diceOrder,
+                            intermediatePos: pos1,
+                            finalPos: pos2,
+                            targetSquareKey: String(g2),
+                            targetPlayer: o,
+                            defenderCount: oppCount,
+                        });
+                        candidateSet.add(tokenIdx);
+                    }
+                }
+            }
+        }
+
+        // 3. 2-Token Pair Captures (tA uses dice[0], tB uses dice[1], landing on exact same non-safe square)
+        const seenPairs = new Set<string>();
+        for (let tA = 0; tA < 4; tA++) {
+            const rA = tokens[p][tA];
+            if (rA >= HOME) continue;
+            const posA = rA === IN_BASE ? (dice[0] === 6 ? 0 : -1) : rA + dice[0];
+            if (posA < 0 || posA > LAST_TRACK) continue;
+            const gA = globalIdx(p, posA);
+            if (SAFE.has(gA)) continue;
+
+            for (let tB = 0; tB < 4; tB++) {
+                if (tB === tA) continue;
+                const rB = tokens[p][tB];
+                if (rB >= HOME) continue;
+                const posB = rB === IN_BASE ? (dice[1] === 6 ? 0 : -1) : rB + dice[1];
+                if (posB < 0 || posB > LAST_TRACK) continue;
+                const gB = globalIdx(p, posB);
+                if (gB !== gA) continue;
+
+                const myCountAfterBoth = 2 + countColorOnGlobalExcluding(tokens, p, gA, tA, tB);
+                for (let o = 0; o < 4; o++) {
+                    if (o === p || !active[o]) continue;
+                    const oppCount = countColorOnGlobalExcluding(tokens, o, gA);
+                    if (oppCount > 0 && myCountAfterBoth >= oppCount) {
+                        const symKey =
+                            dice[0] === dice[1]
+                                ? `${Math.min(tA, tB)}-${Math.max(tA, tB)}-${gA}-${o}`
+                                : `${tA}-${tB}-${gA}-${o}`;
+                        if (!seenPairs.has(symKey)) {
+                            seenPairs.add(symKey);
+                            pairCaptures.push({
+                                tokens: [tA, tB],
+                                diceIndices: [0, 1],
+                                targetSquareKey: String(gA),
+                                targetPlayer: o,
+                                defenderCount: oppCount,
+                            });
+                            candidateSet.add(tA);
+                            candidateSet.add(tB);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. Max independent single-die captures (0, 1, or 2)
+    let maxIndependentSingleDieCaptures: 0 | 1 | 2 = singleDieCaptures.length > 0 ? 1 : 0;
+    if (bothRemaining && singleDieCaptures.length > 0) {
+        outer: for (let d1 = 0; d1 < 2; d1++) {
             const d2 = d1 === 0 ? 1 : 0;
-            const firstMoves = legalMoves(tokens, p, dice[d1], d1, active);
-            for (const m1 of firstMoves) {
+            const firstCaps = legalMoves(tokens, p, dice[d1], d1, active).filter((m) => m.captures.length > 0);
+            for (const m1 of firstCaps) {
                 const nb1 = tokens.map((row) => row.slice());
                 nb1[p][m1.tok] = m1.to;
                 for (const c of m1.captures) nb1[c.p][c.t] = IN_BASE;
-
-                const g1 = m1.to <= LAST_TRACK ? globalIdx(p, m1.to) : -1;
-                const secondMoves = legalMoves(nb1, p, dice[d2], d2, active);
-                for (const m2 of secondMoves) {
-                    if (m2.captures.length === 0) continue;
-                    if (m2.tok === m1.tok) {
-                        // Total capture (final square only)
-                        hasTotal = true;
-                        optionSet.add(m1.tok);
-                    } else if (g1 >= 0 && m2.to <= LAST_TRACK && globalIdx(p, m2.to) === g1) {
-                        // Pair capture (two tokens, one die each)
-                        hasPair = true;
-                        optionSet.add(m1.tok);
-                        optionSet.add(m2.tok);
-                    }
+                if (legalMoves(nb1, p, dice[d2], d2, active).some((m2) => m2.captures.length > 0)) {
+                    maxIndependentSingleDieCaptures = 2;
+                    break outer;
                 }
             }
         }
     }
 
-    let required = 0;
-    if (hasSingle || hasTotal || hasPair) {
-        if (hasTotal || hasPair) {
-            required = 1;
-        } else {
-            // Most independent single-die captures possible (each die used once)
-            let bestCount = 0;
-            const exploreSingle = (b: Tokens, unused: number[], count: number) => {
-                if (count > bestCount) bestCount = count;
-                for (let i = 0; i < unused.length; i++) {
-                    const dieIdx = unused[i];
-                    const opts = legalMoves(b, p, dice[dieIdx], dieIdx, active).filter((m) => m.captures.length > 0);
-                    for (const m of opts) {
-                        const nb = b.map((row) => row.slice());
-                        nb[p][m.tok] = m.to;
-                        for (const c of m.captures) nb[c.p][c.t] = IN_BASE;
-                        exploreSingle(nb, unused.filter((d) => d !== dieIdx), count + 1);
-                    }
-                }
-            };
-            exploreSingle(tokens.map((row) => row.slice()), dice.map((_, idx) => idx), 0);
-            required = bestCount;
-        }
-    }
+    const hasSingle = singleDieCaptures.length > 0;
+    const hasTotal = combinedCaptures.length > 0;
+    const hasPair = pairCaptures.length > 0;
+    const required: 0 | 1 | 2 = hasTotal || hasPair ? 1 : maxIndependentSingleDieCaptures;
+    const candidateTokenIndices = Array.from(candidateSet).sort((a, b) => a - b);
 
     return {
         required,
-        optionTokens: Array.from(optionSet).sort((a, b) => a - b),
+        singleDieCaptures,
+        combinedCaptures,
+        pairCaptures,
+        candidateTokenIndices,
+        optionTokens: candidateTokenIndices,
         hasSingle,
         hasTotal,
         hasPair,
@@ -552,16 +696,92 @@ export function evaluateCaptureObligation(
 }
 
 /**
- * Returns every token that had a capture option at the start of the turn and did
- * NOT make a capture during the turn (provided it is currently out of base).
+ * At turn end, returns every candidate token index that did NOT capture this turn
+ * and is currently on the board (not in base and not finished in centre home).
+ * Includes tokens that dodged a capture by entering their coloured home stretch.
  */
 export function offendingTokensForPenalty(
     obligation: CaptureObligation,
-    currentTokens: Tokens,
-    p: number,
-    tokensThatCaptured: Set<number>,
+    capturesMadeThisTurn: number,
+    capturedTokenIndices: Set<number>,
+    playerTokens: number[],
 ): number[] {
-    return obligation.optionTokens.filter(
-        (tok) => !tokensThatCaptured.has(tok) && currentTokens[p][tok] >= 0,
-    );
+    if (obligation.required === 0 || capturesMadeThisTurn >= obligation.required) {
+        return [];
+    }
+    return obligation.candidateTokenIndices.filter((tok) => {
+        if (capturedTokenIndices.has(tok)) return false;
+        const pos = playerTokens[tok];
+        return pos >= 0 && pos < HOME;
+    });
+}
+
+/**
+ * Filters legal AI/timeout moves to honor CaptureObligation:
+ * - When required >= 2, prioritizes first captures that preserve a 2nd capture.
+ * - Otherwise takes direct single/combined captures if present.
+ * - Otherwise takes Step 1 of a valid combinedCaptures or pairCaptures plan.
+ */
+export function pickObligationAwarePool(
+    tokens: Tokens,
+    p: number,
+    dice: [number, number],
+    diceUsed: [boolean, boolean],
+    active: boolean[],
+    legal: Move[],
+    obligation: CaptureObligation | null | undefined,
+    capturesMade: number,
+): Move[] {
+    if (legal.length === 0) return legal;
+    const directCaps = legal.filter((m) => m.captures.length > 0);
+    const needed = obligation ? Math.max(0, obligation.required - capturesMade) : 0;
+
+    if (needed >= 2 && directCaps.length > 0 && !diceUsed[0] && !diceUsed[1]) {
+        const keepSecond = directCaps.filter((m1) => {
+            if (m1.combined || m1.die === 2) return false;
+            const sim = tokens.map((row) => row.slice());
+            sim[p][m1.tok] = m1.to;
+            for (const c of m1.captures) sim[c.p][c.t] = IN_BASE;
+            const nextUsed: [boolean, boolean] = [diceUsed[0], diceUsed[1]];
+            nextUsed[m1.die] = true;
+            return legalMovesForTurn(sim, p, dice, nextUsed, active).some((m2) => m2.captures.length > 0);
+        });
+        if (keepSecond.length > 0) return keepSecond;
+    }
+
+    if (directCaps.length > 0) return directCaps;
+
+    if (!diceUsed[0] && !diceUsed[1]) {
+        if (obligation && (obligation.combinedCaptures.length > 0 || obligation.pairCaptures.length > 0)) {
+            const step1Moves = legal.filter((m) => {
+                if (m.combined || m.die === 2) return false;
+                const isComb = obligation.combinedCaptures.some(
+                    (c) => c.tokenIdx === m.tok && c.diceOrder[0] === m.die,
+                );
+                if (isComb) return true;
+                const destKey = m.to >= 0 && m.to <= LAST_TRACK ? String(globalIdx(p, m.to)) : null;
+                return (
+                    !!destKey &&
+                    obligation.pairCaptures.some(
+                        (pc) =>
+                            pc.targetSquareKey === destKey &&
+                            ((pc.tokens[0] === m.tok && m.die === 0) || (pc.tokens[1] === m.tok && m.die === 1)),
+                    )
+                );
+            });
+            if (step1Moves.length > 0) return step1Moves;
+        }
+
+        const comboSetup = legal.filter((m1) => {
+            if (m1.combined || m1.die === 2) return false;
+            const sim = tokens.map((row) => row.slice());
+            sim[p][m1.tok] = m1.to;
+            const nextUsed: [boolean, boolean] = [diceUsed[0], diceUsed[1]];
+            nextUsed[m1.die] = true;
+            return legalMovesForTurn(sim, p, dice, nextUsed, active).some((m2) => m2.captures.length > 0);
+        });
+        if (comboSetup.length > 0) return comboSetup;
+    }
+
+    return legal;
 }

@@ -7,10 +7,14 @@ import {
     randDie,
     pickMove,
     hasWon,
+    coloredPathStartIndex,
     isLuckySum,
     luckySevenAllowed,
     evaluateCaptureObligation,
     offendingTokensForPenalty,
+    pickObligationAwarePool,
+    LAST_TRACK,
+    globalIdx,
     type CaptureObligation,
     type Move,
     type Tokens,
@@ -108,6 +112,7 @@ export interface Room {
     capturePromise: number;
     capturesTakenThisTurn: number;
     tokensCapturedThisTurn?: number[];
+    turnMovedToSquare?: Record<number, string>;
     turnObligation?: CaptureObligation;
     hadCaptureOrHomeThisTurn?: boolean;
     turnAutoPlay?: boolean;
@@ -125,11 +130,12 @@ const BOT_AVATARS = ['🤖', '🦁', '⚡', '👑'];
 
 function calculateProgress(tokens: Tokens, p: number): number {
     const list = tokens[p] || [];
+    const winTarget = coloredPathStartIndex(p);
     let sum = 0;
     for (const t of list) {
         if (t === -1) sum += 0;
-        else if (t >= 56) sum += 25;
-        else sum += (t / 56) * 25;
+        else if (t >= winTarget) sum += 25;
+        else sum += (t / winTarget) * 25;
     }
     return Math.min(100, Math.max(0, Math.round(sum * 100) / 100));
 }
@@ -198,6 +204,7 @@ class RoomManager {
             capturePromise: room.capturePromise,
             capturesTakenThisTurn: room.capturesTakenThisTurn,
             tokensCapturedThisTurn: room.tokensCapturedThisTurn,
+            turnMovedToSquare: room.turnMovedToSquare,
             turnObligation: room.turnObligation,
             hadCaptureOrHomeThisTurn: room.hadCaptureOrHomeThisTurn,
             turnAutoPlay: room.turnAutoPlay,
@@ -280,6 +287,7 @@ class RoomManager {
                     capturePromise: item.capturePromise || 0,
                     capturesTakenThisTurn: item.capturesTakenThisTurn || 0,
                     tokensCapturedThisTurn: item.tokensCapturedThisTurn || [],
+                    turnMovedToSquare: item.turnMovedToSquare || {},
                     turnObligation: item.turnObligation,
                     hadCaptureOrHomeThisTurn: item.hadCaptureOrHomeThisTurn,
                     turnAutoPlay: false,
@@ -715,6 +723,7 @@ class RoomManager {
         room.capturePromise = 0;
         room.capturesTakenThisTurn = 0;
         room.tokensCapturedThisTurn = [];
+        room.turnMovedToSquare = {};
         room.turnObligation = undefined;
         room.hadCaptureOrHomeThisTurn = false;
         room.turnAutoPlay = false;
@@ -861,47 +870,16 @@ class RoomManager {
             : [];
 
         if (allMoves.length > 0) {
-            // 1. Compulsory capture first (includes combined lone-token captures)
-            const captureMoves = allMoves.filter((m) => m.captures.length > 0);
-            let pool = captureMoves.length > 0 ? captureMoves : allMoves;
-
-            // If required === 2 (multiple independent single-die captures) and both dice remain, prefer a first capture that leaves the 2nd capture available
-            if (
-                captureMoves.length > 1 &&
-                (room.turnObligation?.required || 0) >= 2 &&
-                !room.diceUsed[0] &&
-                !room.diceUsed[1]
-            ) {
-                const keepSecondCapture = captureMoves.filter((m1) => {
-                    if (m1.combined || m1.die === 2) return false;
-                    const sim = room.tokens.map((row) => row.slice());
-                    sim[botIdx][m1.tok] = m1.to;
-                    for (const c of m1.captures) sim[c.p][c.t] = -1;
-                    const nextUsed: [boolean, boolean] = [room.diceUsed[0], room.diceUsed[1]];
-                    nextUsed[m1.die] = true;
-                    return legalMovesForTurn(sim, botIdx, room.dice!, nextUsed, activeBools).some((m2) => m2.captures.length > 0);
-                });
-                if (keepSecondCapture.length > 0) {
-                    pool = keepSecondCapture;
-                }
-            }
-
-            // 2. If no direct capture and both dice are unused, look ahead for a 2-die combined or stack capture
-            if (captureMoves.length === 0 && !room.diceUsed[0] && !room.diceUsed[1]) {
-                const comboSetupMoves = allMoves.filter((m1) => {
-                    if (m1.combined || m1.die === 2) return false;
-                    const sim = room.tokens.map((row) => row.slice());
-                    sim[botIdx][m1.tok] = m1.to;
-                    const nextUsed: [boolean, boolean] = [room.diceUsed[0], room.diceUsed[1]];
-                    nextUsed[m1.die] = true;
-                    const nextMoves = legalMovesForTurn(sim, botIdx, room.dice!, nextUsed, activeBools);
-                    return nextMoves.some((m2) => m2.captures.length > 0);
-                });
-                if (comboSetupMoves.length > 0) {
-                    pool = comboSetupMoves;
-                }
-            }
-
+            const pool = pickObligationAwarePool(
+                room.tokens,
+                botIdx,
+                room.dice,
+                room.diceUsed,
+                activeBools,
+                allMoves,
+                room.turnObligation,
+                room.capturesTakenThisTurn || 0,
+            );
             const chosen = pickMove(room.tokens, botIdx, pool, activeBools);
             if (chosen) {
                 this.movePawn(room.code, '', chosen.die, chosen.tok, 'gul', true);
@@ -966,6 +944,7 @@ class RoomManager {
         room.initialTurnTokens = room.tokens.map((r) => r.slice());
         room.capturesTakenThisTurn = 0;
         room.tokensCapturedThisTurn = [];
+        room.turnMovedToSquare = {};
         room.hadCaptureOrHomeThisTurn = false;
 
         const activeBools = room.players.map((p) => p !== null);
@@ -1011,9 +990,9 @@ class RoomManager {
         if (required > 0 && taken < required) {
             const offending = offendingTokensForPenalty(
                 obligation,
-                room.tokens,
-                p,
+                taken,
                 new Set(room.tokensCapturedThisTurn || []),
+                room.tokens[p] || [],
             );
             if (offending.length > 0) {
                 for (const tok of offending) {
@@ -1032,11 +1011,13 @@ class RoomManager {
                 });
                 room.capturePromise = 0;
                 room.turnObligation = undefined;
+                room.turnMovedToSquare = {};
                 return true;
             }
         }
         room.capturePromise = 0;
         room.turnObligation = undefined;
+        room.turnMovedToSquare = {};
         return false;
     }
 
@@ -1123,17 +1104,64 @@ class RoomManager {
         if (dieIndex === 2) room.diceUsed = [true, true];
         else room.diceUsed[dieIndex] = true;
 
+        if (!room.turnMovedToSquare) room.turnMovedToSquare = {};
+        const destKey =
+            move.to >= 0 && move.to <= LAST_TRACK ? String(globalIdx(room.currentTurn, move.to)) : null;
+
         if (move.captures.length > 0) {
             room.capturesTakenThisTurn = (room.capturesTakenThisTurn || 0) + 1;
             if (!room.tokensCapturedThisTurn) room.tokensCapturedThisTurn = [];
             if (!room.tokensCapturedThisTurn.includes(tokenIndex)) {
                 room.tokensCapturedThisTurn.push(tokenIndex);
             }
+            if (destKey) {
+                for (const [partnerStr, partnerKey] of Object.entries(room.turnMovedToSquare)) {
+                    const partnerIdx = Number(partnerStr);
+                    if (
+                        partnerIdx !== tokenIndex &&
+                        partnerKey === destKey &&
+                        !room.tokensCapturedThisTurn.includes(partnerIdx)
+                    ) {
+                        room.tokensCapturedThisTurn.push(partnerIdx);
+                    }
+                }
+            }
         }
+        if (destKey) room.turnMovedToSquare[tokenIndex] = destKey;
+        else delete room.turnMovedToSquare[tokenIndex];
+
         for (const cap of move.captures) {
             room.tokens[cap.p][cap.t] = -1;
             room.capturesMade[room.currentTurn] = (room.capturesMade[room.currentTurn] || 0) + 1;
             room.timesCaptured[cap.p] = (room.timesCaptured[cap.p] || 0) + 1;
+        }
+
+        // Mid-turn newly unlocked capture check when 1 die remains and initial obligation was 0
+        if (
+            room.dice &&
+            (!room.diceUsed[0] || !room.diceUsed[1]) &&
+            !(room.diceUsed[0] && room.diceUsed[1]) &&
+            room.turnObligation &&
+            room.turnObligation.required === 0
+        ) {
+            const remOb = evaluateCaptureObligation(
+                room.tokens,
+                room.currentTurn,
+                room.dice,
+                activeBools,
+                room.diceUsed,
+            );
+            if (remOb.required > 0) {
+                room.turnObligation.required = remOb.required;
+                room.turnObligation.singleDieCaptures.push(...remOb.singleDieCaptures);
+                const merged = Array.from(
+                    new Set([...room.turnObligation.candidateTokenIndices, ...remOb.candidateTokenIndices]),
+                ).sort((a, b) => a - b);
+                room.turnObligation.candidateTokenIndices = merged;
+                room.turnObligation.optionTokens = merged;
+                room.turnObligation.hasSingle = room.turnObligation.hasSingle || remOb.hasSingle;
+                room.capturePromise = remOb.required;
+            }
         }
 
         const reachedHome = move.to === 56;
@@ -1270,6 +1298,7 @@ class RoomManager {
             room.capturePromise = 0;
             room.capturesTakenThisTurn = 0;
             room.tokensCapturedThisTurn = [];
+            room.turnMovedToSquare = {};
             room.turnObligation = undefined;
             room.hadCaptureOrHomeThisTurn = false;
             room.turnAutoPlay = false;

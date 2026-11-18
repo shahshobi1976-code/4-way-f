@@ -116,8 +116,8 @@ export function toggleFullscreen() {
 
 import { multiplayerClient } from '../network/multiplayerClient';
 
-/** Adaptive screen buttons: Fullscreen button + Chat/Emoji reaction (in vertical mobile) + Wish icon. Scaled to 0.75x (size 48). */
-export function ScreenButtons({ gap = 8 }: { gap?: number }) {
+/** Adaptive screen buttons: Fullscreen button + Chat/Emoji reaction (in vertical mobile) + Wish icon. Scaled to half size (size 24). */
+export function ScreenButtons({ gap = 6 }: { gap?: number }) {
     const fs = useStore((s) => s.fullscreen);
     const wishNums = useStore((s) => s.wishNums);
     const wishUsable = useStore((s) => s.wishUsable);
@@ -140,7 +140,7 @@ export function ScreenButtons({ gap = 8 }: { gap?: number }) {
         <div className="flex items-center" style={{ gap: U(gap) }}>
             <RoundBtn
                 label="Fullscreen"
-                size={48}
+                size={24}
                 onClick={toggleFullscreen}
                 title="Toggle Fullscreen"
             >
@@ -151,7 +151,7 @@ export function ScreenButtons({ gap = 8 }: { gap?: number }) {
             {!landscape && showChat && (
                 <RoundBtn
                     label="Chat & Emoji Reactions"
-                    size={48}
+                    size={24}
                     onClick={toggleChat}
                     title="Chat & Emoji Reactions"
                     className={chatOpen ? "!border-cyan-400 !bg-cyan-500/30 text-cyan-200 ring-2 ring-cyan-400/50" : ""}
@@ -221,18 +221,18 @@ export function FloatingControls() {
 
     return (
         <>
-            {/* Bottom-Right Controls: Scaled to 0.75x (size 48) */}
+            {/* Bottom-Right Controls: Halved to size 24 */}
             <div
                 className="absolute z-30 flex items-center"
-                style={{ right: U(12), bottom: U(14), gap: U(8) }}
+                style={{ right: U(12), bottom: U(14), gap: U(6) }}
             >
                 {!landscape ? (
                     /* In mobile vertical: Music icon is placed next to AI Mute on the left: [Music] [AI Mute] [Settings] */
-                    <div className="flex items-center" style={{ gap: U(8) }}>
-                        <RoundBtn size={48} label="Music" onClick={() => store.patch({ modal: 'music' })}>🎵</RoundBtn>
+                    <div className="flex items-center" style={{ gap: U(6) }}>
+                        <RoundBtn size={24} label="Music" onClick={() => store.patch({ modal: 'music' })}>🎵</RoundBtn>
                         {phase === 'playing' && (
                             <RoundBtn
-                                size={48}
+                                size={24}
                                 label={aiMute ? "Unmute AI Voice" : "Mute AI Voice"}
                                 onClick={toggleAiMute}
                                 title={aiMute ? "AI Voice is MUTED (Click to Unmute AI Talk)" : "AI Voice is ACTIVE (Click to Mute AI Talk Only)"}
@@ -241,15 +241,15 @@ export function FloatingControls() {
                                 {aiMute ? '🔇' : '🎙️'}
                             </RoundBtn>
                         )}
-                        <RoundBtn size={48} label="Settings" onClick={() => store.patch({ modal: 'settings' })}>⚙️</RoundBtn>
+                        <RoundBtn size={24} label="Settings" onClick={() => store.patch({ modal: 'settings' })}>⚙️</RoundBtn>
                     </div>
                 ) : (
-                    <div className="flex flex-col items-end" style={{ gap: U(8) }}>
-                        <RoundBtn size={48} label="Music" onClick={() => store.patch({ modal: 'music' })}>🎵</RoundBtn>
-                        <div className="flex items-center" style={{ gap: U(8) }}>
+                    <div className="flex flex-col items-end" style={{ gap: U(6) }}>
+                        <RoundBtn size={24} label="Music" onClick={() => store.patch({ modal: 'music' })}>🎵</RoundBtn>
+                        <div className="flex items-center" style={{ gap: U(6) }}>
                             {phase === 'playing' && (
                                 <RoundBtn
-                                    size={48}
+                                    size={24}
                                     label={aiMute ? "Unmute AI Voice" : "Mute AI Voice"}
                                     onClick={toggleAiMute}
                                     title={aiMute ? "AI Voice is MUTED (Click to Unmute AI Talk)" : "AI Voice is ACTIVE (Click to Mute AI Talk Only)"}
@@ -258,7 +258,7 @@ export function FloatingControls() {
                                     {aiMute ? '🔇' : '🎙️'}
                                 </RoundBtn>
                             )}
-                            <RoundBtn size={48} label="Settings" onClick={() => store.patch({ modal: 'settings' })}>⚙️</RoundBtn>
+                            <RoundBtn size={24} label="Settings" onClick={() => store.patch({ modal: 'settings' })}>⚙️</RoundBtn>
                         </div>
                     </div>
                 )}
@@ -266,10 +266,10 @@ export function FloatingControls() {
 
             {/* In landscape mode: Chat button is stacked above fullscreen in bottom-left */}
             {landscape && showChat && (
-                <div className="absolute z-30" style={{ left: U(12), bottom: U(70) }}>
+                <div className="absolute z-30" style={{ left: U(12), bottom: U(44) }}>
                     <RoundBtn
                         label="Chat & Emoji Reactions"
-                        size={48}
+                        size={24}
                         onClick={toggleChat}
                         title="Chat & Emoji Reactions"
                         className={chatOpen ? "!border-cyan-400 !bg-cyan-500/30 text-cyan-200 ring-2 ring-cyan-400/50" : ""}
@@ -281,7 +281,7 @@ export function FloatingControls() {
 
             {/* Bottom-Left Controls: Fullscreen + [Chat & Emoji (vertical mobile only)] + Wish */}
             <div className="absolute z-30" style={{ left: U(12), bottom: U(14) }}>
-                <ScreenButtons gap={8} />
+                <ScreenButtons gap={6} />
             </div>
         </>
     );

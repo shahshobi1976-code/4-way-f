@@ -24,7 +24,7 @@ export const HOW_TO_PLAY_CARDS: GuideCard[] = [
         badge: 'STEP 1 OF 5 • QUICK SUMMARY',
         title: 'STEP 1 — The Game in 30 Seconds',
         content:
-            'Play in 4-Way or 2-Way mode with 4 tokens and 2 dice per player. A single 6 brings a token out of base. Rolling double 6 (6+6) awards an extra turn with no consecutive limit. Capturing on the open track awards a reroll and is compulsory (1 required if a total/pair option exists, else the max independent single-die captures; failing sends every non-capturing option token to base). Star squares, home paths, and equal/larger stacks are protected. First player to get all 4 tokens home wins!',
+            'Play in 4-Way or 2-Way mode with 4 tokens and 2 dice per player. A single 6 brings a token out of base. Rolling double 6 (6+6) awards an extra turn with no consecutive limit. Capturing on the open track awards a reroll and is compulsory (1 required if a total/pair option exists, else the max independent single-die captures; failing sends every non-capturing option token to base). Star squares, home paths, and equal/larger stacks are protected. First player to get all 4 tokens onto their coloured home path wins immediately!',
         accentColor: '#00f0ff',
     },
     {
@@ -84,7 +84,7 @@ export const HOW_TO_PLAY_CARDS: GuideCard[] = [
             '✓ Always inspect the board for compulsory captures (your first 3 matches show a confirmation warning if you skip one).',
             '✓ Stack tokens of the same colour on a square—a single opponent token cannot capture a stack of 2+.',
             '✓ Use star squares for sanctuary when opponents close in.',
-            '✓ Watch rival progress bars and stop the leader from getting all 4 tokens home!',
+            '✓ Watch rival progress bars and stop the leader from getting all 4 tokens onto their coloured home path!',
         ],
         accentColor: '#10b981',
     },
@@ -97,9 +97,9 @@ export const HOW_TO_PLAY_CARDS: GuideCard[] = [
         guideNumber: 1,
         icon: '🏆',
         badge: 'GUIDE 1 OF 12 • THE GOAL',
-        title: 'GUIDE 1 — The Goal',
+        title: 'GUIDE 1 — The Goal (Coloured Path Win)',
         content:
-            'Move all four of your tokens clockwise around the track, up your coloured home path, and into the centre home (Gul) with an exact roll. The first player to get all 4 tokens home wins immediately.',
+            'Move all four of your tokens clockwise around the track and onto your coloured home path (or into the centre home). The first player to get all 4 tokens onto their coloured home path wins immediately!',
         accentColor: '#10b981',
     },
     {
@@ -209,7 +209,7 @@ export const HOW_TO_PLAY_CARDS: GuideCard[] = [
         badge: 'GUIDE 12 OF 12 • HOW MATCH ENDS',
         title: 'GUIDE 12 — How the Match Ends',
         content:
-            'The match ends immediately as soon as one player gets all 4 tokens home. Remaining players are ranked by their progress percentage.',
+            'The match ends immediately as soon as one player gets all 4 tokens onto their coloured home path (or centre home). Remaining players are ranked by their progress percentage.',
         accentColor: '#10b981',
     },
 ];
