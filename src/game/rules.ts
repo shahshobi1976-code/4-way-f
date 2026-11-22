@@ -273,12 +273,66 @@ export function leaderOf(tokens: Tokens, active: boolean[]): number {
     return best;
 }
 
-/** Explicit alias for theme calculation: Match Leader / Potential Winner detection */
-export const getMatchLeader = leaderOf;
+export interface MatchLeaderResult {
+    leaderIdx: number;
+    score: number;
+}
 
-/** The computer players pile on whoever is winning: captures of the leader score highest. */
+/**
+ * Scores every other active seat (`finished` pawns weighted 1000 + active pawn `pos + 1`)
+ * and returns the current match leader `{ leaderIdx, score }`.
+ */
+export function getMatchLeader(
+    pawns: Tokens,
+    excludePIdx = -1,
+    active: boolean[] = [true, true, true, true],
+): MatchLeaderResult {
+    let leaderIdx = -1;
+    let bestScore = -1;
+    for (let p = 0; p < pawns.length; p++) {
+        if (p === excludePIdx || !active[p]) continue;
+        const row = pawns[p] || [];
+        let score = 0;
+        for (let t = 0; t < row.length; t++) {
+            const pos = row[t];
+            if (pos >= HOME) score += 1000;
+            else if (pos >= 0) score += pos + 1;
+        }
+        if (score > bestScore) {
+            bestScore = score;
+            leaderIdx = p;
+        }
+    }
+    return { leaderIdx, score: bestScore };
+}
+
+/**
+ * Returns true if any other active player's pawn sits on or within 1..6 steps
+ * behind seat `pIdx`'s entry square (`pos 0`).
+ */
+export function isEntrySquareThreatened(
+    pawns: Tokens,
+    pIdx: number,
+    active: boolean[] = [true, true, true, true],
+): boolean {
+    const entryGlobal = globalIdx(pIdx, 0);
+    for (let q = 0; q < pawns.length; q++) {
+        if (q === pIdx || !active[q]) continue;
+        const row = pawns[q] || [];
+        for (let t = 0; t < row.length; t++) {
+            const rr = row[t];
+            if (rr < 0 || rr > LAST_TRACK) continue;
+            const oppGlobal = globalIdx(q, rr);
+            const dist = (entryGlobal - oppGlobal + 52) % 52;
+            if (dist >= 0 && dist <= 6) return true;
+        }
+    }
+    return false;
+}
+
+/** The computer players pile on whoever is winning: captures and ambushes of the leader score highest. */
 export function scoreMove(tokens: Tokens, p: number, m: Move, active: boolean[]): number {
-    const leader = leaderOf(tokens, active);
+    const { leaderIdx: leader } = getMatchLeader(tokens, p, active);
     const leaderPct = leader >= 0 ? percent(tokens, leader) / 100 : 0;
     const winStart = coloredPathStartIndex(p);
     const r0 = tokens[p][m.tok];
@@ -294,11 +348,13 @@ export function scoreMove(tokens: Tokens, p: number, m: Move, active: boolean[])
     for (const c of m.captures) {
         const victimProg = tokens[c.p][c.t];
         s += 100 + victimProg * 0.8;
-        if (c.p === leader && c.p !== p) s += 70 + 60 * leaderPct;
+        if (c.p === leader && c.p !== p) s += 400 + 80 * leaderPct;
     }
     if (r0 < winStart && m.to >= winStart) s += 130;
     if (m.reachesHome) s += 30;
-    if (m.fromBase) s += 58;
+    if (m.fromBase) {
+        s += isEntrySquareThreatened(tokens, p, active) ? 20 : 150;
+    }
     s += m.to * 0.35;
     if (m.to <= LAST_TRACK) {
         const g = globalIdx(p, m.to);
@@ -307,14 +363,16 @@ export function scoreMove(tokens: Tokens, p: number, m: Move, active: boolean[])
             // Forming or reinforcing a protected friendly stack on an open square
             s += 14;
         }
-        // chase the leader: sit 1..6 squares behind a leader token on the track
+        // Ambush positioning: +260 + leaderPos for landing 1..6 squares behind an active leader pawn
         if (leader >= 0 && leader !== p) {
             for (let u = 0; u < 4; u++) {
                 const rr = tokens[leader][u];
                 if (rr < 0 || rr > LAST_TRACK) continue;
                 const lg = globalIdx(leader, rr);
                 const dist = (lg - g + 52) % 52;
-                if (dist >= 1 && dist <= 6 && !SAFE.has(lg)) s += 22 + 26 * leaderPct;
+                if (dist >= 1 && dist <= 6 && !SAFE.has(lg)) {
+                    s += 260 + rr;
+                }
             }
         }
         // avoid landing right in front of an opponent unless protected in a friendly stack
@@ -334,13 +392,40 @@ export function scoreMove(tokens: Tokens, p: number, m: Move, active: boolean[])
     return s;
 }
 
-export function pickMove(tokens: Tokens, p: number, options: Move[], active: boolean[]): Move {
-    let best = options[0], bs = -Infinity;
-    for (const m of options) {
+export function pickBestAIMove(
+    tokens: Tokens,
+    p: number,
+    options: Move[],
+    active: boolean[],
+    dice?: [number, number],
+    diceUsed?: [boolean, boolean],
+    obligation?: CaptureObligation | null,
+    capturesMade = 0,
+): { move: Move; hitsLeader: boolean } {
+    const pool =
+        dice && diceUsed
+            ? pickObligationAwarePool(tokens, p, dice, diceUsed, active, options, obligation, capturesMade)
+            : options;
+    const { leaderIdx } = getMatchLeader(tokens, p, active);
+    const leaderCapPool =
+        leaderIdx >= 0 ? pool.filter((m) => m.captures.some((c) => c.p === leaderIdx)) : [];
+    const evalPool = leaderCapPool.length > 0 ? leaderCapPool : pool;
+
+    let best = evalPool[0];
+    let bs = -Infinity;
+    for (const m of evalPool) {
         const s = scoreMove(tokens, p, m, active);
-        if (s > bs) { bs = s; best = m; }
+        if (s > bs) {
+            bs = s;
+            best = m;
+        }
     }
-    return best;
+    const hitsLeader = leaderIdx >= 0 && best.captures.some((c) => c.p === leaderIdx);
+    return { move: best, hitsLeader };
+}
+
+export function pickMove(tokens: Tokens, p: number, options: Move[], active: boolean[]): Move {
+    return pickBestAIMove(tokens, p, options, active).move;
 }
 
 /**

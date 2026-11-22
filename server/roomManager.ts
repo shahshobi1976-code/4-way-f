@@ -6,6 +6,7 @@ import {
     newTokens,
     randDie,
     pickMove,
+    pickBestAIMove,
     hasWon,
     coloredPathStartIndex,
     isLuckySum,
@@ -14,11 +15,19 @@ import {
     offendingTokensForPenalty,
     pickObligationAwarePool,
     LAST_TRACK,
+    PATH_START,
     globalIdx,
     type CaptureObligation,
     type Move,
     type Tokens,
 } from '../src/game/rules';
+import {
+    pickBanterIndex,
+    HIGH_PRIORITY_BANTER_EVENTS,
+    BANTER_ROUTINE_COOLDOWN_MS,
+    BANTER_HIGH_PRIORITY_COOLDOWN_MS,
+    type BanterEvent,
+} from '../src/game/banter';
 import {
     generateGuestIdentity,
     hashToken,
@@ -85,6 +94,8 @@ export interface ClientRoomState {
     rankings: { playerIndex: number; name: string; avatar: string; rank: number; progress?: number }[];
     turnTimeSec?: number;
     maxPlayers?: number;
+    secretWhispers?: boolean;
+    messageCount?: number;
 }
 
 export interface Room {
@@ -94,6 +105,8 @@ export interface Room {
     fillBots: boolean;
     turnTimeSec: number;
     maxPlayers: number;
+    secretWhispers: boolean;
+    messageCount: number;
     players: (RoomPlayer | null)[];
     tokens: Tokens;
     currentTurn: number;
@@ -150,6 +163,7 @@ class RoomManager {
     private broadcast: BroadcastFn = () => {};
     private roomCreateWindows = new Map<string, number[]>();
     private roomJoinWindows = new Map<string, number[]>();
+    private socialCooldowns = new Map<string, number>();
     private snapshotTimer: NodeJS.Timeout | null = null;
 
     constructor() {
@@ -178,6 +192,30 @@ class RoomManager {
         return true;
     }
 
+    private aiBanterCooldowns = new Map<string, number>();
+
+    private emitAiBanter(room: Room, seatIndex: number, event: BanterEvent, vars?: Record<string, string>) {
+        const player = room.players[seatIndex];
+        if (!player || !player.isAI) return;
+        const now = Date.now();
+        const isHigh = HIGH_PRIORITY_BANTER_EVENTS.has(event);
+        const minGap = isHigh ? BANTER_HIGH_PRIORITY_COOLDOWN_MS : BANTER_ROUTINE_COOLDOWN_MS;
+        const key = `${room.code}:${seatIndex}`;
+        const prev = this.aiBanterCooldowns.get(key) || 0;
+        if (!isHigh && now - prev < minGap) return;
+        if (isHigh && now - prev < minGap) return;
+        this.aiBanterCooldowns.set(key, now);
+        const { lineIdx, personality } = pickBanterIndex(event, seatIndex);
+        this.broadcast(room.code, 'ai_banter', {
+            seatIndex,
+            event,
+            personality,
+            lineIdx,
+            vars,
+            timestamp: now,
+        });
+    }
+
     private serializeRoom(room: Room) {
         return {
             code: room.code,
@@ -186,6 +224,8 @@ class RoomManager {
             fillBots: room.fillBots,
             turnTimeSec: room.turnTimeSec,
             maxPlayers: room.maxPlayers,
+            secretWhispers: room.secretWhispers,
+            messageCount: room.messageCount,
             players: room.players,
             tokens: room.tokens,
             currentTurn: room.currentTurn,
@@ -269,6 +309,8 @@ class RoomManager {
                     fillBots: item.fillBots !== undefined ? !!item.fillBots : true,
                     turnTimeSec: item.turnTimeSec ?? 90,
                     maxPlayers: item.maxPlayers ?? 4,
+                    secretWhispers: !!item.secretWhispers,
+                    messageCount: Number(item.messageCount) || 0,
                     players,
                     tokens: item.tokens || newTokens(),
                     currentTurn: item.currentTurn ?? 0,
@@ -365,6 +407,8 @@ class RoomManager {
             rankings: room.rankings,
             turnTimeSec: room.turnTimeSec ?? 90,
             maxPlayers: 4,
+            secretWhispers: !!room.secretWhispers,
+            messageCount: room.messageCount || 0,
         };
     }
 
@@ -489,6 +533,8 @@ class RoomManager {
             fillBots: true,
             turnTimeSec: turnTimeSec !== undefined ? turnTimeSec : 90,
             maxPlayers: 4,
+            secretWhispers: false,
+            messageCount: 0,
             players,
             tokens: newTokens(),
             currentTurn: 0,
@@ -870,17 +916,16 @@ class RoomManager {
             : [];
 
         if (allMoves.length > 0) {
-            const pool = pickObligationAwarePool(
+            const { move: chosen } = pickBestAIMove(
                 room.tokens,
                 botIdx,
+                allMoves,
+                activeBools,
                 room.dice,
                 room.diceUsed,
-                activeBools,
-                allMoves,
                 room.turnObligation,
                 room.capturesTakenThisTurn || 0,
             );
-            const chosen = pickMove(room.tokens, botIdx, pool, activeBools);
             if (chosen) {
                 this.movePawn(room.code, '', chosen.die, chosen.tok, 'gul', true);
                 return;
@@ -966,6 +1011,16 @@ class RoomManager {
             streakForfeited,
         });
 
+        if (curPlayer.isAI) {
+            if (lucky) {
+                this.emitAiBanter(room, room.currentTurn, 'lucky7');
+            } else if (doubleSix) {
+                this.emitAiBanter(room, room.currentTurn, 'lucky_roll');
+            } else if (Math.random() < 0.35) {
+                this.emitAiBanter(room, room.currentTurn, 'roll');
+            }
+        }
+
         const rollTurnAtSchedule = room.currentTurn;
         if (movableTokens.length === 0) {
             setTimeout(() => {
@@ -1009,6 +1064,7 @@ class RoomManager {
                     penalties: room.penalties[p],
                     reason: 'missed_capture',
                 });
+                this.emitAiBanter(room, p, 'penalty');
                 room.capturePromise = 0;
                 room.turnObligation = undefined;
                 room.turnMovedToSquare = {};
@@ -1100,6 +1156,7 @@ class RoomManager {
             return { ok: true };
         }
 
+        const prevTokenPos = room.tokens[room.currentTurn][tokenIndex];
         room.tokens[room.currentTurn][tokenIndex] = move.to;
         if (dieIndex === 2) room.diceUsed = [true, true];
         else room.diceUsed[dieIndex] = true;
@@ -1165,6 +1222,7 @@ class RoomManager {
         }
 
         const reachedHome = move.to === 56;
+        const enteredHomeStretch = prevTokenPos < PATH_START && move.to >= PATH_START && !reachedHome;
 
         this.broadcast(room.code, 'pawn_moved', {
             p: room.currentTurn,
@@ -1176,6 +1234,17 @@ class RoomManager {
             diceUsed: room.diceUsed,
             passed: false,
         });
+
+        if (move.captures.length > 0) {
+            const firstCap = move.captures[0];
+            const victimName = room.players[firstCap.p]?.name || 'Rival';
+            this.emitAiBanter(room, room.currentTurn, 'capture', { n: victimName });
+            this.emitAiBanter(room, firstCap.p, 'captured');
+        } else if (reachedHome) {
+            this.emitAiBanter(room, room.currentTurn, 'pawn_home');
+        } else if (enteredHomeStretch) {
+            this.emitAiBanter(room, room.currentTurn, 'home_stretch');
+        }
 
         if (hasWon(room.tokens, room.currentTurn)) {
             room.winner = room.currentTurn;
@@ -1247,8 +1316,77 @@ class RoomManager {
         this.scheduleSnapshotSave();
 
         if (room.players[room.currentTurn]?.isAI) {
+            if (Math.random() < 0.35) this.emitAiBanter(room, room.currentTurn, 'turn');
             this.scheduleBotTurn(room);
+        } else if (Math.random() < 0.25) {
+            const idleAi = room.players.findIndex((pl, s) => s !== room.currentTurn && !!pl?.isAI);
+            if (idleAi !== -1) this.emitAiBanter(room, idleAi, 'banter');
         }
+    }
+
+    public verifySender(
+        code: string,
+        sessionToken: string,
+        socketId: string,
+    ): { ok: true; room: Room; player: RoomPlayer; seatIndex: number } | { ok: false; error: string } {
+        const cleanCode = String(code || '').toUpperCase().trim();
+        const room = this.rooms.get(cleanCode);
+        if (!room) return { ok: false, error: 'Room not found' };
+        if (!sessionToken) return { ok: false, error: 'Missing session token' };
+        const found = this.findPlayerByToken(room, sessionToken);
+        if (!found) return { ok: false, error: 'Unauthorized player token' };
+        const { player, index } = found;
+        if (index < 0 || index > 3) return { ok: false, error: 'Invalid seat index' };
+        if (player.isAI) return { ok: false, error: 'Bots cannot send messages' };
+        if (!player.socketId || player.socketId !== socketId) {
+            return { ok: false, error: 'Active socket mismatch' };
+        }
+        return { ok: true, room, player, seatIndex: index };
+    }
+
+    public checkSocialCooldown(
+        roomCode: string,
+        seatIndex: number,
+        kind: 'chat' | 'reaction' | 'voice' | 'whisper',
+        cooldownMs: number,
+    ): number {
+        const key = `${roomCode}:${seatIndex}:${kind}`;
+        const now = Date.now();
+        const prev = this.socialCooldowns.get(key) || 0;
+        const elapsed = now - prev;
+        if (elapsed < cooldownMs) {
+            return cooldownMs - elapsed;
+        }
+        this.socialCooldowns.set(key, now);
+        if (this.socialCooldowns.size > 4000) {
+            for (const [k, t] of this.socialCooldowns.entries()) {
+                if (now - t > 60_000) this.socialCooldowns.delete(k);
+            }
+        }
+        return 0;
+    }
+
+    public incrementMessageCount(room: Room): number {
+        room.messageCount = (room.messageCount || 0) + 1;
+        return room.messageCount;
+    }
+
+    public toggleSecretWhispers(
+        code: string,
+        sessionToken: string,
+        socketId: string,
+        secretWhispers?: boolean,
+    ): { ok: boolean; secretWhispers?: boolean; error?: string; room?: Room } {
+        const auth = this.verifySender(code, sessionToken, socketId);
+        if (!auth.ok) return { ok: false, error: auth.error };
+        const { room, player } = auth;
+        if (player.publicPlayerId !== room.hostId) {
+            return { ok: false, error: 'Only host can change Secret Whispers' };
+        }
+        room.secretWhispers = typeof secretWhispers === 'boolean' ? secretWhispers : !room.secretWhispers;
+        this.broadcast(room.code, 'room_updated', this.getClientRoomState(room));
+        this.scheduleSnapshotSave();
+        return { ok: true, secretWhispers: room.secretWhispers, room };
     }
 
     public sendChat(code: string, sessionToken: string, text: string, emoji?: string): boolean {
@@ -1262,7 +1400,7 @@ class RoomManager {
             p: found.index,
             name: player.name,
             avatar: player.avatar,
-            text: (text || '').slice(0, 80),
+            text: (text || '').slice(0, 120),
             emoji,
             time: Date.now(),
         });
@@ -1396,6 +1534,11 @@ class RoomManager {
         room.matchEnded = true;
         this.scheduleSnapshotSave();
         this.broadcast(room.code, 'game_over', { winner: room.winner, rankings: room.rankings });
+        this.emitAiBanter(room, winnerSeat, 'win');
+        const runnerUpAi = nonWinners.find((item) => item.player.isAI);
+        if (runnerUpAi) {
+            this.emitAiBanter(room, runnerUpAi.seat, 'loss');
+        }
 
         // Non-blocking async record
         let recordRes: any = { ok: true };

@@ -2,6 +2,7 @@ import { store, useStore, DEFAULT_PLAYERS } from '../state/store';
 import { LANGS, tr, colorName } from '../i18n';
 import { U } from './kit';
 import { multiplayerClient } from '../network/multiplayerClient';
+import { requestMicrophonePermission } from '../game/audioCapture';
 
 const AVATARS = ['🤴', '👸', '👑', '💎', '🔥', '🏆', '🎩', '🎮', '🌟', '🍀', '🎲'];
 const BORDER = ['#e53935', '#43a047', '#fdd835', '#00bcd4'];
@@ -13,9 +14,20 @@ export function SetupScreen() {
     const mode = useStore((s) => s.mode);
     const gender = useStore((s) => s.gender);
     const landscape = useStore((s) => s.landscape);
+    const micPermission = useStore((s) => s.micPermission);
+    const micDeviceLabel = useStore((s) => s.micDeviceLabel);
     const T = (k: string) => tr(lang, k);
     // 2-player mode: only Green and Cyan sit down
     const seats = mode === 2 ? [1, 3] : [0, 1, 2, 3];
+
+    const micGranted = micPermission === 'granted';
+    const micChecking = micPermission === 'checking';
+    const connectMic = () => {
+        void requestMicrophonePermission().then((res) => {
+            if (res.ok) multiplayerClient.showToast(`🎤 Microphone connected`, 'info');
+            else if (res.error) multiplayerClient.showToast(res.error, 'warn');
+        });
+    };
 
     const setGender = (g: 'male' | 'female') => {
         store.patch({ gender: g });
@@ -167,6 +179,27 @@ export function SetupScreen() {
                                             </option>
                                         ))}
                                     </select>
+                                </div>
+
+                                {/* Microphone Permission & Connection */}
+                                <div className="flex items-center justify-between gap-1 bg-slate-950/60 p-1.5 rounded-lg border border-white/5">
+                                    <span className="text-[11px] font-bold text-slate-300 truncate">
+                                        🎤 {micGranted ? (micDeviceLabel || 'Mic Ready') : 'Microphone:'}
+                                    </span>
+                                    <button
+                                        type="button"
+                                        disabled={micChecking || micPermission === 'unsupported'}
+                                        onClick={connectMic}
+                                        className={`px-2 py-0.5 rounded text-[10px] font-black transition-all cursor-pointer shrink-0 ${
+                                            micGranted
+                                                ? 'bg-emerald-500/25 border border-emerald-400/60 text-emerald-200'
+                                                : micPermission === 'denied'
+                                                ? 'bg-red-500/25 border border-red-400/60 text-red-200'
+                                                : 'bg-cyan-400 text-slate-950 hover:brightness-110'
+                                        }`}
+                                    >
+                                        {micChecking ? 'Checking...' : micGranted ? '✓ Connected' : micPermission === 'denied' ? 'Retry Mic' : 'Connect Mic'}
+                                    </button>
                                 </div>
                             </div>
 
@@ -441,8 +474,27 @@ export function SetupScreen() {
                 })}
             </div>
 
-            {/* Bottom Actions: Start & Back to Main Menu at the very bottom */}
+            {/* Bottom Actions: Mic Connection + Start & Back to Main Menu */}
             <div className="flex flex-col gap-1.5 pt-1.5 border-t border-cyan-400/20 shrink-0 w-full max-w-[500px] mx-auto">
+                <div className="flex items-center justify-between gap-2 px-2.5 py-1 rounded-lg bg-slate-950/75 border border-white/10">
+                    <span className="text-[11px] font-bold text-slate-200 truncate">
+                        🎤 {micGranted ? `Mic Connected (${micDeviceLabel || 'Ready'})` : micPermission === 'denied' ? 'Microphone Blocked' : 'Connect Microphone for Voice'}
+                    </span>
+                    <button
+                        type="button"
+                        disabled={micChecking || micPermission === 'unsupported'}
+                        onClick={connectMic}
+                        className={`px-2.5 py-0.5 rounded-md text-[10px] font-black cursor-pointer shrink-0 ${
+                            micGranted
+                                ? 'bg-emerald-500/25 border border-emerald-400/60 text-emerald-200'
+                                : micPermission === 'denied'
+                                ? 'bg-red-500/25 border border-red-400/60 text-red-200'
+                                : 'bg-cyan-400 text-slate-950'
+                        }`}
+                    >
+                        {micChecking ? 'Checking...' : micGranted ? '✓ Ready' : micPermission === 'denied' ? 'Retry' : 'Allow Mic'}
+                    </button>
+                </div>
                 <button
                     type="button"
                     onClick={start}

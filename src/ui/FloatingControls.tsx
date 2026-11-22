@@ -1,7 +1,8 @@
-import { useEffect, useState, type CSSProperties } from 'react';
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { store, useStore } from '../state/store';
 import { bus } from '../game/bus';
 import { RoundBtn, U } from './kit';
+import { UniversalAudioCapture, type AudioCaptureResult } from '../game/audioCapture';
 
 /**
  * Ask the browser to lock the screen to landscape. Browsers refuse unless this is
@@ -197,15 +198,187 @@ export function RotateHint() {
 
 import * as sfx from '../game/sfx';
 
+/** Bottom-right online Voice Note capture button: supports tap-to-start/stop OR hold-to-talk with 6.5s / 80KB WAV pipeline */
+function VoiceNoteButton() {
+    const [recording, setRecording] = useState(false);
+    const [sending, setSending] = useState(false);
+    const [elapsedMs, setElapsedMs] = useState(0);
+    const [level, setLevel] = useState(0);
+    const capRef = useRef<UniversalAudioCapture | null>(null);
+    const pressDownAtRef = useRef<number>(0);
+
+    const micPermission = useStore((s) => s.micPermission);
+    const isMultiplayer = !!multiplayerClient.roomCode;
+
+    useEffect(() => {
+        return () => {
+            capRef.current?.cancelPendingOrActive();
+            capRef.current = null;
+        };
+    }, []);
+
+    const handleCaptureResult = async (res: AudioCaptureResult) => {
+        setRecording(false);
+        setElapsedMs(0);
+        setLevel(0);
+        if (!res.ok || !res.bytes) {
+            if (res.errorCode === 'NO_SOUND') {
+                multiplayerClient.showToast('No microphone sound detected', 'warn');
+            } else if (res.errorCode && res.errorCode !== 'CANCELLED') {
+                multiplayerClient.showToast(res.error || 'Voice note could not be recorded', 'warn');
+            }
+            return;
+        }
+        if (multiplayerClient.roomCode) {
+            setSending(true);
+            await multiplayerClient.sendVoiceNote(res.bytes, res.mimeType || 'audio/wav');
+            setSending(false);
+        } else {
+            const st = store.get();
+            const cur = st.current;
+            const localSeat = !st.players[cur]?.ai ? cur : Math.max(0, st.players.findIndex((p) => !p.ai));
+            sfx.playAudioClip(`local_voice_${Date.now()}`, res.bytes, res.mimeType || 'audio/wav');
+            bus.chat?.(localSeat, `🎤 Voice (${res.durationSec || 1}s)`, { voice: false });
+        }
+    };
+
+    const startRec = () => {
+        if (recording || sending) return;
+        const cap = new UniversalAudioCapture({
+            maxBytes: 80_000,
+            maxMs: 6500,
+            onProgress: (ms, lvl) => {
+                setElapsedMs(ms);
+                setLevel(lvl);
+            },
+            onAutoStop: (res) => {
+                capRef.current = null;
+                void handleCaptureResult(res);
+            },
+        });
+        capRef.current = cap;
+        setRecording(true);
+        setElapsedMs(0);
+        void cap.start().then((r) => {
+            if (!r.ok) {
+                if (capRef.current === cap) capRef.current = null;
+                setRecording(false);
+                if (r.error && r.error !== 'Recording cancelled') {
+                    multiplayerClient.showToast(r.error, 'error');
+                }
+            }
+        });
+    };
+
+    const stopRec = (cancel = false) => {
+        const cap = capRef.current;
+        if (!cap) return;
+        capRef.current = null;
+        void cap.stop(cancel).then((res) => {
+            void handleCaptureResult(res);
+        });
+    };
+
+    const onPointerDown = (e: React.PointerEvent) => {
+        e.preventDefault();
+        pressDownAtRef.current = Date.now();
+        if (recording) {
+            stopRec(false);
+        } else {
+            startRec();
+        }
+    };
+
+    const onPointerUp = () => {
+        // Hold-to-talk: if user held > 380ms before releasing, stop & send immediately; quick tap keeps recording until second tap
+        if (recording && pressDownAtRef.current > 0 && Date.now() - pressDownAtRef.current > 380) {
+            stopRec(false);
+        }
+    };
+
+    const secText = (elapsedMs / 1000).toFixed(1);
+
+    return (
+        <div className="relative flex items-center">
+            {recording && (
+                <div
+                    className="absolute bottom-full right-0 mb-2 px-2.5 py-1 rounded-full bg-red-950/95 border border-red-400 text-white shadow-xl flex items-center gap-1.5 whitespace-nowrap select-none"
+                    style={{ fontSize: U(11) }}
+                >
+                    <span className="w-2 h-2 rounded-full bg-red-400 animate-ping" />
+                    <span className="font-mono font-black text-red-200">{secText}s / 6.5s</span>
+                    <div className="w-8 h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                        <div className="h-full bg-emerald-400 transition-[width] duration-75" style={{ width: `${Math.round(level * 100)}%` }} />
+                    </div>
+                    <button
+                        type="button"
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            stopRec(true);
+                        }}
+                        className="ml-0.5 text-slate-300 hover:text-white font-black cursor-pointer"
+                        title="Cancel voice note"
+                    >
+                        ✕
+                    </button>
+                </div>
+            )}
+            <RoundBtn
+                size={24}
+                label={recording ? 'Stop & Send Voice Note' : 'Record Voice Note'}
+                onPointerDown={onPointerDown}
+                onPointerUp={onPointerUp}
+                onPointerCancel={() => stopRec(true)}
+                title={
+                    recording
+                        ? 'Tap to Send Voice Note (Max 6.5s)'
+                        : micPermission === 'granted'
+                        ? isMultiplayer
+                            ? 'Mic Connected • Tap or Hold to Send Voice Note'
+                            : 'Mic Connected • Tap or Hold to Record Voice Message'
+                        : 'Tap to Connect Microphone & Record Voice'
+                }
+                className={
+                    recording
+                        ? '!border-red-400 !bg-red-600/90 text-white ring-2 ring-red-400/70 animate-pulse'
+                        : sending
+                        ? '!border-amber-400 !bg-amber-500/30 text-amber-200 opacity-80'
+                        : micPermission === 'granted'
+                        ? 'text-emerald-200 !border-emerald-400/60'
+                        : micPermission === 'denied'
+                        ? 'text-red-300 !border-red-400/60'
+                        : 'text-cyan-200'
+                }
+            >
+                {sending ? '⏳' : recording ? '⏹' : '🎤'}
+            </RoundBtn>
+            {!recording && !sending && (
+                <span
+                    className={`pointer-events-none absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full border border-slate-950 ${
+                        micPermission === 'granted'
+                            ? 'bg-emerald-400'
+                            : micPermission === 'denied'
+                            ? 'bg-red-500'
+                            : 'bg-amber-400 animate-pulse'
+                    }`}
+                />
+            )}
+        </div>
+    );
+}
+
 /** Menu / screen floating buttons: AI Voice Mute + music + settings bottom-right, fullscreen + chat bottom-left (scaled to 0.75x). */
 export function FloatingControls() {
     const phase = useStore((s) => s.phase);
     const aiMute = useStore((s) => s.settings.aiMute);
     const landscape = useStore((s) => s.landscape);
     const chatOpen = useStore((s) => s.chatOpen);
-    const isMultiplayer = !!multiplayerClient.roomCode;
+    const [, setNetTick] = useState(0);
+    useEffect(() => multiplayerClient.subscribe(() => setNetTick((t) => t + 1)), []);
 
+    const isMultiplayer = !!multiplayerClient.roomCode;
     const showChat = phase === 'playing' || isMultiplayer;
+    const showVoiceMic = phase === 'playing';
 
     const toggleAiMute = () => {
         const next = !aiMute;
@@ -227,8 +400,9 @@ export function FloatingControls() {
                 style={{ right: U(12), bottom: U(14), gap: U(6) }}
             >
                 {!landscape ? (
-                    /* In mobile vertical: Music icon is placed next to AI Mute on the left: [Music] [AI Mute] [Settings] */
+                    /* In mobile vertical: [Voice Mic (online)] [Music] [AI Mute] [Settings] */
                     <div className="flex items-center" style={{ gap: U(6) }}>
+                        {showVoiceMic && <VoiceNoteButton />}
                         <RoundBtn size={24} label="Music" onClick={() => store.patch({ modal: 'music' })}>🎵</RoundBtn>
                         {phase === 'playing' && (
                             <RoundBtn
@@ -245,7 +419,10 @@ export function FloatingControls() {
                     </div>
                 ) : (
                     <div className="flex flex-col items-end" style={{ gap: U(6) }}>
-                        <RoundBtn size={24} label="Music" onClick={() => store.patch({ modal: 'music' })}>🎵</RoundBtn>
+                        <div className="flex items-center" style={{ gap: U(6) }}>
+                            {showVoiceMic && <VoiceNoteButton />}
+                            <RoundBtn size={24} label="Music" onClick={() => store.patch({ modal: 'music' })}>🎵</RoundBtn>
+                        </div>
                         <div className="flex items-center" style={{ gap: U(6) }}>
                             {phase === 'playing' && (
                                 <RoundBtn

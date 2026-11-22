@@ -1,3 +1,12 @@
+export interface NameplateBound {
+    seatIdx: number;
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    angleDeg: number;
+}
+
 // Channel between React UI, Multiplayer Client, and running Pixi scene
 export const bus: {
     /** Post a chat line as a player (typed message, reaction, quick phrase). */
@@ -22,4 +31,14 @@ export const bus: {
     onRemoteGameOver?: (winner: number, rankings: any[]) => void;
     /** Authoritative room state sync event (reconnect or recovery) */
     onRoomStateSynced?: (state: any) => void;
+    /** Open Private Whisper composer targeted at specific seat(s) */
+    openWhisperModal?: (preselectSeats?: number[]) => void;
+    /** Remote server-synced AI banter line event */
+    onRemoteAiBanter?: (data: {
+        seatIndex: number;
+        event: string;
+        personality: string;
+        lineIdx: number;
+        vars?: Record<string, string>;
+    }) => void;
 } = {};

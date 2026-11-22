@@ -12,8 +12,13 @@ import {
     evaluateCaptureObligation,
     offendingTokensForPenalty,
     luckySevenAllowed,
+    getMatchLeader,
+    isEntrySquareThreatened,
+    pickBestAIMove,
+    globalIdx,
     type Tokens,
 } from '../src/game/rules';
+import { shouldShowCaptureWarning } from '../src/state/store';
 import { roomManager, type Room } from '../server/roomManager';
 
 function assert(condition: boolean, msg: string) {
@@ -485,6 +490,118 @@ console.log('--- RUNNING LUDO RULES & PENALTY & GUL TEST SUITE ---');
     // Now player skips capture on token 0 and moves token 1 (+4 -> 19) instead
     const skipRes = roomManager.movePawn(room.code, hostTok, 1, 1, 'gul', false);
     assert(skipRes.ok && room.tokens[0][0] === IN_BASE && room.penalties[0] === 1, 'Skipping capture after deploying on 6 sends token 0 back to base');
+}
+
+// Test 15: Splitting a 2-token stack keeps partner stationary on path (no automatic split-sacrifice)
+{
+    const res = roomManager.createRoom('host_tok_split_long_session_id_123', 'HostSplit', '👑', 'sock_split', 90, 4, '10.0.0.10');
+    assert(res.ok && !!res.roomCode, 'Created room for stack-split test');
+    const hostTok = res.secretSessionToken || 'host_tok_split_long_session_id_123';
+    roomManager.startGame(res.roomCode!, hostTok);
+    const room = roomManager.getRoom(res.roomCode!)!;
+    room.currentTurn = 0;
+    room.tokens = newTokens();
+    room.tokens[0] = [10, 10, IN_BASE, IN_BASE]; // 2-token stack on open square 10
+    room.dice = [3, 2];
+    room.diceUsed = [false, false];
+    room.capturesTakenThisTurn = 0;
+    room.tokensCapturedThisTurn = [];
+    room.turnMovedToSquare = {};
+    room.turnObligation = evaluateCaptureObligation(room.tokens, 0, room.dice, [true, true, true, true]);
+    room.capturePromise = room.turnObligation.required;
+
+    const splitRes = roomManager.movePawn(room.code, hostTok, 0, 0, 'gul', false);
+    assert(
+        splitRes.ok && room.tokens[0][0] === 13 && room.tokens[0][1] === 10,
+        'Moving 1 token off a 2-token stack leaves partner token stationary at pos 10 (no auto split-sacrifice)',
+    );
+}
+
+// Test 16: Lone opponent sitting on a friendly 2-token pair cannot capture the pair and is still capturable by 1 attacker
+{
+    const tokens = newTokens();
+    const pairSquare = 10; // non-safe shared square (global 10 for seat 0)
+    const oppRel10 = (10 - 13 + 52) % 52; // seat 1 relative index matching global 10
+    tokens[0] = [pairSquare, pairSquare, IN_BASE, IN_BASE];
+    tokens[1] = [oppRel10, IN_BASE, IN_BASE, IN_BASE];
+
+    // If seat 1 has another token arriving at global 10 (still only 1 mover vs pair), check lone landing vs stack
+    const loneTokens = newTokens();
+    loneTokens[0] = [pairSquare, pairSquare, IN_BASE, IN_BASE];
+    loneTokens[1] = [oppRel10 - 3, IN_BASE, IN_BASE, IN_BASE];
+    const oppMoves = legalMoves(loneTokens, 1, 3, 0, [true, true, false, false]);
+    const oppLandingOnPair = oppMoves.find((m) => m.to === oppRel10);
+    assert(
+        !!oppLandingOnPair && oppLandingOnPair.captures.length === 0,
+        'Lone opponent token landing on 2-token pair cannot capture the pair (1 < 2)',
+    );
+
+    // Meanwhile seat 2 with 1 token 4 steps behind global 10 captures seat 1's lone token on global 10 while pair stays safe
+    const opp2Rel10 = (10 - 26 + 52) % 52;
+    tokens[2] = [opp2Rel10 - 4, IN_BASE, IN_BASE, IN_BASE];
+    const seat2Moves = legalMoves(tokens, 2, 4, 0, [true, true, true, false]);
+    const seat2Attack = seat2Moves.find((m) => m.to === opp2Rel10);
+    assert(
+        !!seat2Attack &&
+            seat2Attack.captures.length === 1 &&
+            seat2Attack.captures[0].p === 1 &&
+            !seat2Attack.captures.some((c) => c.p === 0),
+        'Single attacker captures lone opponent sitting on a 2-token pair while the pair remains protected',
+    );
+}
+
+// Test 17: getMatchLeader, isEntrySquareThreatened, and pickBestAIMove leader targeting
+{
+    const tokens = newTokens();
+    tokens[0] = [20, 12, IN_BASE, IN_BASE]; // score for seat 0 = 21 + 13 = 34
+    tokens[1] = [HOME, 40, 10, IN_BASE]; // score for seat 1 = 1000 + 41 + 11 = 1052 (leader)
+    tokens[2] = [15, IN_BASE, IN_BASE, IN_BASE]; // AI evaluator seat 2 (entry square global 26)
+    tokens[3] = [5, IN_BASE, IN_BASE, IN_BASE];
+
+    const leaderRes = getMatchLeader(tokens, 2, [true, true, true, true]);
+    assert(
+        leaderRes.leaderIdx === 1 && leaderRes.score === 1052,
+        `getMatchLeader scores finished=1000 + active(pos+1) and picks seat 1 (got ${leaderRes.leaderIdx}, score=${leaderRes.score})`,
+    );
+
+    // Threat detection: seat 0 at pos 23 (global 23) is 3 steps behind seat 2 entry square (global 26)
+    const threatTokens = newTokens();
+    threatTokens[0] = [23, IN_BASE, IN_BASE, IN_BASE];
+    assert(
+        isEntrySquareThreatened(threatTokens, 2, [true, true, true, true]) === true,
+        'isEntrySquareThreatened returns true when opponent sits within 1..6 steps behind entry square',
+    );
+    threatTokens[0] = [10, IN_BASE, IN_BASE, IN_BASE];
+    assert(
+        isEntrySquareThreatened(threatTokens, 2, [true, true, true, true]) === false,
+        'isEntrySquareThreatened returns false when no opponent threatens entry square',
+    );
+
+    // AI capture prioritization: seat 2 can capture either seat 1 (leader) with die 0 or seat 3 (non-leader) with die 1
+    const aiBoard = newTokens();
+    const leaderTargetG30 = (30 - 13 + 52) % 52; // global 30 belongs to seat 1 (leader via finished pawn at HOME)
+    const nonLeaderG29 = (29 - 39 + 52) % 52; // global 29 belongs to seat 3
+    aiBoard[1] = [HOME, leaderTargetG30, IN_BASE, IN_BASE]; // leader
+    aiBoard[3] = [nonLeaderG29, IN_BASE, IN_BASE, IN_BASE];
+    aiBoard[2] = [0, 1, IN_BASE, IN_BASE]; // tok 0 at rel 0 (global 26) -> +4=global 30; tok 1 at rel 1 (global 27) -> +2=global 29
+    const dice: [number, number] = [4, 2];
+    const active = [false, true, true, true];
+    const legal = legalMovesForTurn(aiBoard, 2, dice, [false, false], active);
+    const ob = evaluateCaptureObligation(aiBoard, 2, dice, active);
+    const aiPick = pickBestAIMove(aiBoard, 2, legal, active, dice, [false, false], ob, 0);
+    assert(
+        aiPick.hitsLeader && aiPick.move.captures.some((c) => c.p === 1),
+        'pickBestAIMove prioritizes capturing match leader pawn first and flags hitsLeader = true',
+    );
+}
+
+// Test 18: Configurable CaptureWarningMode helper ('first3' | 'always' | 'off')
+{
+    assert(shouldShowCaptureWarning('first3', 1) === true, "first3 warns on match 1");
+    assert(shouldShowCaptureWarning('first3', 3) === true, "first3 warns on match 3");
+    assert(shouldShowCaptureWarning('first3', 4) === false, "first3 stops warning on match 4");
+    assert(shouldShowCaptureWarning('always', 10) === true, "always warns on match 10");
+    assert(shouldShowCaptureWarning('off', 1) === false, "off disables warning even on match 1");
 }
 
 console.log('🎉 ALL LUDO RULES & PENALTY & GUL TESTS PASSED SUCCESSFULLY!');

@@ -1,4 +1,4 @@
-import type { CSSProperties, ReactNode } from 'react';
+import type { CSSProperties, PointerEventHandler, ReactNode } from 'react';
 
 /** Size in design units: scales with the device frame (see --u in app.css). */
 export const U = (n: number) => `calc(var(--u) * ${n})`;
@@ -89,6 +89,9 @@ export function Chip({ active, children, onClick, style }: { active?: boolean; c
 export function RoundBtn({
     children,
     onClick,
+    onPointerDown,
+    onPointerUp,
+    onPointerCancel,
     size = 48,
     label,
     className = '',
@@ -96,7 +99,10 @@ export function RoundBtn({
     title,
 }: {
     children: ReactNode;
-    onClick: () => void;
+    onClick?: () => void;
+    onPointerDown?: PointerEventHandler<HTMLButtonElement>;
+    onPointerUp?: PointerEventHandler<HTMLButtonElement>;
+    onPointerCancel?: PointerEventHandler<HTMLButtonElement>;
     size?: number;
     label: string;
     className?: string;
@@ -105,9 +111,13 @@ export function RoundBtn({
 }) {
     return (
         <button
+            type="button"
             aria-label={label}
             title={title || label}
             onClick={onClick}
+            onPointerDown={onPointerDown}
+            onPointerUp={onPointerUp}
+            onPointerCancel={onPointerCancel}
             className={`flex items-center justify-center rounded-full border border-cyan-300/60 bg-[#0b1230]/85 text-white shadow-[0_0_10px_rgba(24,224,255,0.35)] active:scale-95 cursor-pointer ${className}`}
             style={{ width: U(size), height: U(size), fontSize: U(size * 0.48), ...style }}
         >

@@ -1,8 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { multiplayerClient } from '../network/multiplayerClient';
 import { Modal } from './kit';
 import { safeStorage } from '../state/storage';
-import { store } from '../state/store';
+import { store, useStore } from '../state/store';
+import { UniversalAudioCapture, requestMicrophonePermission, type AudioCaptureResult } from '../game/audioCapture';
 
 const AVATARS = ['👑', '🦁', '⚡', '💎', '🦅', '⚔️', '🔥', '🐉', '🎯', '🛡️'];
 
@@ -120,6 +121,170 @@ function LuckyWishPicker({
     );
 }
 
+const LOBBY_EMOJIS = ['👍', '😂', '🎲', '🔥', '👋'];
+
+function LobbyChatVoiceBar() {
+    const [text, setText] = useState('');
+    const [recording, setRecording] = useState(false);
+    const [sending, setSending] = useState(false);
+    const [elapsedMs, setElapsedMs] = useState(0);
+    const [statusNote, setStatusNote] = useState<string | null>(null);
+    const capRef = useRef<UniversalAudioCapture | null>(null);
+    const listRef = useRef<HTMLDivElement | null>(null);
+    const chatLog = multiplayerClient.chatLog;
+
+    useEffect(() => {
+        if (listRef.current) {
+            listRef.current.scrollTop = listRef.current.scrollHeight;
+        }
+    }, [chatLog.length]);
+
+    useEffect(() => {
+        return () => {
+            capRef.current?.cancelPendingOrActive();
+            capRef.current = null;
+        };
+    }, []);
+
+    const handleVoiceResult = async (res: AudioCaptureResult) => {
+        setRecording(false);
+        setElapsedMs(0);
+        if (!res.ok || !res.bytes) {
+            if (res.errorCode === 'NO_SOUND') setStatusNote('No microphone sound detected');
+            else if (res.error && res.errorCode !== 'CANCELLED') setStatusNote(res.error);
+            return;
+        }
+        setStatusNote(null);
+        setSending(true);
+        const ack = await multiplayerClient.sendVoiceNote(res.bytes, res.mimeType || 'audio/wav');
+        setSending(false);
+        if (!ack.success && ack.error) setStatusNote(ack.error);
+    };
+
+    const toggleLobbyRec = () => {
+        if (recording) {
+            const cap = capRef.current;
+            capRef.current = null;
+            if (cap) void cap.stop(false).then((r) => void handleVoiceResult(r));
+            return;
+        }
+        if (sending) return;
+        setStatusNote(null);
+        const cap = new UniversalAudioCapture({
+            maxBytes: 80_000,
+            maxMs: 6500,
+            onProgress: (ms) => setElapsedMs(ms),
+            onAutoStop: (res) => {
+                capRef.current = null;
+                void handleVoiceResult(res);
+            },
+        });
+        capRef.current = cap;
+        setRecording(true);
+        setElapsedMs(0);
+        void cap.start().then((r) => {
+            if (!r.ok) {
+                if (capRef.current === cap) capRef.current = null;
+                setRecording(false);
+                if (r.error && r.error !== 'Recording cancelled') setStatusNote(r.error);
+            }
+        });
+    };
+
+    const sendLobbyMsg = () => {
+        const clean = text.trim();
+        if (!clean) return;
+        setText('');
+        void multiplayerClient.sendLudoChat(clean).then((res) => {
+            if (!res.success && res.error) setStatusNote(res.error);
+        });
+    };
+
+    return (
+        <div className="px-2 py-1.5 bg-slate-950/75 rounded-lg border border-white/10 flex flex-col gap-1">
+            <div className="flex items-center justify-between gap-1">
+                <span className="text-[9px] font-black uppercase tracking-wider text-cyan-300">
+                    Lobby Chat & Voice
+                </span>
+                <div className="flex items-center gap-1">
+                    {LOBBY_EMOJIS.map((em) => (
+                        <button
+                            key={em}
+                            type="button"
+                            onClick={() => void multiplayerClient.sendLudoChat('', em)}
+                            className="w-5 h-5 rounded bg-white/5 hover:bg-cyan-500/20 text-[11px] flex items-center justify-center cursor-pointer active:scale-90"
+                        >
+                            {em}
+                        </button>
+                    ))}
+                </div>
+            </div>
+
+            {chatLog.length > 0 && (
+                <div ref={listRef} className="max-h-20 overflow-y-auto flex flex-col gap-0.5 pr-1">
+                    {chatLog.slice(-15).map((entry) => {
+                        const hasClip = (entry.kind === 'voice' || entry.kind === 'whisper_in' || entry.kind === 'whisper_out') && !!entry.payload;
+                        return (
+                            <div key={entry.id} className="flex items-center justify-between gap-1 text-[10px] text-slate-200 bg-slate-900/70 px-1.5 py-0.5 rounded">
+                                <span className="truncate">
+                                    <span className="font-black text-cyan-300 mr-1">{entry.sender}:</span>
+                                    {entry.emoji ? `${entry.emoji} ` : ''}
+                                    {entry.text}
+                                </span>
+                                {hasClip && (
+                                    <button
+                                        type="button"
+                                        onClick={() => multiplayerClient.playClipById(entry.id)}
+                                        className="shrink-0 px-1.5 py-0.2 rounded bg-emerald-500/20 border border-emerald-400/50 text-emerald-200 text-[9px] font-black cursor-pointer"
+                                    >
+                                        ▶ {entry.duration || 1}s
+                                    </button>
+                                )}
+                            </div>
+                        );
+                    })}
+                </div>
+            )}
+
+            {statusNote && (
+                <div className="text-[9px] font-bold text-amber-300">⚠️ {statusNote}</div>
+            )}
+
+            <div className="flex items-center gap-1">
+                <input
+                    type="text"
+                    maxLength={120}
+                    value={text}
+                    onChange={(e) => setText(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && sendLobbyMsg()}
+                    placeholder="Say hi or chat..."
+                    className="flex-1 min-w-0 bg-slate-900 border border-slate-700 rounded-md px-2 py-1 text-[10px] text-white outline-none focus:border-cyan-400"
+                />
+                <button
+                    type="button"
+                    onClick={sendLobbyMsg}
+                    className="px-2 py-1 rounded-md bg-cyan-500 text-slate-950 text-[10px] font-black cursor-pointer shrink-0"
+                >
+                    Send
+                </button>
+                <button
+                    type="button"
+                    disabled={sending}
+                    onClick={toggleLobbyRec}
+                    title={recording ? 'Tap to send voice note' : 'Record Voice Note (Max 6.5s)'}
+                    className={`px-2 py-1 rounded-md text-[10px] font-black cursor-pointer shrink-0 border ${
+                        recording
+                            ? 'bg-red-600 border-red-300 text-white animate-pulse'
+                            : 'bg-white/10 hover:bg-white/15 border-white/15 text-cyan-200'
+                    }`}
+                >
+                    {sending ? '⏳' : recording ? `⏹ ${(elapsedMs / 1000).toFixed(1)}s` : '🎤'}
+                </button>
+            </div>
+        </div>
+    );
+}
+
 export function MultiplayerLobbyModal({ onClose, initialRoomCode }: Props) {
     const [, setTick] = useState(0);
 
@@ -142,6 +307,9 @@ export function MultiplayerLobbyModal({ onClose, initialRoomCode }: Props) {
     // Wish numbers state for current player (Host or Guest)
     const [wishDieA, setWishDieA] = useState<number>(6);
     const [wishDieB, setWishDieB] = useState<number>(5);
+    const micPermission = useStore((s) => s.micPermission);
+    const micChecking = micPermission === 'checking';
+    const micGranted = micPermission === 'granted';
 
     useEffect(() => {
         const unsub = multiplayerClient.subscribe(() => {
@@ -763,8 +931,22 @@ export function MultiplayerLobbyModal({ onClose, initialRoomCode }: Props) {
                                             </div>
                                         </div>
 
-                                        {/* Status Badge */}
-                                        <div className="shrink-0 text-right">
+                                        {/* Status Badge + Per-Seat Mute Toggle */}
+                                        <div className="shrink-0 flex items-center gap-1 text-right">
+                                            {p && !isMe && !p.isAI && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => multiplayerClient.toggleSeatMute(slotIdx)}
+                                                    title={multiplayerClient.isSeatMuted(slotIdx) ? 'Unmute Player' : 'Mute Player Chat & Voice'}
+                                                    className={`w-5 h-5 rounded-md border flex items-center justify-center text-[10px] cursor-pointer transition-all ${
+                                                        multiplayerClient.isSeatMuted(slotIdx)
+                                                            ? 'bg-red-950/80 border-red-400/70 text-red-200'
+                                                            : 'bg-slate-800/80 border-slate-600 text-slate-200 hover:border-cyan-400'
+                                                    }`}
+                                                >
+                                                    {multiplayerClient.isSeatMuted(slotIdx) ? '🔇' : '🔊'}
+                                                </button>
+                                            )}
                                             {p ? (
                                                 p.isHost ? (
                                                     <span className="text-[7px] font-extrabold text-amber-300 bg-amber-400/10 px-1 py-0.2 rounded border border-amber-400/30">
@@ -813,33 +995,80 @@ export function MultiplayerLobbyModal({ onClose, initialRoomCode }: Props) {
                         title="Your Lucky Wish"
                     />
 
-                    {/* Single Clean Turn Timer & Host Settings Bar */}
-                    <div className="px-2 py-1 bg-slate-950/80 rounded-lg border border-white/10 flex items-center justify-between text-[10px]">
+                    {/* Single Clean Turn Timer & Host Settings Bar (Bots + Secret Whispers) */}
+                    <div className="px-2 py-1 bg-slate-950/80 rounded-lg border border-white/10 flex flex-wrap items-center justify-between gap-1.5 text-[10px]">
                         <div className="flex items-center gap-1 text-slate-300 font-bold">
                             <span>⏱️ Timer:</span>
                             <span className="text-cyan-300 font-extrabold">
                                 {(roomState.turnTimeSec ?? 90) > 0 ? `${roomState.turnTimeSec ?? 90}s` : 'Off'}
                             </span>
                         </div>
-                        {isHost ? (
-                            <div className="flex gap-1 items-center">
-                                <span className="text-[9px] text-slate-400 mr-0.5">🤖 Bots:</span>
-                                <button
-                                    type="button"
-                                    onClick={() => multiplayerClient.toggleFillBots(!roomState.fillBots)}
-                                    className={`px-1.5 py-0.2 text-[9px] font-black rounded border cursor-pointer ${
-                                        roomState.fillBots
-                                            ? 'bg-cyan-500/20 border-cyan-400 text-cyan-200'
-                                            : 'bg-slate-900 border-slate-800 text-slate-500'
-                                    }`}
-                                >
-                                    {roomState.fillBots ? 'On' : 'Off'}
-                                </button>
-                            </div>
-                        ) : (
-                            <span className="text-[9px] text-slate-500">Host controlled</span>
-                        )}
+                        <div className="flex items-center gap-2">
+                            {isHost ? (
+                                <div className="flex gap-1 items-center">
+                                    <span className="text-[9px] text-slate-400">🤫 Whispers:</span>
+                                    <button
+                                        type="button"
+                                        onClick={() => void multiplayerClient.toggleSecretWhispers(!roomState.secretWhispers)}
+                                        title={
+                                            roomState.secretWhispers
+                                                ? 'Hidden: Only recipients know about whispers'
+                                                : 'Transparent: Room sees who whispered to whom (no audio leaked)'
+                                        }
+                                        className={`px-1.5 py-0.2 text-[9px] font-black rounded border cursor-pointer ${
+                                            roomState.secretWhispers
+                                                ? 'bg-purple-500/25 border-purple-400 text-purple-200'
+                                                : 'bg-slate-900 border-slate-700 text-slate-300'
+                                        }`}
+                                    >
+                                        {roomState.secretWhispers ? 'Hidden' : 'Transparent'}
+                                    </button>
+                                </div>
+                            ) : (
+                                <span className="text-[9px] text-purple-300/80 font-bold">
+                                    🤫 {roomState.secretWhispers ? 'Hidden' : 'Transparent'}
+                                </span>
+                            )}
+                            {isHost ? (
+                                <div className="flex gap-1 items-center">
+                                    <span className="text-[9px] text-slate-400">🤖 Bots:</span>
+                                    <button
+                                        type="button"
+                                        onClick={() => multiplayerClient.toggleFillBots(!roomState.fillBots)}
+                                        className={`px-1.5 py-0.2 text-[9px] font-black rounded border cursor-pointer ${
+                                            roomState.fillBots
+                                                ? 'bg-cyan-500/20 border-cyan-400 text-cyan-200'
+                                                : 'bg-slate-900 border-slate-800 text-slate-500'
+                                        }`}
+                                    >
+                                        {roomState.fillBots ? 'On' : 'Off'}
+                                    </button>
+                                </div>
+                            ) : null}
+                        </div>
                     </div>
+
+                    {/* Pre-Match Microphone Connection Status */}
+                    <div className="px-2 py-1 bg-slate-950/80 rounded-lg border border-white/10 flex items-center justify-between gap-2 text-[10px]">
+                        <span className={`font-bold truncate ${micGranted ? 'text-emerald-300' : micPermission === 'denied' ? 'text-red-300' : 'text-amber-200'}`}>
+                            🎤 {micGranted ? 'Microphone Connected for Voice & Whispers' : micPermission === 'denied' ? 'Microphone Permission Denied' : 'Microphone Not Connected Yet'}
+                        </span>
+                        <button
+                            type="button"
+                            disabled={micChecking || micPermission === 'unsupported'}
+                            onClick={() => void requestMicrophonePermission()}
+                            className={`px-2 py-0.5 rounded font-black text-[9px] cursor-pointer shrink-0 ${
+                                micGranted
+                                    ? 'bg-emerald-500/20 border border-emerald-400/50 text-emerald-200'
+                                    : 'bg-cyan-400 text-slate-950 hover:brightness-110'
+                            }`}
+                        >
+                            {micChecking ? 'Checking...' : micGranted ? '✓ Connected' : 'Allow Mic'}
+                        </button>
+                    </div>
+
+                    {/* Live Lobby Chat & Voice Notes Panel */}
+                    <LobbyChatVoiceBar />
 
                     {/* Error Banner */}
                     {errorMsg && (

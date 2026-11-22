@@ -26,7 +26,81 @@ const io = new SocketIOServer(server, {
     cors: { origin: '*' },
     pingInterval: 10000,
     pingTimeout: 5000,
+    maxHttpBufferSize: 256 * 1024,
 });
+
+function sanitizeAudioMime(rawMime?: string): string {
+    const clean = String(rawMime || '').split(';')[0].trim().toLowerCase();
+    if (clean === 'audio/wave' || clean === 'audio/x-wav' || clean === 'audio/wav') return 'audio/wav';
+    if (clean === 'audio/webm') return 'audio/webm';
+    if (clean === 'audio/mp4' || clean === 'audio/m4a' || clean === 'audio/x-m4a') return 'audio/mp4';
+    if (clean === 'audio/aac') return 'audio/aac';
+    if (clean === 'audio/ogg') return 'audio/ogg';
+    if (clean === 'audio/mpeg' || clean === 'audio/mp3') return 'audio/mpeg';
+    return 'audio/wav';
+}
+
+function extractAudioBuffer(payload: unknown): Buffer | null {
+    if (!payload) return null;
+    if (Buffer.isBuffer(payload)) return payload;
+    if (payload instanceof ArrayBuffer) return Buffer.from(payload);
+    if (ArrayBuffer.isView(payload)) {
+        return Buffer.from(payload.buffer, payload.byteOffset, payload.byteLength);
+    }
+    if (typeof payload === 'object' && payload !== null && (payload as any).type === 'Buffer' && Array.isArray((payload as any).data)) {
+        return Buffer.from((payload as any).data);
+    }
+    if (typeof payload === 'string') {
+        const match = payload.match(/^data:audio\/[a-z0-9.+-]+(?:;[^,]*)?;base64,(.+)$/i);
+        if (match && match[1]) {
+            return Buffer.from(match[1], 'base64');
+        }
+    }
+    return null;
+}
+
+function sniffMimeFromBuffer(buf: Buffer, fallbackMime: string): string {
+    if (buf.length >= 12 && buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WAVE') {
+        return 'audio/wav';
+    }
+    if (buf.length >= 4 && buf[0] === 0x1a && buf[1] === 0x45 && buf[2] === 0xdf && buf[3] === 0xa3) {
+        return 'audio/webm';
+    }
+    if (buf.length >= 4 && buf.toString('ascii', 0, 4) === 'OggS') {
+        return 'audio/ogg';
+    }
+    if (buf.length >= 8 && buf.toString('ascii', 4, 8) === 'ftyp') {
+        return 'audio/mp4';
+    }
+    if (buf.length >= 3 && (buf.toString('ascii', 0, 3) === 'ID3' || (buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0))) {
+        return 'audio/mpeg';
+    }
+    return sanitizeAudioMime(fallbackMime);
+}
+
+function computeAudioDurationSec(buf: Buffer, mimeType: string, minSec = 1, maxSec = 7): number {
+    if (
+        mimeType === 'audio/wav' &&
+        buf.length >= 44 &&
+        buf.toString('ascii', 0, 4) === 'RIFF' &&
+        buf.toString('ascii', 8, 12) === 'WAVE'
+    ) {
+        const byteRate = buf.readUInt32LE(28);
+        if (byteRate > 0) {
+            let dataBytes = buf.length - 44;
+            if (buf.toString('ascii', 36, 40) === 'data') {
+                const declared = buf.readUInt32LE(40);
+                if (declared > 0 && declared <= buf.length - 44) {
+                    dataBytes = declared;
+                }
+            }
+            const sec = Math.round(dataBytes / byteRate);
+            return Math.max(minSec, Math.min(maxSec, sec || minSec));
+        }
+    }
+    const sec = Math.round(buf.byteLength / 2500);
+    return Math.max(minSec, Math.min(maxSec, sec || minSec));
+}
 
 function resolvePort(): number {
     const portArgIdx = process.argv.indexOf('--port');
@@ -110,6 +184,7 @@ io.on('connection', (socket) => {
             const res = roomManager.createRoom(sessionToken, name, avatar, socket.id, turnTimeSec, maxPlayers, clientIp);
             if (res.ok && res.roomCode) {
                 socket.join(res.roomCode);
+                socket.join(`ludo:${res.roomCode}`);
                 const room = roomManager.getRoom(res.roomCode);
                 const clientState = room ? roomManager.getClientRoomState(room) : null;
                 if (typeof callback === 'function') {
@@ -143,6 +218,7 @@ io.on('connection', (socket) => {
             const res = roomManager.joinRoom(cleanCode, sessionToken, name, avatar, socket.id, clientIp);
             if (res.ok) {
                 socket.join(cleanCode);
+                socket.join(`ludo:${cleanCode}`);
                 const room = roomManager.getRoom(cleanCode);
                 const clientState = room ? roomManager.getClientRoomState(room) : null;
                 if (typeof callback === 'function') {
@@ -169,6 +245,7 @@ io.on('connection', (socket) => {
         const res = roomManager.reconnectPlayer(cleanCode, token, socket.id);
         if (res.ok) {
             socket.join(cleanCode);
+            socket.join(`ludo:${cleanCode}`);
             const room = roomManager.getRoom(cleanCode);
             if (typeof callback === 'function') {
                 callback({
@@ -232,6 +309,231 @@ io.on('connection', (socket) => {
         if (typeof callback === 'function') callback({ ok });
     });
 
+    socket.on(
+        'ludo:chat',
+        (data: { roomCode: string; sessionToken?: string; token?: string; text?: string; emoji?: string }, callback) => {
+            const { roomCode, sessionToken, token, text, emoji } = data || {};
+            const auth = roomManager.verifySender(roomCode, sessionToken || token || '', socket.id);
+            if (!auth.ok) {
+                if (typeof callback === 'function') callback({ success: false, error: auth.error });
+                return;
+            }
+            const waitMs = roomManager.checkSocialCooldown(auth.room.code, auth.seatIndex, 'chat', 800);
+            if (waitMs > 0) {
+                if (typeof callback === 'function') callback({ success: false, error: 'Slow down a moment', retryAfterMs: waitMs });
+                return;
+            }
+            const cleanText = String(text || '').replace(/[<>]/g, '').trim().slice(0, 120);
+            const cleanEmoji = emoji ? Array.from(String(emoji).trim()).slice(0, 8).join('') : undefined;
+            if (!cleanText && !cleanEmoji) {
+                if (typeof callback === 'function') callback({ success: false, error: 'Empty message' });
+                return;
+            }
+            const messageCount = roomManager.incrementMessageCount(auth.room);
+            const payload = {
+                sender: auth.player.name,
+                avatar: auth.player.avatar,
+                text: cleanText,
+                emoji: cleanEmoji,
+                seatIndex: auth.seatIndex,
+                timestamp: Date.now(),
+                messageCount,
+            };
+            io.to(`ludo:${auth.room.code}`).emit('ludo:chat', payload);
+            if (typeof callback === 'function') callback({ success: true, messageCount });
+        },
+    );
+
+    socket.on(
+        'ludo:reaction',
+        (data: { roomCode: string; sessionToken?: string; token?: string; emoji?: string }, callback) => {
+            const { roomCode, sessionToken, token, emoji } = data || {};
+            const auth = roomManager.verifySender(roomCode, sessionToken || token || '', socket.id);
+            if (!auth.ok) {
+                if (typeof callback === 'function') callback({ success: false, error: auth.error });
+                return;
+            }
+            const waitMs = roomManager.checkSocialCooldown(auth.room.code, auth.seatIndex, 'reaction', 250);
+            if (waitMs > 0) {
+                if (typeof callback === 'function') callback({ success: false, error: 'Too many reactions', retryAfterMs: waitMs });
+                return;
+            }
+            const cleanEmoji = Array.from(String(emoji || '').trim()).slice(0, 8).join('');
+            if (!cleanEmoji) {
+                if (typeof callback === 'function') callback({ success: false, error: 'Empty emoji' });
+                return;
+            }
+            io.to(`ludo:${auth.room.code}`).emit('ludo:reaction', {
+                seatIndex: auth.seatIndex,
+                emoji: cleanEmoji,
+                sender: auth.player.name,
+                timestamp: Date.now(),
+            });
+            if (typeof callback === 'function') callback({ success: true });
+        },
+    );
+
+    socket.on(
+        'ludo:voice',
+        (data: { roomCode: string; sessionToken?: string; token?: string; audio?: unknown; mimeType?: string }, callback) => {
+            const { roomCode, sessionToken, token, audio, mimeType } = data || {};
+            const auth = roomManager.verifySender(roomCode, sessionToken || token || '', socket.id);
+            if (!auth.ok) {
+                if (typeof callback === 'function') callback({ success: false, error: auth.error });
+                return;
+            }
+            const waitMs = roomManager.checkSocialCooldown(auth.room.code, auth.seatIndex, 'voice', 2500);
+            if (waitMs > 0) {
+                if (typeof callback === 'function') callback({ success: false, error: 'Please wait before next voice note', retryAfterMs: waitMs });
+                return;
+            }
+            const buf = extractAudioBuffer(audio);
+            if (!buf || buf.byteLength === 0) {
+                if (typeof callback === 'function') callback({ success: false, error: 'Invalid audio payload' });
+                return;
+            }
+            if (buf.byteLength > 80_000) {
+                if (typeof callback === 'function') callback({ success: false, error: 'Voice note exceeds 80KB limit' });
+                return;
+            }
+            const safeMime = sniffMimeFromBuffer(buf, sanitizeAudioMime(mimeType));
+            const duration = computeAudioDurationSec(buf, safeMime, 1, 7);
+            const messageCount = roomManager.incrementMessageCount(auth.room);
+
+            io.to(`ludo:${auth.room.code}`).emit('ludo:voice', {
+                sender: auth.player.name,
+                avatar: auth.player.avatar,
+                seatIndex: auth.seatIndex,
+                audio: buf,
+                mimeType: safeMime,
+                duration,
+                timestamp: Date.now(),
+                messageCount,
+            });
+            if (typeof callback === 'function') callback({ success: true, duration, messageCount });
+        },
+    );
+
+    socket.on(
+        'voice:whisper',
+        (
+            data: {
+                roomCode: string;
+                sessionToken?: string;
+                token?: string;
+                toSeats?: number[];
+                clip?: unknown;
+                mimeType?: string;
+            },
+            callback,
+        ) => {
+            const { roomCode, sessionToken, token, toSeats, clip, mimeType } = data || {};
+            const auth = roomManager.verifySender(roomCode, sessionToken || token || '', socket.id);
+            if (!auth.ok) {
+                if (typeof callback === 'function') callback({ success: false, error: auth.error });
+                return;
+            }
+            if (!Array.isArray(toSeats) || toSeats.length === 0) {
+                if (typeof callback === 'function') callback({ success: false, error: 'Select at least one opponent' });
+                return;
+            }
+
+            const requested = Array.from(
+                new Set(toSeats.map((n) => Number(n)).filter((n) => Number.isInteger(n) && n >= 0 && n <= 3 && n !== auth.seatIndex)),
+            );
+            if (requested.length === 0) {
+                if (typeof callback === 'function') callback({ success: false, error: 'Invalid whisper target seat(s)' });
+                return;
+            }
+
+            const validTargets: { seat: number; socketId: string; name: string }[] = [];
+            for (const seat of requested) {
+                const target = auth.room.players[seat];
+                if (!target) {
+                    if (typeof callback === 'function') callback({ success: false, error: 'Empty seat cannot receive whispers' });
+                    return;
+                }
+                if (target.isAI) {
+                    if (typeof callback === 'function') callback({ success: false, error: 'Cannot whisper to AI bots' });
+                    return;
+                }
+                if (!target.connected || !target.socketId) {
+                    if (typeof callback === 'function') callback({ success: false, error: `${target.name} is disconnected` });
+                    return;
+                }
+                validTargets.push({ seat, socketId: target.socketId, name: target.name });
+            }
+
+            const buf = extractAudioBuffer(clip);
+            if (!buf || buf.byteLength === 0) {
+                if (typeof callback === 'function') callback({ success: false, error: 'Invalid whisper audio clip' });
+                return;
+            }
+            if (buf.byteLength > 60_000) {
+                if (typeof callback === 'function') callback({ success: false, error: 'Whisper clip exceeds 60KB limit' });
+                return;
+            }
+
+            const waitMs = roomManager.checkSocialCooldown(auth.room.code, auth.seatIndex, 'whisper', 5000);
+            if (waitMs > 0) {
+                if (typeof callback === 'function') callback({ success: false, error: 'Please wait before sending another whisper', retryAfterMs: waitMs });
+                return;
+            }
+
+            const safeMime = sniffMimeFromBuffer(buf, sanitizeAudioMime(mimeType));
+            const duration = computeAudioDurationSec(buf, safeMime, 1, 6);
+            const timestamp = Date.now();
+            const whisperId = `wh_${auth.seatIndex}_${timestamp}_${Math.random().toString(36).slice(2, 6)}`;
+
+            // Relay audio ONLY to selected recipient socket IDs — never broadcast audio to room
+            for (const target of validTargets) {
+                io.to(target.socketId).emit('voice:whisper', {
+                    id: whisperId,
+                    fromSeat: auth.seatIndex,
+                    senderName: auth.player.name,
+                    senderAvatar: auth.player.avatar,
+                    toSeat: target.seat,
+                    toSeats: validTargets.map((t) => t.seat),
+                    clip: buf,
+                    mimeType: safeMime,
+                    duration,
+                    timestamp,
+                });
+            }
+
+            // Transparent mode: notify room metadata-only (no audio)
+            if (!auth.room.secretWhispers) {
+                io.to(`ludo:${auth.room.code}`).emit('ludo:whisper_notice', {
+                    fromSeat: auth.seatIndex,
+                    senderName: auth.player.name,
+                    toSeats: validTargets.map((t) => t.seat),
+                    targetNames: validTargets.map((t) => t.name),
+                    timestamp,
+                });
+            }
+
+            if (typeof callback === 'function') {
+                callback({ success: true, duration, deliveredTo: validTargets.map((t) => t.seat) });
+            }
+        },
+    );
+
+    socket.on(
+        'ludo:toggle_secret_whispers',
+        (data: { roomCode: string; sessionToken?: string; token?: string; secretWhispers?: boolean }, callback) => {
+            const { roomCode, sessionToken, token, secretWhispers } = data || {};
+            const res = roomManager.toggleSecretWhispers(roomCode, sessionToken || token || '', socket.id, secretWhispers);
+            if (res.ok && res.room) {
+                io.to(`ludo:${res.room.code}`).emit('ludo:secret_whispers_changed', {
+                    secretWhispers: !!res.secretWhispers,
+                });
+                if (typeof callback === 'function') callback({ success: true, secretWhispers: !!res.secretWhispers });
+            } else if (typeof callback === 'function') {
+                callback({ success: false, error: res.error || 'Failed to toggle secret whispers' });
+            }
+        },
+    );
+
     socket.on('vote_rematch', (data: { roomCode: string; sessionToken: string }, callback) => {
         const { roomCode, sessionToken } = data || {};
         const res = roomManager.voteRematch(roomCode, sessionToken);
@@ -250,6 +552,11 @@ io.on('connection', (socket) => {
 
     socket.on('leave_room', (data: { roomCode: string; sessionToken: string }, callback) => {
         const { roomCode, sessionToken } = data || {};
+        const clean = String(roomCode || '').toUpperCase().trim();
+        if (clean) {
+            socket.leave(clean);
+            socket.leave(`ludo:${clean}`);
+        }
         const ok = roomManager.leaveRoom(roomCode, sessionToken);
         if (typeof callback === 'function') callback({ ok });
     });

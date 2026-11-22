@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import { readDevice, readLocal, write } from './persist';
+import type { NameplateBound } from '../game/bus';
 
 export type Phase = 'loading' | 'menu' | 'setup' | 'playing';
 export type ModalId =
@@ -10,8 +11,13 @@ export type ModalId =
     | 'invite'
     | 'multiplayer'
     | 'tournament'
+    | 'mic'
     | `wish:${number}`
     | `profile:${number}`;
+
+export type MicPermissionState = 'unknown' | 'prompt' | 'checking' | 'granted' | 'denied' | 'unsupported';
+
+export type CaptureWarningMode = 'first3' | 'always' | 'off';
 
 export interface Settings {
     rotate: boolean;
@@ -25,6 +31,7 @@ export interface Settings {
     songName: string | null;
     timerEnabled: boolean; // Turn timer optional
     timerSec: 60 | 90 | 120; // 60s, 90s, 120s
+    captureWarningMode: CaptureWarningMode;
 }
 
 export interface PlayerCfg {
@@ -81,6 +88,11 @@ export interface AppState {
     captureNotice: string | null;
     skipCapturePrompt: { message: string } | null;
     chatOpen: boolean;
+    nameplateBounds: NameplateBound[];
+    micPermission: MicPermissionState;
+    micDeviceLabel: string | null;
+    micError: string | null;
+    micPromptDismissed: boolean;
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -95,7 +107,15 @@ const DEFAULT_SETTINGS: Settings = {
     songName: null,
     timerEnabled: true,
     timerSec: 90,
+    captureWarningMode: 'first3',
 };
+
+export function shouldShowCaptureWarning(mode: CaptureWarningMode | undefined, matchCount: number): boolean {
+    const effectiveMode = mode || 'first3';
+    if (effectiveMode === 'always') return true;
+    if (effectiveMode === 'off') return false;
+    return matchCount <= 3;
+}
 
 function loadSettings(): Settings {
     try {
@@ -142,6 +162,11 @@ let state: AppState = {
     captureNotice: null,
     skipCapturePrompt: null,
     chatOpen: false,
+    nameplateBounds: [],
+    micPermission: 'unknown',
+    micDeviceLabel: null,
+    micError: null,
+    micPromptDismissed: false,
 };
 
 const listeners = new Set<() => void>();

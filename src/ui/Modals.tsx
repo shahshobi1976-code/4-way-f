@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { store, useStore } from '../state/store';
 import { LANGS, tr, colorName } from '../i18n';
 import { INSTRUMENTS, setInstrument, setMusicOn, setSong, clearSong } from '../game/music';
@@ -10,6 +10,12 @@ import { Chip, Modal, Toggle, U } from './kit';
 import { MultiplayerLobbyModal } from './MultiplayerLobbyModal';
 import { TutorialModal } from './TutorialModal';
 import { multiplayerClient } from '../network/multiplayerClient';
+import {
+    UniversalAudioCapture,
+    probeMicrophoneStatus,
+    requestMicrophonePermission,
+    type AudioCaptureResult,
+} from '../game/audioCapture';
 
 import * as sfx from '../game/sfx';
 
@@ -109,6 +115,20 @@ function Settings() {
                             ))}
                         </select>
                     </div>
+
+                    <div className="flex flex-col gap-1 pt-1">
+                        <span className="font-bold text-cyan-200 text-xs">⚠️ Capture Warning (Compulsory Rule)</span>
+                        <select
+                            aria-label="Capture Warning (Compulsory Rule)"
+                            value={s.captureWarningMode || 'first3'}
+                            onChange={(e) => store.patchSettings({ captureWarningMode: e.target.value as 'first3' | 'always' | 'off' })}
+                            className="w-full rounded-lg border border-cyan-400/50 bg-[#0e1530] text-white px-2 py-1.5 text-xs outline-none"
+                        >
+                            <option value="first3">Newcomers (First 3 Matches per Player)</option>
+                            <option value="always">Always ON</option>
+                            <option value="off">Off</option>
+                        </select>
+                    </div>
                 </div>
 
                 {/* Column 2: Audio, Backgrounds, Music, Return to Menu */}
@@ -132,6 +152,11 @@ function Settings() {
                                 </Chip>
                             ))}
                         </div>
+                    </div>
+
+                    <div className="flex flex-col gap-1">
+                        <span className="font-bold text-cyan-200 text-xs">🎤 Microphone</span>
+                        <MicrophoneSettingsRow />
                     </div>
 
                     <div className="flex flex-col gap-1">
@@ -236,58 +261,385 @@ function Profile({ idx }: { idx: number }) {
     const lang = useStore((s) => s.settings.lang);
     const p = players[idx];
     const [text, setText] = useState('');
-    const [rec, setRec] = useState<MediaRecorder | null>(null);
+    const [recording, setRecording] = useState(false);
+    const [sendingVoice, setSendingVoice] = useState(false);
+    const [elapsedMs, setElapsedMs] = useState(0);
     const [err, setErr] = useState('');
-    const send = (t: string, voice = true) => { if (t.trim()) bus.chat?.(idx, t.trim(), { voice }); };
+    const [, setNetTick] = useState(0);
+    const capRef = useRef<UniversalAudioCapture | null>(null);
+
+    useEffect(() => multiplayerClient.subscribe(() => setNetTick((t) => t + 1)), []);
+    useEffect(() => {
+        return () => {
+            capRef.current?.cancelPendingOrActive();
+            capRef.current = null;
+        };
+    }, []);
+
+    const isMultiplayer = !!multiplayerClient.roomCode;
+    const mySeat = multiplayerClient.myPlayerIndex ?? 0;
+    const roomPlayer = multiplayerClient.roomState?.players[idx];
+    const isMe = isMultiplayer ? idx === mySeat : idx === 0;
+    const isMuted = isMultiplayer && multiplayerClient.isSeatMuted(idx);
+    const canWhisper = isMultiplayer && !isMe && !!roomPlayer && !roomPlayer.isAI && roomPlayer.connected;
     const nm = (p.name || '').trim() || colorName(lang, idx);
 
-    const toggleRec = async () => {
-        if (rec) { rec.stop(); return; }
-        try {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            const mr = new MediaRecorder(stream);
-            const chunks: Blob[] = [];
-            mr.ondataavailable = (e) => chunks.push(e.data);
-            mr.onstop = () => {
-                stream.getTracks().forEach((t) => t.stop());
-                setRec(null);
-                const url = URL.createObjectURL(new Blob(chunks, { type: mr.mimeType || 'audio/webm' }));
-                const au = new Audio(url);
-                au.onended = () => URL.revokeObjectURL(url);
-                void au.play().catch(() => {});
-                send('🎤 Voice message', false);
-            };
-            mr.start();
-            setRec(mr);
-            setErr('');
-            window.setTimeout(() => { if (mr.state === 'recording') mr.stop(); }, 8000);
-        } catch {
-            setErr('Microphone not available');
+    const recentClips = isMultiplayer
+        ? multiplayerClient.chatLog
+              .filter(
+                  (c) =>
+                      c.seatIndex === idx &&
+                      (c.kind === 'voice' || c.kind === 'whisper_in') &&
+                      !!c.payload,
+              )
+              .slice(-4)
+        : [];
+
+    const sendTextOrPhrase = (t: string, voice = true) => {
+        const clean = t.trim();
+        if (!clean) return;
+        if (isMultiplayer) {
+            void multiplayerClient.sendLudoChat(clean);
+        } else {
+            bus.chat?.(idx, clean, { voice });
         }
+    };
+
+    const sendReactionEmoji = (em: string) => {
+        if (isMultiplayer) {
+            void multiplayerClient.sendReaction(em);
+        } else {
+            bus.chat?.(idx, em, { voice: false });
+        }
+    };
+
+    const handleCaptureDone = async (res: AudioCaptureResult) => {
+        setRecording(false);
+        setElapsedMs(0);
+        if (!res.ok || !res.bytes) {
+            if (res.errorCode === 'NO_SOUND') setErr('No microphone sound detected');
+            else if (res.error && res.errorCode !== 'CANCELLED') setErr(res.error);
+            return;
+        }
+        setErr('');
+        if (isMultiplayer) {
+            setSendingVoice(true);
+            const ack = await multiplayerClient.sendVoiceNote(res.bytes, res.mimeType || 'audio/wav');
+            setSendingVoice(false);
+            if (!ack.success && ack.error) setErr(ack.error);
+        } else {
+            sfx.playAudioClip(`local_${Date.now()}`, res.bytes, res.mimeType || 'audio/wav');
+            bus.chat?.(idx, '🎤 Voice message', { voice: false });
+        }
+    };
+
+    const toggleRec = () => {
+        if (recording) {
+            const cap = capRef.current;
+            capRef.current = null;
+            if (cap) void cap.stop(false).then((res) => void handleCaptureDone(res));
+            return;
+        }
+        if (sendingVoice) return;
+        setErr('');
+        const cap = new UniversalAudioCapture({
+            maxBytes: 80_000,
+            maxMs: 6500,
+            onProgress: (ms) => setElapsedMs(ms),
+            onAutoStop: (res) => {
+                capRef.current = null;
+                void handleCaptureDone(res);
+            },
+        });
+        capRef.current = cap;
+        setRecording(true);
+        setElapsedMs(0);
+        void cap.start().then((r) => {
+            if (!r.ok) {
+                if (capRef.current === cap) capRef.current = null;
+                setRecording(false);
+                if (r.error && r.error !== 'Recording cancelled') setErr(r.error);
+            }
+        });
     };
 
     return (
         <Modal title={`${p.avatar} ${nm}`} onClose={close}>
-            <div className="font-bold" style={{ color: p.ai ? '#9fb0ff' : '#5dff9a' }}>{p.ai ? 'AI • Playing' : '● Online • Playing'}</div>
-            <div className="grid grid-cols-4" style={{ gap: U(8), margin: `${U(14)} 0` }}>
-                {REACTIONS.map((r) => <button key={r} onClick={() => send(r)} className="rounded-xl bg-white/10" style={{ height: U(64), fontSize: U(36) }}>{r}</button>)}
+            <div className="flex items-center justify-between gap-2">
+                <div className="font-bold" style={{ color: p.ai ? '#9fb0ff' : '#5dff9a' }}>
+                    {p.ai ? 'AI • Playing' : roomPlayer && !roomPlayer.connected ? 'Offline • Grace' : '● Online • Playing'}
+                </div>
+
+                {isMultiplayer && !isMe && (
+                    <div className="flex items-center gap-1.5">
+                        {canWhisper && (
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    close();
+                                    bus.openWhisperModal?.([idx]);
+                                }}
+                                className="px-2.5 py-1 rounded-lg bg-purple-500/25 hover:bg-purple-500/40 border border-purple-400/60 text-purple-200 font-black text-xs cursor-pointer"
+                            >
+                                🤫 Whisper
+                            </button>
+                        )}
+                        <button
+                            type="button"
+                            onClick={() => multiplayerClient.toggleSeatMute(idx)}
+                            className={`px-2.5 py-1 rounded-lg border font-black text-xs cursor-pointer ${
+                                isMuted
+                                    ? 'bg-red-950/80 border-red-400 text-red-200'
+                                    : 'bg-white/10 border-white/20 text-slate-200'
+                            }`}
+                        >
+                            {isMuted ? '🔇 Muted' : '🔊 Sound On'}
+                        </button>
+                    </div>
+                )}
+            </div>
+
+            {recentClips.length > 0 && (
+                <div className="mt-2 p-2 rounded-xl bg-white/5 border border-white/10 flex flex-col gap-1">
+                    <div className="text-[11px] font-black uppercase text-cyan-300">Recent Voice Clips</div>
+                    <div className="flex flex-wrap gap-1.5">
+                        {recentClips.map((c) => (
+                            <button
+                                key={c.id}
+                                type="button"
+                                onClick={() => multiplayerClient.playClipById(c.id)}
+                                className="px-2 py-1 rounded-lg bg-emerald-500/20 border border-emerald-400/50 text-emerald-200 text-xs font-bold cursor-pointer"
+                            >
+                                {c.kind === 'whisper_in' ? '🤫' : '▶'} {c.duration || 1}s
+                            </button>
+                        ))}
+                    </div>
+                </div>
+            )}
+
+            <div className="grid grid-cols-4" style={{ gap: U(8), margin: `${U(12)} 0` }}>
+                {REACTIONS.map((r) => (
+                    <button key={r} onClick={() => sendReactionEmoji(r)} className="rounded-xl bg-white/10 cursor-pointer" style={{ height: U(56), fontSize: U(30) }}>
+                        {r}
+                    </button>
+                ))}
             </div>
             <div className="flex" style={{ gap: U(8) }}>
-                <input value={text} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') { send(text); setText(''); } }} placeholder="Type a message…" className="min-w-0 flex-1 rounded-xl border border-white/20 bg-white/10 text-white" style={{ padding: U(12), fontSize: U(22) }} />
-                <button onClick={() => { send(text); setText(''); }} className="rounded-xl bg-cyan-400 font-black text-black" style={{ padding: `0 ${U(20)}`, fontSize: U(28) }}>➔</button>
+                <input
+                    value={text}
+                    maxLength={isMultiplayer ? 120 : 80}
+                    onChange={(e) => setText(e.target.value)}
+                    onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                            sendTextOrPhrase(text);
+                            setText('');
+                        }
+                    }}
+                    placeholder="Type a message…"
+                    className="min-w-0 flex-1 rounded-xl border border-white/20 bg-white/10 text-white"
+                    style={{ padding: U(10), fontSize: U(20) }}
+                />
+                <button
+                    onClick={() => {
+                        sendTextOrPhrase(text);
+                        setText('');
+                    }}
+                    className="rounded-xl bg-cyan-400 font-black text-black cursor-pointer"
+                    style={{ padding: `0 ${U(18)}`, fontSize: U(24) }}
+                >
+                    ➔
+                </button>
             </div>
-            <button onClick={() => void toggleRec()} className={`w-full rounded-xl font-bold ${rec ? 'bg-red-500' : 'bg-white/15'}`} style={{ marginTop: U(10), padding: U(12), fontSize: U(22) }}>{rec ? '⏹ Tap to send' : '🎤 VOICE MSG'}</button>
-            {err && <div className="text-red-300" style={{ marginTop: U(6) }}>{err}</div>}
-            <div className="grid grid-cols-2" style={{ gap: U(6), marginTop: U(12) }}>
-                {quickPhrases(lang).map((q) => <button key={q.text} onClick={() => send(q.text)} className="rounded-lg bg-white/10 text-left" style={{ padding: U(8), fontSize: U(16) }}>{q.icon} {q.text}</button>)}
+            <button
+                onClick={toggleRec}
+                disabled={sendingVoice}
+                className={`w-full rounded-xl font-bold cursor-pointer ${recording ? 'bg-red-500 animate-pulse' : 'bg-white/15'}`}
+                style={{ marginTop: U(10), padding: U(10), fontSize: U(20) }}
+            >
+                {sendingVoice
+                    ? '⏳ Sending Voice...'
+                    : recording
+                    ? `⏹ Tap to send (${(elapsedMs / 1000).toFixed(1)}s / 6.5s)`
+                    : '🎤 VOICE MSG (Max 6.5s)'}
+            </button>
+            {err && <div className="text-red-300 text-xs font-bold" style={{ marginTop: U(6) }}>⚠️ {err}</div>}
+            <div className="grid grid-cols-2" style={{ gap: U(6), marginTop: U(10) }}>
+                {quickPhrases(lang).map((q) => (
+                    <button key={q.text} onClick={() => sendTextOrPhrase(q.text)} className="rounded-lg bg-white/10 text-left cursor-pointer" style={{ padding: U(8), fontSize: U(15) }}>
+                        {q.icon} {q.text}
+                    </button>
+                ))}
             </div>
-            <button onClick={close} className="w-full rounded-xl bg-white/20 font-bold" style={{ marginTop: U(14), padding: U(12), fontSize: U(24) }}>CLOSE</button>
+            <button onClick={close} className="w-full rounded-xl bg-white/20 font-bold cursor-pointer" style={{ marginTop: U(12), padding: U(10), fontSize: U(22) }}>CLOSE</button>
+        </Modal>
+    );
+}
+
+function MicrophoneSettingsRow() {
+    const micPermission = useStore((s) => s.micPermission);
+    const micDeviceLabel = useStore((s) => s.micDeviceLabel);
+    const micError = useStore((s) => s.micError);
+    const isGranted = micPermission === 'granted';
+    const isChecking = micPermission === 'checking';
+
+    return (
+        <div className="rounded-xl bg-white/5 border border-white/10 p-2 flex flex-col gap-1.5">
+            <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                    <div className={`text-[11px] font-extrabold truncate ${isGranted ? 'text-emerald-300' : micPermission === 'denied' ? 'text-red-300' : 'text-amber-200'}`}>
+                        {isGranted
+                            ? `✓ Connected${micDeviceLabel ? `: ${micDeviceLabel}` : ''}`
+                            : isChecking
+                            ? '⏳ Requesting permission...'
+                            : micPermission === 'denied'
+                            ? '⚠️ Microphone Blocked'
+                            : micPermission === 'unsupported'
+                            ? '⚠️ Mic Unavailable'
+                            : '🔔 Permission Needed'}
+                    </div>
+                </div>
+                <button
+                    type="button"
+                    disabled={isChecking || micPermission === 'unsupported'}
+                    onClick={() => void requestMicrophonePermission()}
+                    className={`shrink-0 px-2.5 py-1 rounded-lg font-black text-[10px] cursor-pointer transition-all disabled:opacity-50 ${
+                        isGranted
+                            ? 'bg-emerald-500/20 border border-emerald-400/50 text-emerald-200 hover:bg-emerald-500/30'
+                            : 'bg-cyan-400 text-slate-950 hover:brightness-110'
+                    }`}
+                >
+                    {isChecking ? 'Checking...' : isGranted ? 'Re-test Mic' : 'Connect Mic'}
+                </button>
+            </div>
+            {micError && (
+                <div className="text-[10px] text-amber-300 font-semibold leading-snug">
+                    {micError}
+                </div>
+            )}
+        </div>
+    );
+}
+
+function MicPermissionModal({ onDismiss }: { onDismiss: () => void }) {
+    const micPermission = useStore((s) => s.micPermission);
+    const micDeviceLabel = useStore((s) => s.micDeviceLabel);
+    const micError = useStore((s) => s.micError);
+    const isChecking = micPermission === 'checking';
+    const isGranted = micPermission === 'granted';
+    const isDenied = micPermission === 'denied';
+
+    const handleAllow = async () => {
+        const res = await requestMicrophonePermission();
+        if (res.ok) {
+            multiplayerClient.showToast(`🎤 Microphone connected (${res.deviceLabel || 'Ready'})`, 'info');
+            onDismiss();
+        }
+    };
+
+    const handleSkip = () => {
+        store.patch({ micPromptDismissed: true });
+        onDismiss();
+    };
+
+    return (
+        <Modal title="🎤 Connect Microphone" onClose={handleSkip} slim>
+            <div className="flex flex-col items-center text-center gap-3 py-1">
+                <div
+                    className={`w-14 h-14 rounded-2xl border-2 flex items-center justify-center text-3xl shadow-lg ${
+                        isGranted
+                            ? 'bg-emerald-500/20 border-emerald-400 text-emerald-300'
+                            : isDenied
+                            ? 'bg-red-500/20 border-red-400 text-red-300'
+                            : 'bg-cyan-500/20 border-cyan-400/70 text-cyan-200'
+                    }`}
+                >
+                    {isGranted ? '✅' : isDenied ? '🔇' : '🎤'}
+                </div>
+
+                <div className="space-y-1">
+                    <div className="font-black text-sm text-white">
+                        {isGranted
+                            ? 'Microphone Connected!'
+                            : isDenied
+                            ? 'Microphone Access Needed'
+                            : 'Allow Microphone Before Playing'}
+                    </div>
+                    <p className="text-xs text-slate-300 leading-relaxed max-w-xs">
+                        {isGranted
+                            ? `Ready for voice notes and whispers (${micDeviceLabel || 'Connected'}).`
+                            : 'Connect your microphone now so you can send voice notes and private whispers cleanly during the match without interruptions.'}
+                    </p>
+                </div>
+
+                {micError && (
+                    <div className="w-full rounded-xl bg-red-950/70 border border-red-400/50 px-3 py-2 text-[11px] font-bold text-red-200 text-left">
+                        ⚠️ {micError}
+                    </div>
+                )}
+
+                <div className="w-full flex flex-col gap-2 pt-1">
+                    <button
+                        type="button"
+                        disabled={isChecking}
+                        onClick={() => void handleAllow()}
+                        className="w-full py-2.5 rounded-xl bg-gradient-to-r from-emerald-400 via-teal-300 to-cyan-400 text-slate-950 font-black text-xs uppercase tracking-wider shadow-lg hover:brightness-110 active:scale-[0.98] transition-all disabled:opacity-60 cursor-pointer flex items-center justify-center gap-1.5"
+                    >
+                        {isChecking ? (
+                            <>
+                                <span className="w-3.5 h-3.5 border-2 border-slate-950 border-t-transparent rounded-full animate-spin" />
+                                <span>Connecting Microphone...</span>
+                            </>
+                        ) : isDenied ? (
+                            <span>🔄 Retry Microphone Permission</span>
+                        ) : (
+                            <span>🎤 Allow & Connect Microphone</span>
+                        )}
+                    </button>
+
+                    <div className="flex gap-2">
+                        {isDenied && (
+                            <button
+                                type="button"
+                                onClick={() => void probeMicrophoneStatus()}
+                                className="flex-1 py-2 rounded-xl bg-white/10 hover:bg-white/15 border border-white/15 text-cyan-200 font-bold text-xs cursor-pointer"
+                            >
+                                Re-check
+                            </button>
+                        )}
+                        <button
+                            type="button"
+                            onClick={handleSkip}
+                            className="flex-1 py-2 rounded-xl bg-white/10 hover:bg-white/15 border border-white/15 text-slate-200 font-bold text-xs cursor-pointer"
+                        >
+                            Continue Without Mic
+                        </button>
+                    </div>
+                </div>
+            </div>
         </Modal>
     );
 }
 
 export function Modals() {
     const modal = useStore((s) => s.modal);
+    const phase = useStore((s) => s.phase);
+    const micPermission = useStore((s) => s.micPermission);
+    const micPromptDismissed = useStore((s) => s.micPromptDismissed);
+
+    if (modal === 'mic') return <MicPermissionModal onDismiss={close} />;
+
+    // Ask microphone permission automatically before entering a game if not yet granted/dismissed
+    if (
+        !modal &&
+        phase === 'menu' &&
+        !micPromptDismissed &&
+        micPermission !== 'unknown' &&
+        micPermission !== 'granted' &&
+        micPermission !== 'unsupported'
+    ) {
+        return <MicPermissionModal onDismiss={() => store.patch({ micPromptDismissed: true })} />;
+    }
+
     if (!modal) return null;
     if (modal === 'settings') return <Settings />;
     if (modal === 'music') return <Modal title="🎵 Music" onClose={close}><MusicPicker /></Modal>;

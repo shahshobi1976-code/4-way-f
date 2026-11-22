@@ -1,8 +1,11 @@
 import { store } from '../state/store';
 import { removeHahahaOnly } from './banter';
+import { binaryPayloadToAudioUrl, binaryPayloadToUint8Array, revokeAudioUrl } from './audioCapture';
 
 let ctx: AudioContext | null = null;
 let master: GainNode | null = null;
+let voiceCompressor: DynamicsCompressorNode | null = null;
+let voiceGain: GainNode | null = null;
 
 export function audio(): { c: AudioContext; out: GainNode } | null {
     try {
@@ -14,7 +17,10 @@ export function audio(): { c: AudioContext; out: GainNode } | null {
             master.gain.value = 0.9;
             master.connect(ctx.destination);
         }
-        if (ctx.state === 'suspended') void ctx.resume();
+        const st = ctx.state as string;
+        if (st === 'suspended' || st === 'interrupted') {
+            void ctx.resume().catch(() => {});
+        }
         return { c: ctx, out: master! };
     } catch {
         return null;
@@ -73,10 +79,33 @@ export function diceRoll(ms: number) {
     clack(a.c, a.out, t0 + dur * 0.97 + 0.07, 0.4, 1300);
 }
 
+const activeHeartbeatNodes: { o: OscillatorNode; g: GainNode }[] = [];
+let heartbeatPlaying = false;
+
+export function stopHeartbeat() {
+    heartbeatPlaying = false;
+    while (activeHeartbeatNodes.length > 0) {
+        const node = activeHeartbeatNodes.pop()!;
+        try {
+            node.o.stop();
+        } catch {
+            /* already stopped */
+        }
+        try {
+            node.o.disconnect();
+            node.g.disconnect();
+        } catch {
+            /* ignore */
+        }
+    }
+}
+
 export function heartbeat() {
     if (!soundOn()) return;
     const a = audio();
     if (!a) return;
+    stopHeartbeat();
+    heartbeatPlaying = true;
     const t0 = a.c.currentTime;
     for (let beat = 0; beat < 3; beat++) {
         for (const [off, f, v] of [[0, 62, 0.9], [0.2, 52, 0.65]] as const) {
@@ -92,8 +121,19 @@ export function heartbeat() {
             o.connect(g).connect(a.out);
             o.start(t);
             o.stop(t + 0.25);
+            const entry = { o, g };
+            activeHeartbeatNodes.push(entry);
+            o.onended = () => {
+                const idx = activeHeartbeatNodes.indexOf(entry);
+                if (idx !== -1) activeHeartbeatNodes.splice(idx, 1);
+                if (activeHeartbeatNodes.length === 0) heartbeatPlaying = false;
+            };
         }
     }
+}
+
+export function isHeartbeatPlaying(): boolean {
+    return heartbeatPlaying;
 }
 
 let carBuf: AudioBuffer | null = null;
@@ -495,10 +535,208 @@ async function processSpeechQueue() {
     isProcessingSpeechQueue = false;
 }
 
+// ---------------------------------------------------------------- Human Voice Note & Whisper Playback
+const clipBufferCache = new Map<string, AudioBuffer>();
+const decodingClipPromises = new Map<string, Promise<AudioBuffer | null>>();
+let activeHumanClipCount = 0;
+let activeHtmlAudio: HTMLAudioElement | null = null;
+let activeBufferSrc: AudioBufferSourceNode | null = null;
+const humanPlaybackListeners = new Set<(playing: boolean) => void>();
+
+export function getIsHumanAudioPlaying(): boolean {
+    return activeHumanClipCount > 0;
+}
+
+export function subscribeHumanAudioPlaying(cb: (playing: boolean) => void): () => void {
+    humanPlaybackListeners.add(cb);
+    return () => humanPlaybackListeners.delete(cb);
+}
+
+function setHumanPlayingDelta(delta: number) {
+    const prev = activeHumanClipCount > 0;
+    activeHumanClipCount = Math.max(0, activeHumanClipCount + delta);
+    const next = activeHumanClipCount > 0;
+    if (prev !== next) {
+        humanPlaybackListeners.forEach((cb) => {
+            try { cb(next); } catch {}
+        });
+    }
+}
+
+function ensureVoiceBus(c: AudioContext, out: GainNode): GainNode {
+    if (!voiceCompressor || !voiceGain) {
+        voiceCompressor = c.createDynamicsCompressor();
+        voiceCompressor.threshold.value = -18;
+        voiceCompressor.knee.value = 18;
+        voiceCompressor.ratio.value = 4;
+        voiceCompressor.attack.value = 0.005;
+        voiceCompressor.release.value = 0.15;
+
+        voiceGain = c.createGain();
+        voiceGain.gain.value = 1.25;
+        voiceCompressor.connect(voiceGain);
+        voiceGain.connect(out);
+    }
+    return voiceCompressor as unknown as GainNode;
+}
+
+/** Pre-decode an incoming binary voice/whisper clip immediately on receipt for instant playback. */
+export function cacheAudioClip(clipId: string, payload: unknown): Promise<AudioBuffer | null> {
+    if (!clipId || !payload) return Promise.resolve(null);
+    const existing = clipBufferCache.get(clipId);
+    if (existing) return Promise.resolve(existing);
+    const inflight = decodingClipPromises.get(clipId);
+    if (inflight) return inflight;
+
+    const a = audio();
+    const bytes = binaryPayloadToUint8Array(payload);
+    if (!a || !bytes || bytes.byteLength === 0) return Promise.resolve(null);
+
+    const copy = new ArrayBuffer(bytes.byteLength);
+    new Uint8Array(copy).set(bytes);
+
+    const p = a.c
+        .decodeAudioData(copy)
+        .then((decoded) => {
+            if (clipBufferCache.size > 60) {
+                const oldestKey = clipBufferCache.keys().next().value;
+                if (oldestKey) clipBufferCache.delete(oldestKey);
+            }
+            clipBufferCache.set(clipId, decoded);
+            decodingClipPromises.delete(clipId);
+            return decoded;
+        })
+        .catch(() => {
+            decodingClipPromises.delete(clipId);
+            return null;
+        });
+
+    decodingClipPromises.set(clipId, p);
+    return p;
+}
+
+export function stopHumanAudio() {
+    if (activeBufferSrc) {
+        try { activeBufferSrc.stop(); } catch {}
+        try { activeBufferSrc.disconnect(); } catch {}
+        activeBufferSrc = null;
+    }
+    if (activeHtmlAudio) {
+        try {
+            activeHtmlAudio.pause();
+            activeHtmlAudio.currentTime = 0;
+        } catch {}
+        activeHtmlAudio = null;
+    }
+    if (activeHumanClipCount > 0) {
+        activeHumanClipCount = 0;
+        humanPlaybackListeners.forEach((cb) => {
+            try { cb(false); } catch {}
+        });
+    }
+}
+
+/**
+ * Play a human voice note or whisper synchronously inside the call/gesture frame (no `await` before start).
+ */
+export function playAudioClip(
+    clipId: string,
+    payload: unknown,
+    mimeType?: string,
+    opts?: { onEnded?: () => void; onAutoplayBlocked?: () => void },
+): { ok: boolean; blockedByAutoplay: boolean } {
+    if (!soundOn()) {
+        opts?.onEnded?.();
+        return { ok: false, blockedByAutoplay: false };
+    }
+
+    stopHumanAudio();
+    const a = audio();
+    const cached = clipBufferCache.get(clipId);
+
+    // Pause routine AI speech while human voice/whisper plays
+    try { window.speechSynthesis?.cancel(); } catch {}
+
+    if (a && cached && a.c.state === 'running') {
+        try {
+            const src = a.c.createBufferSource();
+            src.buffer = cached;
+            const targetBus = ensureVoiceBus(a.c, a.out);
+            src.connect(targetBus);
+            activeBufferSrc = src;
+            setHumanPlayingDelta(1);
+            let ended = false;
+            const finish = () => {
+                if (ended) return;
+                ended = true;
+                if (activeBufferSrc === src) activeBufferSrc = null;
+                setHumanPlayingDelta(-1);
+                opts?.onEnded?.();
+            };
+            src.onended = finish;
+            src.start(0);
+            return { ok: true, blockedByAutoplay: false };
+        } catch {
+            /* fall through to synchronous HTMLAudioElement */
+        }
+    }
+
+    const media = binaryPayloadToAudioUrl(payload, mimeType);
+    if (!media) {
+        opts?.onEnded?.();
+        return { ok: false, blockedByAutoplay: false };
+    }
+
+    const el = new Audio(media.url);
+    el.preload = 'auto';
+    el.volume = 1;
+    activeHtmlAudio = el;
+    setHumanPlayingDelta(1);
+
+    let cleaned = false;
+    const cleanup = () => {
+        if (cleaned) return;
+        cleaned = true;
+        if (activeHtmlAudio === el) activeHtmlAudio = null;
+        revokeAudioUrl(media);
+        setHumanPlayingDelta(-1);
+        opts?.onEnded?.();
+    };
+
+    el.onended = cleanup;
+    el.onerror = cleanup;
+
+    try {
+        const playPromise = el.play();
+        if (playPromise && typeof playPromise.catch === 'function') {
+            playPromise.catch((err: any) => {
+                const blocked = err?.name === 'NotAllowedError' || /notallowed|gesture|interact/i.test(String(err?.message || ''));
+                cleanup();
+                if (blocked) opts?.onAutoplayBlocked?.();
+            });
+        }
+        return { ok: true, blockedByAutoplay: false };
+    } catch {
+        cleanup();
+        opts?.onAutoplayBlocked?.();
+        return { ok: false, blockedByAutoplay: true };
+    }
+}
+
+let seatMuteChecker: ((seatIdx: number) => boolean) | null = null;
+export function registerSeatMuteChecker(fn: ((seatIdx: number) => boolean) | null) {
+    seatMuteChecker = fn;
+}
+
 /** Speak a line; safely queues incoming speech while another AI is speaking, ensuring no overlapping speech. */
 export function speak(o: SpeakOpts): Promise<void> {
     return new Promise<void>((resolve) => {
-        if (typeof window === 'undefined' || store.get().settings.aiMute) {
+        if (
+            typeof window === 'undefined' ||
+            store.get().settings.aiMute ||
+            (seatMuteChecker && seatMuteChecker(o.player)) ||
+            activeHumanClipCount > 0
+        ) {
             resolve();
             return;
         }

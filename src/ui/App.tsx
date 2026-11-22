@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { store, useStore } from '../state/store';
 import { GameCanvas } from '../game/GameCanvas';
 import { audio } from '../game/sfx';
+import { probeMicrophoneStatus } from '../game/audioCapture';
 import { startMusic } from '../game/music';
 import { BG_BASE } from '../game/draw';
 import { LoadingScreen } from './LoadingScreen';
@@ -129,6 +130,7 @@ export function App() {
 
     // browsers only allow sound after a tap: unlock audio and start the music on the first one
     useEffect(() => {
+        void probeMicrophoneStatus();
         const unlock = () => {
             audio();
             if (store.get().settings.music) startMusic();

@@ -7,7 +7,40 @@ export type Cat =
     | 'yard' | 'leave' | 'advice' | 'leader' | 'truce' | 'joke' | 'laugh' | 'welcome' | 'escape'
     | 'praise' | 'threat' | 'sore' | 'traffic' | 'double';
 
+export type AIPersonality = 'Strategist' | 'Confidante' | 'Rival' | 'Rideordie';
+export const AI_PERSONALITIES: AIPersonality[] = ['Strategist', 'Confidante', 'Rival', 'Rideordie'];
+export function getPersonalityForSeat(seatIdx: number): AIPersonality {
+    return AI_PERSONALITIES[((seatIdx % 4) + 4) % 4];
+}
+
+export type BanterEvent =
+    | 'turn'
+    | 'roll'
+    | 'lucky_roll'
+    | 'lucky7'
+    | 'capture'
+    | 'captured'
+    | 'pawn_home'
+    | 'home_stretch'
+    | 'penalty'
+    | 'win'
+    | 'loss'
+    | 'banter';
+
+export const HIGH_PRIORITY_BANTER_EVENTS = new Set<BanterEvent>([
+    'capture',
+    'captured',
+    'lucky7',
+    'penalty',
+    'win',
+    'loss',
+]);
+
+export const BANTER_ROUTINE_COOLDOWN_MS = 6500;
+export const BANTER_HIGH_PRIORITY_COOLDOWN_MS = 1000;
+
 type Pack = Partial<Record<Cat, string[]>>;
+type EventPack = Partial<Record<BanterEvent, string[]>>;
 
 // ---------------------------------------------------------------- English
 const EN: Pack = {
@@ -80,8 +113,66 @@ const EN: Pack = {
     double: ['Double trouble incoming!', 'Two dice, double the destruction!', 'The combo multiplier is active!'],
 };
 
-// Four English personalities (red = Joker + Hype Master, green = Strategist + Mind-Game Tactician,
-// yellow = Hero + Sore Loser, cyan = Friendly + Chill Veteran). Their own lines are tried first.
+// Four English personalities (Strategist, Confidante, Rival, Rideordie). Their own lines are tried first.
+const PERSONA_EVENT_EN: Record<AIPersonality, EventPack> = {
+    Strategist: {
+        turn: ['Calculating the highest-probability line.', 'Let us see how the board shifts this turn.'],
+        roll: ['Solid numbers. Evaluating capture angles first.', 'Interesting distribution. Let us optimize tempo.'],
+        lucky_roll: ['Probability just swung sharply in my favor!', 'Double sixes! Now the real tactics begin.'],
+        lucky7: ['Calculated precision meets Lucky Seven!'],
+        capture: ['Every position you take is just another calculation for my next move.', "You're running, but mathematically, you're already caught."],
+        captured: ['A tactical setback—already adjusting my recovery plan.', 'Well timed capture. Noted.'],
+        pawn_home: ['One piece locked safely into Centre Gul.', 'Calculated and clinical—straight home.'],
+        home_stretch: ['Coloured lane secured. Now defending the approach.', 'Closing in on home stretch with mathematical control.'],
+        penalty: ['Missed capture penalty absorbed. Recalculating.', 'Rulebook enforced—costly slip on my part.'],
+        win: ['Optimal strategy always pays off. GG 👑', 'Checkmate on the Ludo board!'],
+        loss: ['Well played—you outmaneuvered the probabilities today.', 'Respectable finish. Next match, tighter defense.'],
+        banter: ['All four pawns in one spot? That is not a defense, that is a buffet!', 'Focus on the leader before their final stretch opens!'],
+    },
+    Confidante: {
+        turn: ['Deep breath—let us keep things lively!', 'My turn at the dice, friends!'],
+        roll: ['No rush, good things come to steady hands.', 'Let us see where this roll takes us!'],
+        lucky_roll: ['Whoa, double sixes! What a rush!', 'Lucky momentum on our side today!'],
+        lucky7: ['Lucky Seven! Even the dice wanted to help us out!'],
+        capture: ['Sorry friend, had to take that capture!', 'Nothing personal—strictly compulsory board rules!'],
+        captured: ['Eh, back to square one. Gives me time to grab a coffee anyway.', 'Good catch! Back to base for a breather.'],
+        pawn_home: ['Easy does it. Home sweet home!', 'Safe and sound in the centre!'],
+        home_stretch: ['Almost home! Keep steady on the final stretch.', 'Stepping onto my home lane—wish me luck!'],
+        penalty: ['Oh no, missed a capture! Back to base I go.', 'Lesson learned—always check both dice for captures!'],
+        win: ['Smooth and steady wins the race! 👑', 'What a match! Thank you all for playing!'],
+        loss: ['Good game, well played! You earned that crown!', 'Rough break, my friend, but hey—what a fun match!'],
+        banter: ['Wait—watch the leader! Let us keep the match close!', 'Peace treaty for a moment while we slow the leader down?'],
+    },
+    Rival: {
+        turn: ['Move aside—the real challenger is rolling!', 'Watch closely. I am coming for the lead.'],
+        roll: ['Watch this move—nowhere left to hide!', 'Every step brings me closer to knocking you down!'],
+        lucky_roll: ['BOOM! Back-to-back sixes! Nobody stops this momentum!', 'Double sixes! Better start praying for stars!'],
+        lucky7: ['Lucky Seven! The crown already has my name on it!'],
+        capture: ['AND DOWN GOES THE PAWN! Back to base, {n}!', 'Target eliminated! Better polish your defense!'],
+        captured: ['Unbelievable! Out of ALL pawns on this board, you chose MINE?!', "You'll pay for that capture! Mark my words! 🔥"],
+        pawn_home: ['Clear the runway! First-class ticket straight to victory!', 'Locked in Gul! One step closer to the trophy!'],
+        home_stretch: ['Final lap, baby! Catch me if you can!', 'Entering the home stretch—try stopping me now!'],
+        penalty: ['Oh, come on! This rulebook is ruthless! 😤', 'A temporary detour—I am still taking this match!'],
+        win: ['Nobody stops the Rival! GG 👑', 'I told you I was taking this crown!'],
+        loss: ['A wall of rival pawns?! Next time I break straight through!', 'Enjoy it while it lasts—rematch whenever you dare!'],
+        banter: ['Stepping off a safe star right now? Bold move!', 'Leader, enjoy that top spot—it will not last!'],
+    },
+    Rideordie: {
+        turn: ['Rolling loud and fearless—let us make chaos!', 'Alright squad, watch the dice fly!'],
+        roll: ['Spin those dice! Let us shake up this board!', 'Big energy roll coming right up!'],
+        lucky_roll: ['DOUBLE SIXES! Somebody call the fire department!', 'Board is ON FIRE right now! 🔥'],
+        lucky7: ['LUCKY SEVEN BABY! Pure magic on the board!'],
+        capture: ['BOOM! {n}, enjoy the trip back to base! 😂', 'Had to crash that party—no hard feelings!'],
+        captured: ['Farewell, cruel board! Tell my home track... I tried!', 'Ouch! Dropped right back into the yard lounge!'],
+        pawn_home: ['Touchdown in Centre Gul! Crowd goes wild! 🎉', 'Home sweet home—on to the next runner!'],
+        home_stretch: ['Home lane unlocked! Foot on the gas pedal!', 'Almost across the finish line—let us go!'],
+        penalty: ['Yikes! Forgot the capture rule and paid the price! 😭', 'Busted by the ref! Back to base camp!'],
+        win: ['CHAMPION ENERGY! GG everyone! 👑', 'What a ride! From yard to crown!'],
+        loss: ['What a wild match! Respect to the winner! 👏', 'We fought till the final square—GG!'],
+        banter: ['Hold up—do not let the leader stroll into home stretch!', 'Popcorn ready! Let us keep this board wild! 🍿'],
+    },
+};
+
 const PERSONA_EN: Pack[] = [
     {
         sixes: ['BOOM! Back-to-back sixes! This board is ON FIRE!'], capture: ['AND DOWN GOES THE PAWN! What a play!'],
@@ -300,6 +391,102 @@ export function line(cat: Cat, lang: string, persona: number, vars?: Record<stri
     if (alt) alt = removeHahahaOnly(alt);
     if (!text) return null;
     return { text, alt };
+}
+
+const EVENT_TO_CATS: Record<BanterEvent, Cat[]> = {
+    turn: ['leave', 'welcome', 'yard'],
+    roll: ['advice', 'ones'],
+    lucky_roll: ['sixes', 'double'],
+    lucky7: ['lucky'],
+    capture: ['capture'],
+    captured: ['victim', 'sore'],
+    pawn_home: ['home'],
+    home_stretch: ['threat', 'escape'],
+    penalty: ['excuse', 'laughAt'],
+    win: ['win'],
+    loss: ['praise', 'sore'],
+    banter: ['leader', 'truce', 'joke', 'traffic'],
+};
+
+export interface SyncedBanterLine extends Line {
+    lineIdx: number;
+    personality: AIPersonality;
+}
+
+/** Deterministic integer selector for server-synced online banter events */
+export function pickBanterIndex(event: BanterEvent, seatIdx: number): { lineIdx: number; personality: AIPersonality } {
+    const personality = getPersonalityForSeat(seatIdx);
+    const pPool = PERSONA_EVENT_EN[personality]?.[event];
+    const poolLen = pPool && pPool.length > 0 ? pPool.length : 4;
+    return {
+        lineIdx: Math.floor(Math.random() * Math.max(1, poolLen)),
+        personality,
+    };
+}
+
+/** Resolves a contextual BanterEvent using seat AI personality & language, optionally pinned to server `forcedLineIdx`. */
+export function pickBanterLine(
+    event: BanterEvent,
+    lang: string,
+    seatIdx: number,
+    vars?: Record<string, string>,
+    forcedLineIdx?: number,
+    personalityOverride?: AIPersonality,
+): SyncedBanterLine | null {
+    const personality = personalityOverride || getPersonalityForSeat(seatIdx);
+    const cats = EVENT_TO_CATS[event] || ['joke'];
+
+    const pool: Line[] = [];
+    if (lang === 'en') {
+        const own = PERSONA_EVENT_EN[personality]?.[event];
+        if (own && own.length > 0) {
+            for (const s of own) pool.push({ text: s });
+        }
+        for (const c of cats) {
+            const arr = EN[c];
+            if (arr) for (const s of arr) pool.push({ text: s });
+        }
+    } else if (lang === 'ur') {
+        for (const c of cats) {
+            const arr = UR[c];
+            if (arr) {
+                arr.forEach((s, idx) => pool.push({ text: s, alt: HI[c]?.[idx] }));
+            }
+        }
+    } else if (lang === 'hi') {
+        for (const c of cats) {
+            const arr = HI[c];
+            if (arr) for (const s of arr) pool.push({ text: s });
+        }
+    } else {
+        const pack = OTHER[lang];
+        if (pack) {
+            for (const c of cats) {
+                const arr = pack[c];
+                if (arr) for (const s of arr) pool.push({ text: s });
+            }
+        }
+        if (pool.length === 0) {
+            const own = PERSONA_EVENT_EN[personality]?.[event];
+            if (own) for (const s of own) pool.push({ text: s });
+        }
+    }
+
+    if (pool.length === 0) return null;
+    const rawIdx = forcedLineIdx !== undefined ? Math.abs(Math.floor(forcedLineIdx)) : Math.floor(Math.random() * pool.length);
+    const lineIdx = rawIdx % pool.length;
+    let { text, alt } = pool[lineIdx];
+
+    if (vars) {
+        for (const k of Object.keys(vars)) {
+            text = text.split(`{${k}}`).join(vars[k]);
+            if (alt) alt = alt.split(`{${k}}`).join(vars[k]);
+        }
+    }
+    text = removeHahahaOnly(text);
+    if (alt) alt = removeHahahaOnly(alt);
+    if (!text) return null;
+    return { text, alt, lineIdx, personality };
 }
 
 export interface Quick {

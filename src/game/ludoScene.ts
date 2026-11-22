@@ -2,21 +2,28 @@
 // computer players that gang up on the leader, penalties, Lucky Seven, talk and sound.
 import { Application, Circle, Container, Graphics, Rectangle, Sprite, Text } from 'pixi.js';
 import type { Stage } from './stage';
-import { store, type PlayerCfg } from '../state/store';
+import { store, shouldShowCaptureWarning, type PlayerCfg } from '../state/store';
 import { multiplayerClient } from '../network/multiplayerClient';
 import { recordMatchStarted } from '../state/persist';
-import { bus } from './bus';
+import { bus, type NameplateBound } from './bus';
 import { tr, colorName } from '../i18n';
 import {
     BASE_CENTER, BASE_SPOTS, COLORS, HOME, HOME_COL, IN_BASE, LAST_TRACK, PATH_START, SAFE, STAR_IDX, START_IDX, TRACK,
     boardPos, evaluateCaptureObligation, fineProgress, globalIdx, hasWon, isLuckySum, legalMovesForTurn, luckySevenAllowed,
-    newTokens, offendingTokensForPenalty, percent, pickMove, pickObligationAwarePool, randDie, type CaptureObligation, type Move, type Tokens,
+    newTokens, offendingTokensForPenalty, percent, pickBestAIMove, randDie, type CaptureObligation, type Move, type Tokens,
 } from './rules';
 import { BG_BASE, circlePts, drawBackground, drawDie, drawPawn, mix, shade, starPts } from './draw';
 import { TOKEN_URLS_BY_PLAYER, getCachedPawnTexture, loadPawnTexture } from './tokenAssets';
 import * as sfx from './sfx';
 import * as banter from './banter';
-import type { Cat } from './banter';
+import type { AIPersonality, BanterEvent, Cat } from './banter';
+import {
+    BANTER_HIGH_PRIORITY_COOLDOWN_MS,
+    BANTER_ROUTINE_COOLDOWN_MS,
+    HIGH_PRIORITY_BANTER_EVENTS,
+    getPersonalityForSeat,
+    pickBanterLine,
+} from './banter';
 
 export interface SceneOpts {
     players: PlayerCfg[];
@@ -102,9 +109,9 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     let ranking: { idx: number; pct: number }[] = [];
     const wishUsed = [false, false, false, false];
 
-    // Count matches in browser (localStorage): in the first 3 matches only, show capture hints and skip confirmations
+    // Track matches played locally for Newcomers (first 3 matches) vs Always/Off setting
     const matchCount = recordMatchStarted();
-    const isFirst3Matches = matchCount <= 3;
+    const captureWarningActive = () => shouldShowCaptureWarning(store.get().settings.captureWarningMode, matchCount);
     let turnCapturePromise = 0;
     let turnCapturesTaken = 0;
     let turnObligation: CaptureObligation | null = null;
@@ -597,6 +604,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         g.roundRect(-w / 2, -h / 2, w, h, cornerR).fill(COLORS[p]).stroke({ width: 2.25, color: shade(COLORS[p], 0.6) });
         g.roundRect(-w / 2 + 5, -h / 2 + 3, w - 10, 9, 4.5).fill({ color: 0xffffff, alpha: 0.25 });
     }
+    let lastPublishedPlatesSig = '';
     function updatePlates(dt: number) {
         const target = moving ? 0 : 1;
         platesAlpha += (target - platesAlpha) * Math.min(1, dt / 160);
@@ -604,13 +612,17 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         const top = Math.min(c0.y, c1.y, c2.y, c3.y);
         const bottom = Math.max(P(0, 15, -0.7).y, P(15, 15, -0.7).y, c0.y, c1.y, c2.y, c3.y);
         const midY = (top + bottom) / 2;
+        const u = stage.unit();
+        const nextBounds: NameplateBound[] = [];
         for (let p = 0; p < 4; p++) {
             const pl = plates[p];
             if (!active[p] || !pl.txt || pl.txt.destroyed) continue;
             const b = P(BASE_CENTER[p][0], BASE_CENTER[p][1]);
             const above = b.y < midY;
+            const px = Math.max(80, Math.min(stage.designWidth() - 80, b.x));
+            const py = above ? top - 26 : bottom + 28;
             if (pl.c?.position) {
-                pl.c.position.set(Math.max(80, Math.min(stage.designWidth() - 80, b.x)), above ? top - 26 : bottom + 28);
+                pl.c.position.set(px, py);
             }
             const name = plateName(p);
             if (pl.txt.text !== name) {
@@ -620,8 +632,24 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             const size = Math.round((name.length > 10 ? 18 : name.length > 7 ? 21 : 25) * 0.75);
             if (pl.txt.style.fontSize !== size) pl.txt.style.fontSize = size;
             const w = 132;
+            const h = 34.5;
             drawPlate(p, w);
             pl.c.alpha = platesAlpha;
+            if (platesAlpha > 0.7) {
+                nextBounds.push({
+                    seatIdx: p,
+                    x: Math.round((px - w / 2) * u),
+                    y: Math.round((py - h / 2) * u),
+                    w: Math.round(w * u),
+                    h: Math.round(h * u),
+                    angleDeg: 0,
+                });
+            }
+        }
+        const sig = nextBounds.map((nb) => `${nb.seatIdx}:${Math.round(nb.x / 2)},${Math.round(nb.y / 2)},${Math.round(nb.w / 2)},${Math.round(nb.h / 2)}`).join('|');
+        if (sig !== lastPublishedPlatesSig) {
+            lastPublishedPlatesSig = sig;
+            store.patch({ nameplateBounds: nextBounds });
         }
     }
 
@@ -1020,13 +1048,85 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         return selected;
     }
 
+    const lastBanterMs = [0, 0, 0, 0];
+
+    function canSpeakBanter(seatIdx: number, event: BanterEvent): boolean {
+        if (store.get().settings.aiMute) return false;
+        if (multiplayerClient.isSeatMuted(seatIdx)) return false;
+        const nowMs = Date.now();
+        const isHigh = HIGH_PRIORITY_BANTER_EVENTS.has(event);
+        const minGap = isHigh ? BANTER_HIGH_PRIORITY_COOLDOWN_MS : BANTER_ROUTINE_COOLDOWN_MS;
+        return nowMs - lastBanterMs[seatIdx] >= minGap;
+    }
+
+    /** Emit a personality-flavored local AI banter event with priority cooldown & per-seat mute gating. */
+    function emitLocalBanter(
+        event: BanterEvent,
+        idx: number,
+        vars?: Record<string, string>,
+        chance = 1,
+        forcedLineIdx?: number,
+        personalityOverride?: AIPersonality,
+    ) {
+        if (idx < 0 || idx > 3 || !active[idx]) return;
+        if (forcedLineIdx === undefined && !isAI(idx)) return;
+        if (Math.random() > chance) return;
+        if (!canSpeakBanter(idx, event)) return;
+        const line = pickBanterLine(
+            event,
+            lang,
+            idx,
+            vars,
+            forcedLineIdx,
+            personalityOverride || getPersonalityForSeat(idx),
+        );
+        if (!line) return;
+        lastBanterMs[idx] = Date.now();
+        lastSpoke[idx] = clock;
+        enqueue({
+            idx,
+            text: line.text,
+            alt: line.alt,
+            priority: HIGH_PRIORITY_BANTER_EVENTS.has(event),
+            voice: true,
+        }, HIGH_PRIORITY_BANTER_EVENTS.has(event));
+    }
+
+    function emitRoundRobinBanter(event: BanterEvent, exclude = -1, vars?: Record<string, string>, chance = 1) {
+        const nextAI = getNextRoundRobinAI(exclude);
+        if (nextAI === null) return;
+        emitLocalBanter(event, nextAI, vars, chance);
+    }
+
     /** A computer player says something (if it's not a human seat). */
     function ai(cat: Cat, idx: number, vars?: Record<string, string>, chance = 1) {
         if (!active[idx] || !isAI(idx) || Math.random() > chance) return;
-        const l = banter.line(cat, lang, idx, vars);
+        if (store.get().settings.aiMute || multiplayerClient.isSeatMuted(idx)) return;
+        const catToEvent: Partial<Record<Cat, BanterEvent>> = {
+            capture: 'capture',
+            victim: 'captured',
+            lucky: 'lucky7',
+            sixes: 'lucky_roll',
+            double: 'lucky_roll',
+            home: 'pawn_home',
+            threat: 'home_stretch',
+            escape: 'home_stretch',
+            excuse: 'penalty',
+            laughAt: 'penalty',
+            win: 'win',
+            praise: 'loss',
+            sore: 'loss',
+            leave: 'turn',
+            ones: 'roll',
+            advice: 'roll',
+        };
+        const mappedEvent = catToEvent[cat] || 'banter';
+        if (!canSpeakBanter(idx, mappedEvent)) return;
+        const l = pickBanterLine(mappedEvent, lang, idx, vars);
         if (l) {
+            lastBanterMs[idx] = Date.now();
             lastSpoke[idx] = clock;
-            enqueue({ idx, text: l.text, alt: l.alt, voice: true });
+            enqueue({ idx, text: l.text, alt: l.alt, priority: HIGH_PRIORITY_BANTER_EVENTS.has(mappedEvent), voice: true });
         }
     }
 
@@ -1037,11 +1137,25 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         ai(cat, nextAI, vars, chance);
     }
     const lastSpoke = [-1e9, -1e9, -1e9, -1e9];
-    /** After every turn, the next AI in the round-robin cycle chips in with dialogue. */
+    /** After every turn, the next AI in the round-robin cycle chips in with contextual dialogue. */
     function chatterAfterTurn(actor: number) {
-        const cats: Cat[] = ['joke', 'threat', 'praise', 'advice', 'laugh', 'yard', 'sore'];
-        if (Math.random() < 0.6) anyAI(cats[Math.floor(Math.random() * cats.length)], actor, undefined, 1);
+        if (Math.random() < 0.55) {
+            emitRoundRobinBanter('banter', actor, undefined, 1);
+        }
     }
+
+    bus.onRemoteAiBanter = (data) => {
+        if (dead || !isOnline()) return;
+        const ev = (data.event || 'banter') as BanterEvent;
+        emitLocalBanter(
+            ev,
+            data.seatIndex,
+            data.vars,
+            1,
+            data.lineIdx,
+            data.personality as AIPersonality | undefined,
+        );
+    };
 
     bus.chat = (idx, text, o) => {
         if (!active[idx]) return;
@@ -1175,6 +1289,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     };
 
     bus.onRemoteGameOver = (remoteWinner: number) => {
+        sfx.stopHeartbeat();
         bumpTurnEpoch();
         winner = remoteWinner;
         bus.onGulDecision = undefined;
@@ -1199,6 +1314,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     };
 
     bus.onRemoteTurnChanged = (newTurn: number, extraTurn?: boolean) => {
+        sfx.stopHeartbeat();
         latestRemoteTurn = newTurn;
         latestRemoteExtraTurn = !!extraTurn;
         remoteTurnChangedPending = true;
@@ -1437,6 +1553,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         sfx.tap();
 
         const proceedWithMove = () => {
+            sfx.stopHeartbeat();
             if (m!.reachesHome) {
                 store.patch({
                     gulPrompt: {
@@ -1507,9 +1624,9 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             if (r) r(m!);
         };
 
-        // First 3 matches: show confirmation warning before skipping a required capture
+        // Respect configurable captureWarningMode ('first3' | 'always' | 'off') in both local Play & online pre-move checks
         const wouldSkipCapture = (() => {
-            if (!isFirst3Matches || !turnObligation || turnObligation.required <= 0) return false;
+            if (!captureWarningActive() || !turnObligation || turnObligation.required <= 0) return false;
             if (turnCapturesTaken >= turnObligation.required) return false;
             const afterCaps = turnCapturesTaken + (m.captures.length > 0 ? 1 : 0);
             if (afterCaps >= turnObligation.required) return false;
@@ -1545,6 +1662,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         })();
 
         if (wouldSkipCapture) {
+            sfx.heartbeat();
             store.patch({
                 skipCapturePrompt: {
                     message: 'This move leaves your capture requirement unmet. Every token with a capture option that did not capture will go back to base. Continue anyway?',
@@ -1552,6 +1670,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             });
             bus.onSkipCaptureDecision = (decision: 'continue' | 'back') => {
                 bus.onSkipCaptureDecision = undefined;
+                sfx.stopHeartbeat();
                 if (decision === 'continue') {
                     proceedWithMove();
                 }
@@ -1716,6 +1835,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
 
     async function applyMove(p: number, m: Move, expectedEpoch?: number): Promise<{ captured: boolean; home: boolean }> {
         clearHighlights();
+        const prevPos = tokens[p][m.tok];
         await moveToken(p, m, expectedEpoch);
         if (expectedEpoch !== undefined && isOnline() && turnEpoch !== expectedEpoch) {
             return { captured: false, home: false };
@@ -1727,16 +1847,24 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             sfx.heartbeat();
             const victim = c.p;
             void sendHome(victim, c.t, 900);
-            ai('capture', p, { n: nameOf(victim) }, 0.9);
-            ai('victim', victim, undefined, 0.9);
-            anyAI('laugh', p, undefined, 0.5);
+            if (!isOnline()) {
+                emitLocalBanter('capture', p, { n: nameOf(victim) }, 0.9);
+                emitLocalBanter('captured', victim, undefined, 0.9);
+            }
         }
         if (captured) await delay(1400, expectedEpoch !== undefined);
         if (expectedEpoch !== undefined && isOnline() && turnEpoch !== expectedEpoch) {
             return { captured, home: m.reachesHome };
         }
-        if (m.fromBase) ai('leave', p, undefined, 0.35);
-        if (m.reachesHome) ai('home', p, undefined, 0.7);
+        if (!isOnline()) {
+            if (m.reachesHome) {
+                emitLocalBanter('pawn_home', p, undefined, 0.75);
+            } else if (prevPos < PATH_START && m.to >= PATH_START) {
+                emitLocalBanter('home_stretch', p, undefined, 0.7);
+            } else if (m.fromBase) {
+                emitLocalBanter('turn', p, undefined, 0.35);
+            }
+        }
         publish();
         return { captured, home: m.reachesHome };
     }
@@ -1769,8 +1897,10 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                 }),
             );
             publish();
-            anyAI('laughAt', p, { n: name }, 0.8);
-            ai('excuse', p, undefined, 0.5);
+            if (!isOnline()) {
+                emitLocalBanter('penalty', p, undefined, 0.85);
+                emitRoundRobinBanter('banter', p, { n: name }, 0.65);
+            }
             await delay(250);
         } finally {
             isPenalizing = false;
@@ -1835,7 +1965,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                         waitChoice = null;
                         const caps = optionsNow.filter((m) => m.captures.length > 0);
                         const pool = caps.length > 0 ? caps : optionsNow;
-                        const autoMove = pickMove(tokens, p, pool, active);
+                        const autoMove = pickBestAIMove(tokens, p, pool, active).move;
                         sfx.tick();
                         r(autoMove);
                     }
@@ -1854,6 +1984,10 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                 await delay(600);
             }
             if (turnAborted()) return false;
+
+            if (!isOnline() && isAI(p) && Math.random() < 0.35) {
+                emitLocalBanter('turn', p);
+            }
 
             // --- roll
             let forced: [number, number] | undefined;
@@ -1904,8 +2038,10 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                 diceUsed = initialDiceUsedFromServer;
             }
             const double6 = roll.a === 6 && roll.b === 6;
-            if (double6 && !roll.lucky) {
-                ai('sixes', p, undefined, 0.7);
+            if (!isOnline() && isAI(p)) {
+                if (roll.lucky) emitLocalBanter('lucky7', p, undefined, 0.9);
+                else if (double6) emitLocalBanter('lucky_roll', p, undefined, 0.75);
+                else emitLocalBanter('roll', p, undefined, 0.3);
             }
             // Double 6 awards an extra turn unconditionally every time
             let extra = double6;
@@ -1918,6 +2054,11 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             turnTokensCaptured.clear();
             turnMovedToSquare.clear();
             let capturesTaken = 0;
+
+            const isLocalHumanTurn = !isAI(p) && (!isOnline() || multiplayerClient.myPlayerIndex === p);
+            if (isLocalHumanTurn && capturePromise > 0) {
+                sfx.heartbeat();
+            }
 
             const recordMoveCaptureAndUpgrade = (moveChosen: Move) => {
                 const destKey =
@@ -1963,6 +2104,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                 if (turnAborted()) break;
                 optionsNow = movesFor(p);
                 if (!optionsNow.length) {
+                    sfx.stopHeartbeat();
                     store.patch({ captureNotice: null });
                     setStatus(tr(lang, 'noMoves'));
                     await delay(1100, isOnline());
@@ -1970,7 +2112,8 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                     break;
                 }
 
-                if (!isAI(p) && capturesTaken < capturePromise) {
+                if (isLocalHumanTurn && capturesTaken < capturePromise) {
+                    if (guard > 0) sfx.heartbeat();
                     store.patch({
                         captureNotice:
                             capturePromise >= 2
@@ -2033,17 +2176,16 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                     continue;
                 }
                 if (!isOnline() && isAI(p)) {
-                    const pool = pickObligationAwarePool(
+                    const { move: chosen } = pickBestAIMove(
                         tokens,
                         p,
+                        optionsNow,
+                        active,
                         dice,
                         diceUsed,
-                        active,
-                        optionsNow,
                         turnObligation,
                         capturesTaken,
                     );
-                    const chosen = pickMove(tokens, p, pool, active);
                     selDie = chosen.die;
                     refreshHighlights();
                     await delay(900);
@@ -2071,7 +2213,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                     selDie = 2;
                 }
                 refreshHighlights();
-                if (Math.random() < 0.25) anyAI('advice', p, undefined, 0.5);
+                if (!isOnline() && Math.random() < 0.25) emitRoundRobinBanter('banter', p, undefined, 0.5);
                 const chosen = await new Promise<Move | undefined>((res) => {
                     waitChoice = res as any;
                 });
@@ -2096,6 +2238,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                 }
                 optionsNow = [];
             }
+            sfx.stopHeartbeat();
             store.patch({ captureNotice: null, skipCapturePrompt: null });
             // Settle up: if captures made < required, every candidate token that did not capture returns to base.
             // In online multiplayer, server is authoritative and broadcasts penalty_applied.
@@ -2111,6 +2254,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             clearHighlights();
             return extra;
         } finally {
+            sfx.stopHeartbeat();
             if (turnTimerInterval) {
                 clearInterval(turnTimerInterval);
             }
@@ -2125,6 +2269,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     }
 
     function finish() {
+        sfx.stopHeartbeat();
         const rows = [0, 1, 2, 3]
             .filter((p) => active[p])
             .map((p) => ({ idx: p, pct: p === winner ? 100 : percent(tokens, p), fine: fineProgress(tokens, p) }));
@@ -2132,26 +2277,24 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         ranking = rows.map((r) => ({ idx: r.idx, pct: r.pct }));
         publish();
         sfx.fanfare();
-        ai('win', winner, undefined, 1);
-        anyAI('praise', winner, undefined, 0.8);
+        if (!isOnline()) {
+            emitLocalBanter('win', winner, undefined, 1);
+            const losingAi = rows.find((r) => r.idx !== winner && isAI(r.idx));
+            if (losingAi) emitLocalBanter('loss', losingAi.idx, undefined, 0.9);
+        }
         store.patch({ result: ranking, popup: null, wishUsable: false });
     }
 
     async function run() {
         publish();
         await delay(600);
-        anyAI('welcome', -1, undefined, 1);
+        if (!isOnline()) emitRoundRobinBanter('banter', -1, undefined, 0.8);
         let p = current;
         while (!dead && winner < 0) {
             const extra = await takeTurn(p);
             if (dead) return;
             if (!isOnline()) {
                 chatterAfterTurn(p);
-                const leader = [0, 1, 2, 3].filter((q) => active[q]).sort((a, b) => percent(tokens, b) - percent(tokens, a))[0];
-                if (Math.random() < 0.22 && leader !== undefined) {
-                    anyAI('leader', leader, undefined, 0.6);
-                    if (Math.random() < 0.4) anyAI('truce', leader, undefined, 0.5);
-                }
             }
             if (isOnline()) {
                 // In online multiplayer, server is authoritative on turn order and extra turns.
@@ -2284,17 +2427,19 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             bus.onRoomStateSynced = undefined;
             bus.onGulDecision = undefined;
             bus.onSkipCaptureDecision = undefined;
+            bus.onRemoteAiBanter = undefined;
             bumpTurnEpoch();
             // release anything the turn loop is awaiting, so it can unwind cleanly
             if (turnChangeResolver) { const res = turnChangeResolver; turnChangeResolver = null; res(0); }
             if (waitRoll) { const r = waitRoll; waitRoll = null; r(); }
             if (waitChoice) { const c = waitChoice; waitChoice = null; c(optionsNow[0]); }
             handTarget = null;
+            sfx.stopHeartbeat();
             sfx.stopSpeech();
             tweens.length = 0;
             timers.length = 0;
             root.removeChildren();
-            store.patch({ wishNums: null, wishUsable: false, isWaitingRoll: false, gulPrompt: null, captureNotice: null, skipCapturePrompt: null });
+            store.patch({ wishNums: null, wishUsable: false, isWaitingRoll: false, gulPrompt: null, captureNotice: null, skipCapturePrompt: null, nameplateBounds: [] });
         },
     };
 }
