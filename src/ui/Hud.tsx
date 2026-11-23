@@ -272,6 +272,8 @@ const SEAT_BADGE_STYLES = [
 function NameplateOverlays() {
     const bounds = useStore((s) => s.nameplateBounds);
     const modal = useStore((s) => s.modal);
+    const landscape = useStore((s) => s.landscape);
+    const containerRef = useRef<HTMLDivElement>(null);
     const isMultiplayer = !!multiplayerClient.roomCode;
     const mySeat = multiplayerClient.myPlayerIndex;
     const roomPlayers = multiplayerClient.roomState?.players;
@@ -283,8 +285,12 @@ function NameplateOverlays() {
 
     if (!bounds.length || modal) return null;
 
+    const frameW =
+        containerRef.current?.clientWidth ||
+        (landscape ? window.innerWidth : Math.min(window.innerWidth, (window.innerHeight * 9) / 16));
+
     return (
-        <div className="pointer-events-none fixed inset-0 z-25 overflow-hidden">
+        <div ref={containerRef} className="pointer-events-none absolute inset-0 z-[25] overflow-hidden">
             {bounds.map((nb) => {
                 const isVoice = isMultiplayer && activeVoiceSeat === nb.seatIdx;
                 const isWhisper =
@@ -301,6 +307,19 @@ function NameplateOverlays() {
                     !roomPlayer.isAI &&
                     roomPlayer.connected;
 
+                const isCompactVertical = !landscape || nb.h < 28;
+                const isRightHalf = nb.x + nb.w / 2 > frameW * 0.5;
+                const isNearRightEdge = nb.x + nb.w > frameW - 14;
+                const whisperPosClass = isCompactVertical
+                    ? `top-1/2 -translate-y-1/2 ${isRightHalf ? '-left-2.5' : '-right-2.5'}`
+                    : `${nb.y < 14 ? '-bottom-2' : '-top-2'} ${isNearRightEdge ? 'right-0' : '-right-2'}`;
+                const statusPosClass = isCompactVertical
+                    ? `top-1/2 -translate-y-1/2 ${isRightHalf ? '-left-2.5' : '-right-2.5'}`
+                    : `${nb.y < 14 ? '-bottom-2.5' : '-top-2.5'} ${isNearRightEdge ? 'right-0' : '-right-2.5'}`;
+                const mutedPosClass = isCompactVertical
+                    ? `-bottom-2 ${isRightHalf ? 'left-0' : 'right-0'}`
+                    : `-bottom-2 ${isNearRightEdge ? 'right-0' : '-right-2'}`;
+
                 return (
                     <div
                         key={nb.seatIdx}
@@ -314,11 +333,13 @@ function NameplateOverlays() {
                             transformOrigin: 'center center',
                         }}
                     >
-                        {/* Floating emoji reaction bubble above nameplate */}
+                        {/* Floating emoji reaction bubble above (or below if near top) nameplate */}
                         {reaction && (
                             <div
                                 key={reaction.key}
-                                className="pointer-events-none absolute -top-9 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded-full bg-slate-950/90 border border-amber-300/60 shadow-lg text-xl animate-bounce"
+                                className={`pointer-events-none absolute ${
+                                    nb.y < 52 ? '-bottom-8' : '-top-9'
+                                } left-1/2 -translate-x-1/2 px-2 py-0.5 rounded-full bg-slate-950/90 border border-amber-300/60 shadow-lg text-xl animate-bounce`}
                             >
                                 {reaction.emoji}
                             </div>
@@ -379,7 +400,7 @@ function NameplateOverlays() {
                                     bus.openWhisperModal?.([nb.seatIdx]);
                                 }}
                                 title="Send Private Voice Whisper"
-                                className="pointer-events-auto absolute -right-2 -top-2 w-5 h-5 rounded-full bg-purple-950/90 border border-purple-400/70 text-[10px] flex items-center justify-center shadow hover:scale-110 transition-transform cursor-pointer"
+                                className={`pointer-events-auto absolute ${whisperPosClass} z-10 w-5 h-5 rounded-full bg-purple-950/90 border border-purple-400/70 text-[10px] flex items-center justify-center shadow hover:scale-110 transition-transform cursor-pointer`}
                             >
                                 🤫
                             </button>
@@ -387,19 +408,19 @@ function NameplateOverlays() {
 
                         {/* Pulsing Speaking / Whispering / Muted badges */}
                         {isVoice && (
-                            <div className="pointer-events-none absolute -top-2.5 -right-2.5 px-1.5 py-0.5 rounded-full bg-emerald-500 text-slate-950 text-[10px] font-black shadow animate-pulse flex items-center gap-0.5">
+                            <div className={`pointer-events-none absolute ${statusPosClass} z-10 px-1.5 py-0.5 rounded-full bg-emerald-500 text-slate-950 text-[10px] font-black shadow animate-pulse flex items-center gap-0.5`}>
                                 <span>🔊</span>
                             </div>
                         )}
                         {!isVoice && isWhisper && (
-                            <div className="pointer-events-none absolute -top-2.5 -right-2.5 px-1.5 py-0.5 rounded-full bg-purple-500 text-white text-[10px] font-black shadow animate-pulse flex items-center gap-0.5">
+                            <div className={`pointer-events-none absolute ${statusPosClass} z-10 px-1.5 py-0.5 rounded-full bg-purple-500 text-white text-[10px] font-black shadow animate-pulse flex items-center gap-0.5`}>
                                 <span>🤫</span>
                             </div>
                         )}
                         {isMuted && (
                             <div
                                 title="Seat muted"
-                                className="pointer-events-none absolute -bottom-2 -right-2 px-1 py-0.2 rounded-full bg-red-950/90 border border-red-400/60 text-red-200 text-[9px] font-black shadow"
+                                className={`pointer-events-none absolute ${mutedPosClass} z-10 px-1 py-0.2 rounded-full bg-red-950/90 border border-red-400/60 text-red-200 text-[9px] font-black shadow`}
                             >
                                 🔇
                             </div>

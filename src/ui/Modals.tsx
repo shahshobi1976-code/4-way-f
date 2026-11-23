@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { store, useStore } from '../state/store';
 import { LANGS, tr, colorName } from '../i18n';
-import { INSTRUMENTS, setInstrument, setMusicOn, setSong, clearSong } from '../game/music';
+import { BGM_TRACKS, DEFAULT_BGM_TRACK, setBgmTrack, setMusicOn, setSong, clearSong, stopMusic } from '../game/music';
 import { BG_NAMES } from '../game/draw';
+import { BOARD_THEME_LIST, DICE_STYLE_LIST } from '../game/themes';
 import { REACTIONS, quickPhrases } from '../game/banter';
 import { bus } from '../game/bus';
-import { stopMusic } from '../game/music';
 import { Chip, Modal, Toggle, U } from './kit';
 import { MultiplayerLobbyModal } from './MultiplayerLobbyModal';
 import { TutorialModal } from './TutorialModal';
@@ -24,16 +24,24 @@ const close = () => store.patch({ modal: null });
 function MusicPicker() {
     const s = useStore((st) => st.settings);
     const fileRef = useRef<HTMLInputElement>(null);
+    const activeTrackId = s.bgmTrack || DEFAULT_BGM_TRACK;
     return (
         <>
             <Toggle on={s.music} onChange={setMusicOn} label="🎵 Music" />
-            <div className="grid grid-cols-2" style={{ gap: U(8) }}>
-                {INSTRUMENTS.map((n, i) => (
-                    <Chip key={n} active={s.instrument === i && !s.songName && s.music} onClick={() => setInstrument(i)}>🎵 {n}</Chip>
+            <div className="text-[11px] font-bold text-cyan-200 mt-1 mb-1">🎶 Soundtracks</div>
+            <div className="grid grid-cols-2" style={{ gap: U(6) }}>
+                {BGM_TRACKS.map((track) => (
+                    <Chip
+                        key={track.id}
+                        active={activeTrackId === track.id && !s.songName && s.music}
+                        onClick={() => setBgmTrack(track.id)}
+                    >
+                        🎧 {track.label}
+                    </Chip>
                 ))}
             </div>
             <input ref={fileRef} type="file" accept="audio/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) setSong(f); e.target.value = ''; }} />
-            <button onClick={() => fileRef.current?.click()} className="w-full rounded-xl bg-cyan-500/20 font-bold text-cyan-200" style={{ marginTop: U(14), padding: U(12), fontSize: U(22) }}>
+            <button onClick={() => fileRef.current?.click()} className="w-full rounded-xl bg-cyan-500/20 font-bold text-cyan-200 cursor-pointer" style={{ marginTop: U(14), padding: U(12), fontSize: U(22) }}>
                 📁 Choose a song from my device
             </button>
             {s.songName && (
@@ -149,6 +157,36 @@ function Settings() {
                             {BG_NAMES.map((n, i) => (
                                 <Chip key={n} active={s.bg === i} onClick={() => store.patchSettings({ bg: i })}>
                                     {n}
+                                </Chip>
+                            ))}
+                        </div>
+                    </div>
+
+                    <div className="flex flex-col gap-1">
+                        <span className="font-bold text-cyan-200 text-xs">🏁 Board Theme</span>
+                        <div className="grid grid-cols-2 gap-1">
+                            {BOARD_THEME_LIST.map((theme) => (
+                                <Chip
+                                    key={theme.id}
+                                    active={(s.boardTheme || 'classic') === theme.id}
+                                    onClick={() => store.patchSettings({ boardTheme: theme.id })}
+                                >
+                                    {theme.name}
+                                </Chip>
+                            ))}
+                        </div>
+                    </div>
+
+                    <div className="flex flex-col gap-1">
+                        <span className="font-bold text-cyan-200 text-xs">🎲 Dice Style</span>
+                        <div className="grid grid-cols-2 gap-1">
+                            {DICE_STYLE_LIST.map((ds) => (
+                                <Chip
+                                    key={ds.id}
+                                    active={(s.diceStyle || 'classic') === ds.id}
+                                    onClick={() => store.patchSettings({ diceStyle: ds.id })}
+                                >
+                                    {ds.name}
                                 </Chip>
                             ))}
                         </div>
@@ -644,7 +682,13 @@ export function Modals() {
     if (modal === 'settings') return <Settings />;
     if (modal === 'music') return <Modal title="🎵 Music" onClose={close}><MusicPicker /></Modal>;
     if (modal === 'howto') return <TutorialModal onClose={close} />;
-    const urlRoom = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('room') : null;
+    const urlRoom = (() => {
+        if (typeof window === 'undefined') return null;
+        const params = new URLSearchParams(window.location.search);
+        const raw = params.get('room') || params.get('invite');
+        const clean = raw ? raw.trim().toUpperCase() : '';
+        return clean || null;
+    })();
     if (modal === 'invite' || modal === 'multiplayer') return <MultiplayerLobbyModal onClose={close} initialRoomCode={urlRoom || undefined} />;
     if (modal === 'tournament') return <Tournament />;
     if (modal.startsWith('wish:')) return <Wish idx={Number(modal.slice(5))} />;

@@ -53,6 +53,7 @@ import { store, hydrateSettings } from './state/store';
 import { warmAssets } from './assets/preload';
 import { preloadSounds } from './game/sfx';
 import { stopMusic, startMusic } from './game/music';
+import { multiplayerClient } from './network/multiplayerClient';
 import { App } from './ui/App';
 
 // 1) SDK (never throws; local dev without the host runs SDK-less)
@@ -83,12 +84,9 @@ const wait = Math.max(0, 700 - (performance.now() - t0));
 await new Promise((r) => setTimeout(r, wait));
 preloadSounds();
 
-// 6) menu
+// 6) menu & startup ?room=/?invite= auto-join or tab-isolated sessionStorage reconnect
 store.patch({ phase: 'menu', loadProgress: 1 });
-const urlRoom = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('room') : null;
-if (urlRoom) {
-    store.patch({ modal: 'multiplayer' });
-}
+void multiplayerClient.handleStartupInviteOrReconnect();
 
 // 7) lifecycles: pause/resume freeze the ticker; sleep/quit would flush saves (settings already persist on change)
 registerLifecycles({

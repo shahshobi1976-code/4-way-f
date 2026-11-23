@@ -61,9 +61,79 @@ function clack(c: AudioContext, out: AudioNode, t: number, vol: number, freq: nu
     o.stop(t + 0.08);
 }
 
+const sfxBuffers = new Map<string, AudioBuffer>();
+const sfxLoading = new Map<string, Promise<AudioBuffer | null>>();
+
+const BUNDLED_SFX_URLS: Record<string, string> = {
+    click: '/audio/click.mp3',
+    dice: '/audio/dice-roll.mp3',
+    heartbeat: '/audio/heartbeat.mp3',
+    notification: '/audio/notification.mp3',
+    pawnMove: '/audio/pawn-move.mp3',
+    whoosh: '/audio/whoosh.mp3',
+};
+
+async function loadSfxBuffer(key: string): Promise<AudioBuffer | null> {
+    if (sfxBuffers.has(key)) return sfxBuffers.get(key)!;
+    const inflight = sfxLoading.get(key);
+    if (inflight) return inflight;
+    const url = BUNDLED_SFX_URLS[key];
+    if (!url || typeof fetch === 'undefined') return null;
+
+    const p = (async () => {
+        try {
+            const a = audio();
+            if (!a) return null;
+            const res = await fetch(url);
+            if (!res.ok) return null;
+            const ct = res.headers.get('content-type') || '';
+            if (ct.includes('text/html')) return null;
+            const decoded = await a.c.decodeAudioData(await res.arrayBuffer());
+            sfxBuffers.set(key, decoded);
+            return decoded;
+        } catch {
+            return null;
+        } finally {
+            sfxLoading.delete(key);
+        }
+    })();
+
+    sfxLoading.set(key, p);
+    return p;
+}
+
+function playBufferedSfx(key: string, volume = 0.75, maxSec?: number, onStopRegister?: (src: AudioBufferSourceNode, gain: GainNode) => void): boolean {
+    const a = audio();
+    if (!a) return false;
+    const buf = sfxBuffers.get(key);
+    if (!buf) {
+        void loadSfxBuffer(key);
+        return false;
+    }
+    try {
+        const t0 = a.c.currentTime;
+        const src = a.c.createBufferSource();
+        src.buffer = buf;
+        const g = a.c.createGain();
+        const dur = maxSec ? Math.min(buf.duration, maxSec) : buf.duration;
+        g.gain.setValueAtTime(volume, t0);
+        if (maxSec && buf.duration > maxSec && dur > 0.15) {
+            g.gain.setValueAtTime(volume, t0 + dur - 0.12);
+            g.gain.linearRampToValueAtTime(0.0001, t0 + dur);
+        }
+        src.connect(g).connect(a.out);
+        if (onStopRegister) onStopRegister(src, g);
+        src.start(t0, 0, maxSec ? dur : undefined);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
 /** Wooden dice rattling over a wooden board for `ms` milliseconds, ending with a settling knock. */
 export function diceRoll(ms: number) {
     if (!soundOn()) return;
+    if (playBufferedSfx('dice', 0.8, Math.max(0.5, ms / 1000))) return;
     const a = audio();
     if (!a) return;
     const t0 = a.c.currentTime;
@@ -79,7 +149,7 @@ export function diceRoll(ms: number) {
     clack(a.c, a.out, t0 + dur * 0.97 + 0.07, 0.4, 1300);
 }
 
-const activeHeartbeatNodes: { o: OscillatorNode; g: GainNode }[] = [];
+const activeHeartbeatNodes: { o: AudioScheduledSourceNode; g: GainNode }[] = [];
 let heartbeatPlaying = false;
 
 export function stopHeartbeat() {
@@ -106,6 +176,19 @@ export function heartbeat() {
     if (!a) return;
     stopHeartbeat();
     heartbeatPlaying = true;
+    if (
+        playBufferedSfx('heartbeat', 0.72, 2.6, (src, g) => {
+            const entry = { o: src, g };
+            activeHeartbeatNodes.push(entry);
+            src.onended = () => {
+                const idx = activeHeartbeatNodes.indexOf(entry);
+                if (idx !== -1) activeHeartbeatNodes.splice(idx, 1);
+                if (activeHeartbeatNodes.length === 0) heartbeatPlaying = false;
+            };
+        })
+    ) {
+        return;
+    }
     const t0 = a.c.currentTime;
     for (let beat = 0; beat < 3; beat++) {
         for (const [off, f, v] of [[0, 62, 0.9], [0.2, 52, 0.65]] as const) {
@@ -156,17 +239,21 @@ async function loadCarFile() {
 }
 export function preloadSounds() {
     void loadCarFile();
+    for (const k of Object.keys(BUNDLED_SFX_URLS)) {
+        void loadSfxBuffer(k);
+    }
 }
 
 const CAR_VOL = 0.5; // half volume, as requested
 
-/** Race-car rev for a token move; `ms` is how long the move takes. */
+/** Move sound for a token; uses bundled pawn-move MP3 when loaded, else car clip / synth. */
 export function carMove(ms: number) {
     if (!soundOn()) return;
+    const dur = Math.min(2.6, Math.max(0.25, ms / 1000));
+    if (playBufferedSfx('pawnMove', 0.65, dur)) return;
     const a = audio();
     if (!a) return;
     const t0 = a.c.currentTime;
-    const dur = Math.min(2.6, ms / 1000);
     if (carBuf) {
         const s = a.c.createBufferSource();
         s.buffer = carBuf;
@@ -247,9 +334,22 @@ export function buzzer() {
 
 export function tap() {
     if (!soundOn()) return;
+    if (playBufferedSfx('click', 0.6)) return;
     const a = audio();
     if (!a) return;
     clack(a.c, a.out, a.c.currentTime, 0.25, 1800);
+}
+
+export function notifySfx() {
+    if (!soundOn()) return;
+    if (playBufferedSfx('notification', 0.65)) return;
+    tap();
+}
+
+export function whoosh() {
+    if (!soundOn()) return;
+    if (playBufferedSfx('whoosh', 0.55)) return;
+    tap();
 }
 
 /** Subtle clock tick for urgent turn timer warnings (last 5 seconds). */
@@ -296,6 +396,8 @@ function talkBleep(ms: number) {
 const LANG_CODE: Record<string, string> = {
     en: 'en-US', zh: 'zh-CN', hi: 'hi-IN', es: 'es-ES', fr: 'fr-FR',
     ar: 'ar-SA', bn: 'bn-IN', pt: 'pt-BR', ru: 'ru-RU', ur: 'ur-PK',
+    id: 'id-ID', de: 'de-DE', ja: 'ja-JP', tr: 'tr-TR', vi: 'vi-VN',
+    ko: 'ko-KR', it: 'it-IT', fa: 'fa-IR', ta: 'ta-IN', te: 'te-IN',
 };
 
 // per player (colour) pitch and speed for English; red is a little slower than the rest
@@ -354,7 +456,10 @@ function clean(text: string, lang: string): string {
     return t;
 }
 
-const TTS_LANG: Record<string, string> = { zh: 'zh-CN', hi: 'hi', es: 'es', fr: 'fr', ar: 'ar', bn: 'bn', pt: 'pt', ru: 'ru', ur: 'ur' };
+const TTS_LANG: Record<string, string> = {
+    zh: 'zh-CN', hi: 'hi', es: 'es', fr: 'fr', ar: 'ar', bn: 'bn', pt: 'pt', ru: 'ru', ur: 'ur',
+    id: 'id', de: 'de', ja: 'ja', tr: 'tr', vi: 'vi', ko: 'ko', it: 'it', fa: 'fa', ta: 'ta', te: 'te',
+};
 
 /** Unofficial online text-to-speech fallback (Google Translate voice). May be blocked or stop working. */
 async function onlineSpeak(text: string, lang: string, player: number): Promise<boolean> {

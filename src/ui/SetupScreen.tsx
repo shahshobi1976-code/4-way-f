@@ -3,6 +3,7 @@ import { LANGS, tr, colorName } from '../i18n';
 import { U } from './kit';
 import { multiplayerClient } from '../network/multiplayerClient';
 import { requestMicrophonePermission } from '../game/audioCapture';
+import { AI_PERSONALITIES, getPersonalityForSeat, type AIPersonality } from '../game/banter';
 
 const AVATARS = ['🤴', '👸', '👑', '💎', '🔥', '🏆', '🎩', '🎮', '🌟', '🍀', '🎲'];
 const BORDER = ['#e53935', '#43a047', '#fdd835', '#00bcd4'];
@@ -290,8 +291,18 @@ export function SetupScreen() {
                                                 ✨ {T('setWish')} {p.wish ? `(${p.wish[0]}, ${p.wish[1]})` : '(6, 5)'}
                                             </button>
                                         ) : (
-                                            <div className="text-[10px] text-slate-400 italic py-0.5 truncate text-center">
-                                                🤖 AI Player ({def.name})
+                                            <div className="flex items-center justify-between gap-1 text-[10px] text-slate-300 py-0.5">
+                                                <span className="truncate italic text-slate-400">🤖 {def.name}</span>
+                                                <select
+                                                    aria-label={`AI Personality ${def.name}`}
+                                                    value={p.personality || getPersonalityForSeat(i)}
+                                                    onChange={(e) => store.patchPlayer(i, { personality: e.target.value as AIPersonality })}
+                                                    className="rounded border border-cyan-400/40 bg-[#0e1530] text-cyan-200 px-1 py-0.5 text-[10px] font-bold outline-none cursor-pointer"
+                                                >
+                                                    {AI_PERSONALITIES.map((per) => (
+                                                        <option key={per} value={per}>{per}</option>
+                                                    ))}
+                                                </select>
                                             </div>
                                         )}
                                     </div>
@@ -465,8 +476,18 @@ export function SetupScreen() {
                                     ✨ {T('setWish')} {p.wish ? `(${p.wish[0]}, ${p.wish[1]})` : '(6, 5)'}
                                 </button>
                             ) : (
-                                <div className="text-[9px] sm:text-[10px] text-slate-400 italic py-0.5 truncate text-center leading-tight">
-                                    🤖 AI Player ({def.name})
+                                <div className="flex items-center justify-between gap-1 text-[9px] sm:text-[10px] text-slate-300 leading-tight">
+                                    <span className="truncate italic text-slate-400">🤖 {def.name}</span>
+                                    <select
+                                        aria-label={`AI Personality ${def.name}`}
+                                        value={p.personality || getPersonalityForSeat(i)}
+                                        onChange={(e) => store.patchPlayer(i, { personality: e.target.value as AIPersonality })}
+                                        className="rounded border border-cyan-400/40 bg-[#0e1530] text-cyan-200 px-1 py-0 text-[9px] font-bold outline-none cursor-pointer shrink-0"
+                                    >
+                                        {AI_PERSONALITIES.map((per) => (
+                                            <option key={per} value={per}>{per}</option>
+                                        ))}
+                                    </select>
                                 </div>
                             )}
                         </div>

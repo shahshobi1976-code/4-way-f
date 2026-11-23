@@ -1,5 +1,6 @@
 // Drawing helpers: colours, pawns, dice and the 10 table backgrounds.
 import { Graphics } from 'pixi.js';
+import { DICE_STYLES, type DiceStyleId } from './themes';
 
 export type Proj = (x: number, y: number, z?: number) => { x: number; y: number };
 
@@ -62,17 +63,56 @@ const PIPS: Record<number, [number, number][]> = {
 };
 
 /** Rounded-corner die, centred on the origin. */
-export function drawDie(g: Graphics, size: number, value: number, color: number, pip: number, opts: { dim?: boolean; glow?: boolean } = {}) {
+export function drawDie(
+    g: Graphics,
+    size: number,
+    value: number,
+    color: number,
+    pip: number,
+    opts: { dim?: boolean; glow?: boolean; styleId?: DiceStyleId } = {},
+) {
     g.clear();
     const h = size / 2;
     const r = size * 0.22;
     const a = opts.dim ? 0.45 : 1;
-    if (opts.glow) g.roundRect(-h - size * 0.07, -h - size * 0.07, size * 1.14, size * 1.14, r * 1.2).fill({ color: 0xffffff, alpha: 0.35 });
-    g.roundRect(-h, -h + size * 0.07, size, size, r).fill({ color: shade(color, 0.55), alpha: a });
-    g.roundRect(-h, -h, size, size, r).fill({ color, alpha: a }).stroke({ width: size * 0.035, color: 0xffffff, alpha: 0.55 * a });
+    const style = opts.styleId && opts.styleId !== 'classic' ? DICE_STYLES[opts.styleId] : null;
+    const faceColor = style ? style.face : color;
+    const pipColor = style ? style.pip : pip;
+    const borderColor = style ? style.border : 0xffffff;
+    const glowColor = opts.glow ? (style?.glow ?? 0xffffff) : (style?.glow ?? null);
+
+    if (glowColor !== null && (opts.glow || style?.glow)) {
+        g.roundRect(-h - size * 0.07, -h - size * 0.07, size * 1.14, size * 1.14, r * 1.2)
+            .fill({ color: glowColor, alpha: (opts.glow ? 0.36 : 0.16) * a });
+    }
+    g.roundRect(-h, -h + size * 0.07, size, size, r).fill({ color: shade(faceColor, 0.52), alpha: a });
+    g.roundRect(-h, -h, size, size, r)
+        .fill({ color: faceColor, alpha: a })
+        .stroke({ width: size * (style ? 0.05 : 0.035), color: style ? mix(borderColor, color, 0.25) : borderColor, alpha: (style ? 0.9 : 0.55) * a });
+
+    if (style?.pattern === 'marble') {
+        g.moveTo(-h * 0.72, -h * 0.45).lineTo(-h * 0.1, h * 0.2).lineTo(h * 0.6, h * 0.55)
+            .stroke({ width: Math.max(1, size * 0.03), color: 0x9ca3af, alpha: 0.45 * a });
+        g.moveTo(h * 0.4, -h * 0.65).lineTo(-h * 0.2, h * 0.1)
+            .stroke({ width: Math.max(1, size * 0.02), color: 0xffffff, alpha: 0.55 * a });
+    } else if (style?.pattern === 'galaxy') {
+        for (const [sx, sy, sr] of [[-0.55, -0.5, 0.04], [0.48, -0.45, 0.035], [-0.45, 0.52, 0.03], [0.5, 0.42, 0.04]] as const) {
+            g.circle(h * sx, h * sy, size * sr).fill({ color: 0xc4b5fd, alpha: 0.75 * a });
+        }
+    } else if (style?.pattern === 'fire') {
+        g.roundRect(-h + size * 0.1, 0, size - size * 0.2, h - size * 0.08, r * 0.5)
+            .fill({ color: 0xf97316, alpha: 0.25 * a });
+    } else if (style?.pattern === 'ice') {
+        g.moveTo(-h * 0.6, -h * 0.6).lineTo(h * 0.6, h * 0.6)
+            .stroke({ width: Math.max(1, size * 0.025), color: 0xffffff, alpha: 0.55 * a });
+    } else if (style?.pattern === 'holo') {
+        g.roundRect(-h + size * 0.08, -h + size * 0.08, size * 0.84, size * 0.35, r * 0.5)
+            .fill({ color: 0xf0abfc, alpha: 0.3 * a });
+    }
+
     g.roundRect(-h + size * 0.08, -h + size * 0.06, size * 0.5, size * 0.16, r * 0.5).fill({ color: 0xffffff, alpha: 0.22 * a });
     for (const [gx, gy] of PIPS[Math.max(1, Math.min(6, value))]) {
-        g.circle(gx * size * 0.26, gy * size * 0.26, size * 0.085).fill({ color: pip, alpha: a });
+        g.circle(gx * size * 0.26, gy * size * 0.26, size * 0.085).fill({ color: pipColor, alpha: a });
     }
 }
 

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useStore } from '../state/store';
 import { tr } from '../i18n';
+import { TUTORIAL_TRANSLATIONS, type TutorialCardKey } from './tutorialTranslations';
 
 export interface GuideCard {
     part: 'walkthrough' | 'rules';
@@ -15,11 +16,24 @@ export interface GuideCard {
 }
 
 export function buildHowToPlayCards(lang = 'en'): GuideCard[] {
+    const loc = TUTORIAL_TRANSLATIONS[lang] || {};
+    const applyLoc = (key: TutorialCardKey, card: GuideCard): GuideCard => {
+        const t = loc[key];
+        if (!t) return card;
+        return {
+            ...card,
+            badge: t.badge || card.badge,
+            title: t.title || card.title,
+            content: t.content || card.content,
+            bullets: t.bullets && t.bullets.length > 0 ? t.bullets : card.bullets,
+        };
+    };
+
     return [
         // ----------------------------------------------------
         // PART 1: 5 Step-by-Step Walkthrough Cards (Step 1 to Step 5)
         // ----------------------------------------------------
-        {
+        applyLoc('w1', {
             part: 'walkthrough',
             stepNumber: 1,
             icon: '⚡',
@@ -28,8 +42,8 @@ export function buildHowToPlayCards(lang = 'en'): GuideCard[] {
             content:
                 'Play in 4-Way or 2-Way mode with 4 tokens and 2 dice per player. A single 6 brings a token out of base. Rolling double 6 (6+6) awards an extra turn with no consecutive limit. Capturing on the open track awards a reroll and is compulsory (1 required if a total/pair option exists, else the max independent single-die captures; failing sends every non-capturing option token to base). Star squares, home paths, and equal/larger stacks are protected. First player to get all 4 tokens onto their coloured home path wins immediately!',
             accentColor: '#00f0ff',
-        },
-        {
+        }),
+        applyLoc('w2', {
             part: 'walkthrough',
             stepNumber: 2,
             icon: '⚙️',
@@ -38,8 +52,8 @@ export function buildHowToPlayCards(lang = 'en'): GuideCard[] {
             content:
                 'Before the match begins, choose your Lucky Wish numbers (any two dice numbers except 6 and 6) to use once per match. The room host also sets the optional turn timer (60s, 90s, 120s, or Off). Ensure your audio and board preferences are ready before hitting start.',
             accentColor: '#38bdf8',
-        },
-        {
+        }),
+        applyLoc('w3', {
             part: 'walkthrough',
             stepNumber: 3,
             icon: '🔄',
@@ -56,8 +70,8 @@ export function buildHowToPlayCards(lang = 'en'): GuideCard[] {
                 '6. Otherwise, play passes clockwise to the next player.',
             ],
             accentColor: '#a855f7',
-        },
-        {
+        }),
+        applyLoc('w4', {
             part: 'walkthrough',
             stepNumber: 4,
             icon: '🎯',
@@ -72,8 +86,8 @@ export function buildHowToPlayCards(lang = 'en'): GuideCard[] {
                 '• Exit Base: Roll 6 and 2, bring a token out with 6, move 2 spaces, then play passes clockwise.',
             ],
             accentColor: '#f59e0b',
-        },
-        {
+        }),
+        applyLoc('w5', {
             part: 'walkthrough',
             stepNumber: 5,
             icon: '✅',
@@ -89,12 +103,12 @@ export function buildHowToPlayCards(lang = 'en'): GuideCard[] {
                 '✓ Watch rival progress bars and stop the leader from getting all 4 tokens onto their coloured home path!',
             ],
             accentColor: '#10b981',
-        },
+        }),
 
         // ----------------------------------------------------
         // PART 2: 13 Play Guide Cards (Guide 1 to Guide 13)
         // ----------------------------------------------------
-        {
+        applyLoc('g1', {
             part: 'rules',
             guideNumber: 1,
             icon: '🏆',
@@ -103,8 +117,8 @@ export function buildHowToPlayCards(lang = 'en'): GuideCard[] {
             content:
                 'Move all four of your tokens clockwise around the track and onto your coloured home path (or into the centre home). The first player to get all 4 tokens onto their coloured home path wins immediately!',
             accentColor: '#10b981',
-        },
-        {
+        }),
+        applyLoc('g2', {
             part: 'rules',
             guideNumber: 2,
             icon: '🎲🎲',
@@ -113,8 +127,8 @@ export function buildHowToPlayCards(lang = 'en'): GuideCard[] {
             content:
                 'Roll two dice each turn and use them across two tokens or together. When you have only 1 active token out on the board, it may move by the combined sum of both dice and can only enter your coloured home path or centre home using the full combined total while 2 dice remain.',
             accentColor: '#00f0ff',
-        },
-        {
+        }),
+        applyLoc('g3', {
             part: 'rules',
             guideNumber: 3,
             icon: '🎲',
@@ -123,8 +137,8 @@ export function buildHowToPlayCards(lang = 'en'): GuideCard[] {
             content:
                 'A single 6 brings one token out of base onto your start square. Rolling a double 6 (6 and 6) awards an extra turn—with no consecutive limit! A single 6 does not award an extra turn.',
             accentColor: '#eab308',
-        },
-        {
+        }),
+        applyLoc('g4', {
             part: 'rules',
             guideNumber: 4,
             icon: '⚔️',
@@ -133,8 +147,8 @@ export function buildHowToPlayCards(lang = 'en'): GuideCard[] {
             content:
                 'Landing on a non-safe open square captures opponent tokens there when your tokens on that square equal or outnumber theirs (myCount >= otherCount). Every capture sends opponents back to base and grants you an extra turn.',
             accentColor: '#f43f5e',
-        },
-        {
+        }),
+        applyLoc('g5', {
             part: 'rules',
             guideNumber: 5,
             icon: '⭐',
@@ -143,7 +157,7 @@ export function buildHowToPlayCards(lang = 'en'): GuideCard[] {
             content:
                 'A token cannot be captured when it is on a start square, on a star square, on its coloured home path, or in base. Star squares are safe for every player on the board.',
             accentColor: '#ffd84a',
-        },
+        }),
         {
             part: 'rules',
             guideNumber: 6,
@@ -162,7 +176,7 @@ export function buildHowToPlayCards(lang = 'en'): GuideCard[] {
             content: tr(lang, 'guideSacrificeContent'),
             accentColor: '#fb7185',
         },
-        {
+        applyLoc('g8', {
             part: 'rules',
             guideNumber: 8,
             icon: '⚠️',
@@ -171,8 +185,8 @@ export function buildHowToPlayCards(lang = 'en'): GuideCard[] {
             content:
                 'Capturing on non-safe open squares is compulsory. Options include single-die captures, 2-die total captures (final square only), and 2-token pair captures. If a total or pair option exists, 1 capture is required; otherwise you must achieve the most independent single-die captures possible (each die used once). If captures made < required after your move, every token that had an option and did not capture goes back to base. You can adjust Capture Warning mode in Settings.',
             accentColor: '#ef4444',
-        },
-        {
+        }),
+        applyLoc('g9', {
             part: 'rules',
             guideNumber: 9,
             icon: '👑',
@@ -181,8 +195,8 @@ export function buildHowToPlayCards(lang = 'en'): GuideCard[] {
             content:
                 'Reaching the centre home (Gul) requires an exact roll (or the full combined total for a lone active token). When your move reaches the centre, a "Gul or Pass?" prompt lets you enter for an extra turn or pass to stay on the path.',
             accentColor: '#ec4899',
-        },
-        {
+        }),
+        applyLoc('g10', {
             part: 'rules',
             guideNumber: 10,
             icon: '✨7',
@@ -191,8 +205,8 @@ export function buildHowToPlayCards(lang = 'en'): GuideCard[] {
             content:
                 'When zero tokens are on the open track AND at least 1 token is still in base (1–4 in base, remaining tokens on the coloured home path or in centre home), rolling 1+6, 2+5, or 3+4 converts to 6+6 with an extra turn.',
             accentColor: '#ffd84a',
-        },
-        {
+        }),
+        applyLoc('g11', {
             part: 'rules',
             guideNumber: 11,
             icon: '🌟',
@@ -201,8 +215,8 @@ export function buildHowToPlayCards(lang = 'en'): GuideCard[] {
             content:
                 'Before the match, choose two dice numbers (6 and 6 is not allowed). Once per match on any turn, tap the Golden Star to roll those exact two numbers instead of a random roll.',
             accentColor: '#f59e0b',
-        },
-        {
+        }),
+        applyLoc('g12', {
             part: 'rules',
             guideNumber: 12,
             icon: '⏳',
@@ -211,8 +225,8 @@ export function buildHowToPlayCards(lang = 'en'): GuideCard[] {
             content:
                 'Choose an optional turn timer before play: 60s, 90s, 120s, or Off. When the timer is active and reaches 0, the game automatically plays the turn to keep the match moving.',
             accentColor: '#a855f7',
-        },
-        {
+        }),
+        applyLoc('g13', {
             part: 'rules',
             guideNumber: 13,
             icon: '🏁',
@@ -221,7 +235,7 @@ export function buildHowToPlayCards(lang = 'en'): GuideCard[] {
             content:
                 'The match ends immediately as soon as one player gets all 4 tokens onto their coloured home path (or centre home). Remaining players are ranked by their progress percentage.',
             accentColor: '#10b981',
-        },
+        }),
     ];
 }
 

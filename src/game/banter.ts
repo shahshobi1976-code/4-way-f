@@ -413,9 +413,77 @@ export interface SyncedBanterLine extends Line {
     personality: AIPersonality;
 }
 
+const VALID_AI_PERSONALITIES = new Set<AIPersonality>(AI_PERSONALITIES);
+export function normalizeAIPersonality(raw: unknown, fallbackSeat = 0): AIPersonality {
+    if (typeof raw === 'string' && VALID_AI_PERSONALITIES.has(raw as AIPersonality)) {
+        return raw as AIPersonality;
+    }
+    return getPersonalityForSeat(fallbackSeat);
+}
+
+type DialoguePackCacheEntry = Partial<Record<BanterEvent, Line[]>>;
+const dialoguePackCache = new Map<string, DialoguePackCacheEntry>();
+const dialogueLoadingPromises = new Map<string, Promise<void>>();
+
+function normalizeDialogueArray(rawList: unknown): Line[] {
+    if (!Array.isArray(rawList)) return [];
+    const out: Line[] = [];
+    for (const item of rawList) {
+        if (typeof item === 'string') {
+            const t = item.trim();
+            if (t) out.push({ text: t });
+        } else if (item && typeof item === 'object' && typeof (item as { text?: unknown }).text === 'string') {
+            const t = (item as { text: string }).text.trim();
+            if (t) out.push({ text: t });
+        }
+    }
+    return out;
+}
+
+/** Preloads localized AI dialogue lines from /public/dialogues/<lang>.json in browser environments. */
+export async function preloadDialoguePack(lang: string): Promise<void> {
+    if (typeof window === 'undefined' || typeof fetch === 'undefined') return;
+    const cleanLang = (lang || 'en').toLowerCase().trim();
+    if (!cleanLang || dialoguePackCache.has(cleanLang)) return;
+    const existing = dialogueLoadingPromises.get(cleanLang);
+    if (existing) return existing;
+
+    const p = fetch(`/dialogues/${encodeURIComponent(cleanLang)}.json`)
+        .then(async (res) => {
+            if (!res.ok) return;
+            const ct = res.headers.get('content-type') || '';
+            if (ct.includes('text/html')) return;
+            const data = (await res.json()) as Record<string, unknown>;
+            if (!data || typeof data !== 'object') return;
+            const entry: DialoguePackCacheEntry = {};
+            const events: BanterEvent[] = [
+                'turn', 'roll', 'lucky_roll', 'lucky7', 'capture', 'captured',
+                'pawn_home', 'home_stretch', 'penalty', 'win', 'loss', 'banter',
+            ];
+            for (const ev of events) {
+                const normalized = normalizeDialogueArray(data[ev]);
+                if (normalized.length > 0) entry[ev] = normalized;
+            }
+            dialoguePackCache.set(cleanLang, entry);
+        })
+        .catch(() => {
+            // Keep built-in fallback if fetch unavailable
+        })
+        .finally(() => {
+            dialogueLoadingPromises.delete(cleanLang);
+        });
+
+    dialogueLoadingPromises.set(cleanLang, p);
+    return p;
+}
+
 /** Deterministic integer selector for server-synced online banter events */
-export function pickBanterIndex(event: BanterEvent, seatIdx: number): { lineIdx: number; personality: AIPersonality } {
-    const personality = getPersonalityForSeat(seatIdx);
+export function pickBanterIndex(
+    event: BanterEvent,
+    seatIdx: number,
+    personalityOverride?: AIPersonality,
+): { lineIdx: number; personality: AIPersonality } {
+    const personality = normalizeAIPersonality(personalityOverride, seatIdx);
     const pPool = PERSONA_EVENT_EN[personality]?.[event];
     const poolLen = pPool && pPool.length > 0 ? pPool.length : 4;
     return {
@@ -433,14 +501,23 @@ export function pickBanterLine(
     forcedLineIdx?: number,
     personalityOverride?: AIPersonality,
 ): SyncedBanterLine | null {
-    const personality = personalityOverride || getPersonalityForSeat(seatIdx);
+    const personality = normalizeAIPersonality(personalityOverride, seatIdx);
     const cats = EVENT_TO_CATS[event] || ['joke'];
 
+    // Trigger lazy preload for the active language if running in browser
+    void preloadDialoguePack(lang);
+
     const pool: Line[] = [];
+    const cachedPack = dialoguePackCache.get((lang || 'en').toLowerCase());
+    const cachedLines = cachedPack?.[event];
+
     if (lang === 'en') {
         const own = PERSONA_EVENT_EN[personality]?.[event];
         if (own && own.length > 0) {
             for (const s of own) pool.push({ text: s });
+        }
+        if (cachedLines && cachedLines.length > 0) {
+            for (const l of cachedLines) pool.push(l);
         }
         for (const c of cats) {
             const arr = EN[c];
@@ -453,12 +530,26 @@ export function pickBanterLine(
                 arr.forEach((s, idx) => pool.push({ text: s, alt: HI[c]?.[idx] }));
             }
         }
+        if (cachedLines && cachedLines.length > 0) {
+            for (const l of cachedLines) pool.push(l);
+        }
     } else if (lang === 'hi') {
         for (const c of cats) {
             const arr = HI[c];
             if (arr) for (const s of arr) pool.push({ text: s });
         }
+        if (cachedLines && cachedLines.length > 0) {
+            for (const l of cachedLines) pool.push(l);
+        }
     } else {
+        if (cachedLines && cachedLines.length > 0) {
+            // Rotate start offset slightly by personality index so each personality favors distinct localized lines
+            const offset = AI_PERSONALITIES.indexOf(personality);
+            const len = cachedLines.length;
+            for (let k = 0; k < len; k++) {
+                pool.push(cachedLines[(k + Math.max(0, offset)) % len]);
+            }
+        }
         const pack = OTHER[lang];
         if (pack) {
             for (const c of cats) {

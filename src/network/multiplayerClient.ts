@@ -1,5 +1,6 @@
 import { io, Socket } from 'socket.io-client';
 import type { ClientRoomState, RoomPlayer } from '../../server/roomManager';
+import type { AIPersonality } from '../game/banter';
 import { store } from '../state/store';
 import { bus } from '../game/bus';
 import { safeStorage, safeSessionStorage } from '../state/storage';
@@ -72,6 +73,14 @@ function clearStaleLocalSessionCopies() {
     }
 }
 
+export function getInviteCodeFromUrl(): string | null {
+    if (typeof window === 'undefined') return null;
+    const params = new URLSearchParams(window.location.search);
+    const raw = params.get('room') || params.get('invite');
+    const clean = raw ? raw.trim().toUpperCase() : '';
+    return clean || null;
+}
+
 class MultiplayerClient {
     private socket: Socket | null = null;
     public publicPlayerId: string | null = null;
@@ -80,6 +89,7 @@ class MultiplayerClient {
     public myPlayerIndex: number | null = null;
     public roomState: ClientRoomState | null = null;
     public isConnected = false;
+    public initialInviteError: string | null = null;
     public movableTokens: { tok: number; die: number }[] = [];
     public recentChat: ChatBubble | null = null;
     public offlineNotice: string | null = null;
@@ -96,20 +106,22 @@ class MultiplayerClient {
     private toastTimer: ReturnType<typeof setTimeout> | null = null;
     private reactionCleanupTimer: ReturnType<typeof setTimeout> | null = null;
     private whisperBadgeTimer: ReturnType<typeof setTimeout> | null = null;
+    private startupHandled = false;
     public turnSecondsLeft = 30;
 
     constructor() {
         clearStaleLocalSessionCopies();
-        // Tab-isolated session token so multiple tabs in the same browser have independent seats
-        let token = safeSessionStorage.getItem('ludo_session_token');
+        // Tab-isolated sessionStorage credentials so multiple tabs never share an active seat
+        let token = safeSessionStorage.getItem('playerToken') || safeSessionStorage.getItem('ludo_session_token');
         if (!token) {
             token = `tok_${Math.random().toString(36).slice(2, 11)}_${Date.now()}`;
-            safeSessionStorage.setItem('ludo_session_token', token);
         }
+        safeSessionStorage.setItem('playerToken', token);
+        safeSessionStorage.setItem('ludo_session_token', token);
         this.sessionToken = token;
         this.publicPlayerId = safeSessionStorage.getItem('ludo_public_player_id') || null;
-        this.roomCode = safeSessionStorage.getItem('ludo_room_code') || null;
-        const storedSeat = safeSessionStorage.getItem('ludo_seat_index');
+        this.roomCode = safeSessionStorage.getItem('roomCode') || safeSessionStorage.getItem('ludo_room_code') || null;
+        const storedSeat = safeSessionStorage.getItem('seatIndex') ?? safeSessionStorage.getItem('ludo_seat_index');
         if (storedSeat !== null && storedSeat !== '' && Number.isInteger(Number(storedSeat))) {
             this.myPlayerIndex = Number(storedSeat);
         }
@@ -118,10 +130,22 @@ class MultiplayerClient {
         sfx.registerSeatMuteChecker((seatIdx) => this.isSeatMuted(seatIdx));
     }
 
+    private clearRoomSessionCredentials() {
+        this.roomCode = null;
+        this.myPlayerIndex = null;
+        this.roomState = null;
+        safeSessionStorage.removeItem('roomCode');
+        safeSessionStorage.removeItem('seatIndex');
+        safeSessionStorage.removeItem('ludo_room_code');
+        safeSessionStorage.removeItem('ludo_seat_index');
+        clearStaleLocalSessionCopies();
+    }
+
     private persistSessionCredentials(roomCode: string | null, seatIndex: number | null, publicPlayerId?: string | null, sessionToken?: string | null) {
         clearStaleLocalSessionCopies();
         if (sessionToken) {
             this.sessionToken = sessionToken;
+            safeSessionStorage.setItem('playerToken', sessionToken);
             safeSessionStorage.setItem('ludo_session_token', sessionToken);
         }
         if (publicPlayerId) {
@@ -129,11 +153,14 @@ class MultiplayerClient {
             safeSessionStorage.setItem('ludo_public_player_id', publicPlayerId);
         }
         if (roomCode) {
-            this.roomCode = roomCode;
-            safeSessionStorage.setItem('ludo_room_code', roomCode);
+            const clean = String(roomCode).trim().toUpperCase();
+            this.roomCode = clean;
+            safeSessionStorage.setItem('roomCode', clean);
+            safeSessionStorage.setItem('ludo_room_code', clean);
         }
         if (seatIndex !== null && seatIndex !== undefined && seatIndex >= 0 && seatIndex <= 3) {
             this.myPlayerIndex = seatIndex;
+            safeSessionStorage.setItem('seatIndex', String(seatIndex));
             safeSessionStorage.setItem('ludo_seat_index', String(seatIndex));
         }
     }
@@ -147,7 +174,108 @@ class MultiplayerClient {
         );
         if (idx !== -1) {
             this.myPlayerIndex = idx;
+            safeSessionStorage.setItem('seatIndex', String(idx));
             safeSessionStorage.setItem('ludo_seat_index', String(idx));
+        }
+    }
+
+    private waitForSocketConnection(timeoutMs = 4500): Promise<boolean> {
+        if (this.socket?.connected) return Promise.resolve(true);
+        return new Promise((resolve) => {
+            if (!this.socket) return resolve(false);
+            let done = false;
+            const finish = (ok: boolean) => {
+                if (done) return;
+                done = true;
+                clearTimeout(timer);
+                this.socket?.off('connect', onConn);
+                resolve(ok);
+            };
+            const onConn = () => finish(true);
+            const timer = setTimeout(() => finish(!!this.socket?.connected), timeoutMs);
+            this.socket.once('connect', onConn);
+        });
+    }
+
+    private emitReconnect(roomCode: string): Promise<{ ok: boolean; roomState?: ClientRoomState; error?: string }> {
+        return new Promise((resolve) => {
+            if (!this.socket) return resolve({ ok: false, error: 'Socket not initialized' });
+            const clean = String(roomCode || '').trim().toUpperCase();
+            this.socket.emit('ludo:reconnect', { roomCode: clean, token: this.sessionToken }, (res: any) => {
+                if (res?.ok && res.roomState) {
+                    const alreadyPlayingSameRoom =
+                        store.get().phase === 'playing' &&
+                        this.roomCode === res.roomState.code &&
+                        res.roomState.phase === 'playing';
+                    this.roomState = res.roomState;
+                    const resolvedSeat = res.playerIndex !== undefined ? res.playerIndex : this.myPlayerIndex;
+                    this.persistSessionCredentials(res.roomState.code, resolvedSeat, res.publicPlayerId || null, null);
+                    this.matchPlayer(res.roomState);
+                    if (alreadyPlayingSameRoom) {
+                        const diff = res.roomState.turnDeadline > 0
+                            ? Math.max(0, Math.ceil((res.roomState.turnDeadline - Date.now()) / 1000))
+                            : 0;
+                        this.turnSecondsLeft = diff;
+                        store.patch({
+                            turnSecondsLeft: diff,
+                            turnTotalSec: res.roomState.turnTimeSec ?? 90,
+                            timerActive: res.roomState.turnDeadline > 0,
+                        });
+                        bus.onRoomStateSynced?.(res.roomState);
+                    } else if (res.roomState.phase === 'playing' || res.roomState.phase === 'game_over') {
+                        this.syncStoreWithRoom();
+                    } else {
+                        store.patch({ modal: 'multiplayer' });
+                    }
+                    this.notify();
+                    resolve({ ok: true, roomState: res.roomState });
+                } else {
+                    if (res?.error === 'Room not found' || res?.error === 'Invalid session token') {
+                        this.clearRoomSessionCredentials();
+                        this.notify();
+                    }
+                    resolve({ ok: false, error: res?.error || 'Reconnect failed' });
+                }
+            });
+        });
+    }
+
+    public async handleStartupInviteOrReconnect(): Promise<void> {
+        if (this.startupHandled) return;
+        this.startupHandled = true;
+
+        const inviteCode = getInviteCodeFromUrl();
+        if (inviteCode) {
+            await this.waitForSocketConnection();
+            if (this.roomCode === inviteCode && this.sessionToken) {
+                const rec = await this.emitReconnect(inviteCode);
+                if (rec.ok) return;
+            }
+            this.clearRoomSessionCredentials();
+            const savedName = safeStorage.getItem('ludo_player_name') || 'Guest Warrior';
+            const savedAvatar = safeStorage.getItem('ludo_player_avatar') || '⚔️';
+            const res = await this.joinRoom(inviteCode, savedName, savedAvatar);
+            if (res.ok) {
+                this.initialInviteError = null;
+                if (this.roomState?.phase === 'playing' || this.roomState?.phase === 'game_over') {
+                    this.syncStoreWithRoom();
+                } else {
+                    store.patch({ modal: 'multiplayer' });
+                }
+            } else {
+                this.initialInviteError = res.error || 'Could not join room. Check code.';
+                store.patch({ modal: 'multiplayer' });
+            }
+            return;
+        }
+
+        // Otherwise check tab-isolated sessionStorage credentials (roomCode, seatIndex, playerToken)
+        const storedRoom = safeSessionStorage.getItem('roomCode') || safeSessionStorage.getItem('ludo_room_code');
+        const storedToken = safeSessionStorage.getItem('playerToken') || safeSessionStorage.getItem('ludo_session_token');
+        const storedSeat = safeSessionStorage.getItem('seatIndex') ?? safeSessionStorage.getItem('ludo_seat_index');
+        if (storedRoom && storedToken && storedSeat !== null && storedSeat !== '') {
+            await this.waitForSocketConnection();
+            await this.emitReconnect(storedRoom);
         }
     }
 
@@ -165,35 +293,10 @@ class MultiplayerClient {
             this.offlineNotice = null;
             this.notify();
 
-            // Auto-reconnect to room using secret token
-            if (this.roomCode && this.sessionToken) {
-                this.socket?.emit('ludo:reconnect', { roomCode: this.roomCode, token: this.sessionToken }, (res: any) => {
-                    if (res?.ok && res.roomState) {
-                        const alreadyPlayingSameRoom =
-                            store.get().phase === 'playing' &&
-                            this.roomCode === res.roomState.code &&
-                            res.roomState.phase === 'playing';
-                        this.roomState = res.roomState;
-                        const resolvedSeat = res.playerIndex !== undefined ? res.playerIndex : this.myPlayerIndex;
-                        this.persistSessionCredentials(res.roomState.code, resolvedSeat, res.publicPlayerId || null, null);
-                        this.matchPlayer(res.roomState);
-                        if (alreadyPlayingSameRoom) {
-                            const diff = res.roomState.turnDeadline > 0
-                                ? Math.max(0, Math.ceil((res.roomState.turnDeadline - Date.now()) / 1000))
-                                : 0;
-                            this.turnSecondsLeft = diff;
-                            store.patch({
-                                turnSecondsLeft: diff,
-                                turnTotalSec: res.roomState.turnTimeSec ?? 90,
-                                timerActive: res.roomState.turnDeadline > 0,
-                            });
-                            bus.onRoomStateSynced?.(res.roomState);
-                        } else {
-                            this.syncStoreWithRoom();
-                        }
-                        this.notify();
-                    }
-                });
+            // Auto-reconnect to active room when startup has already run or no competing URL invite exists
+            const inviteCode = getInviteCodeFromUrl();
+            if (this.startupHandled && this.roomCode && this.sessionToken && (!inviteCode || inviteCode === this.roomCode)) {
+                void this.emitReconnect(this.roomCode);
             }
         });
 
@@ -593,6 +696,7 @@ class MultiplayerClient {
                     name: cleanName || p.name,
                     avatar: p.avatar,
                     ai: p.isAI,
+                    personality: p.personality || state.botPersonalities?.[i],
                 });
             }
         });
@@ -663,17 +767,18 @@ class MultiplayerClient {
     public joinRoom(roomCode: string, name: string, avatar: string): Promise<{ ok: boolean; error?: string }> {
         return new Promise((resolve) => {
             if (!this.socket) return resolve({ ok: false, error: 'Socket not initialized' });
-            const clean = roomCode.toUpperCase().trim();
+            const clean = String(roomCode || '').trim().toUpperCase();
             this.socket.emit('join_room', { roomCode: clean, name, avatar, sessionToken: this.sessionToken }, (res: any) => {
                 if (res?.ok) {
                     this.roomState = res.roomState;
+                    this.initialInviteError = null;
                     this.chatLog = [];
                     this.activeReactions = {};
                     this.activeVoiceSeat = null;
                     this.activeWhisperBadge = null;
                     this.blockedAutoplayClip = null;
                     this.persistSessionCredentials(
-                        clean,
+                        res.roomCode || clean,
                         res.playerIndex ?? null,
                         res.publicPlayerId || null,
                         res.secretSessionToken || null,
@@ -702,6 +807,11 @@ class MultiplayerClient {
     public toggleFillBots(fillBots: boolean) {
         if (!this.socket || !this.roomCode) return;
         this.socket.emit('toggle_fill_bots', { roomCode: this.roomCode, sessionToken: this.sessionToken, fillBots });
+    }
+
+    public setSeatPersonality(seatIndex: number, personality: AIPersonality) {
+        if (!this.socket || !this.roomCode) return;
+        this.socket.emit('set_seat_personality', { roomCode: this.roomCode, sessionToken: this.sessionToken, seatIndex, personality });
     }
 
     public startGame(): Promise<{ ok: boolean; error?: string }> {
@@ -992,24 +1102,22 @@ class MultiplayerClient {
         if (this.socket && this.roomCode) {
             this.socket.emit('leave_room', { roomCode: this.roomCode, sessionToken: this.sessionToken });
         }
-        this.roomCode = null;
-        this.myPlayerIndex = null;
-        this.roomState = null;
+        this.clearRoomSessionCredentials();
         this.movableTokens = [];
         this.offlineNotice = null;
+        this.initialInviteError = null;
         this.chatLog = [];
         this.activeReactions = {};
         this.activeVoiceSeat = null;
         this.activeWhisperBadge = null;
         this.mutedSeats.clear();
         this.blockedAutoplayClip = null;
-        safeSessionStorage.removeItem('ludo_room_code');
-        safeSessionStorage.removeItem('ludo_seat_index');
-        clearStaleLocalSessionCopies();
-        if (typeof window !== 'undefined' && window.location.search.includes('room=')) {
+        if (typeof window !== 'undefined' && (window.location.search.includes('room=') || window.location.search.includes('invite='))) {
             try {
-                const cleanUrl = window.location.origin + window.location.pathname;
-                window.history.replaceState({}, document.title, cleanUrl);
+                const url = new URL(window.location.href);
+                url.searchParams.delete('room');
+                url.searchParams.delete('invite');
+                window.history.replaceState({}, document.title, url.toString());
             } catch {}
         }
         this.notify();

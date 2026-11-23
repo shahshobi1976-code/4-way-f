@@ -1,6 +1,8 @@
 import { useSyncExternalStore } from 'react';
 import { readDevice, readLocal, write } from './persist';
 import type { NameplateBound } from '../game/bus';
+import type { AIPersonality } from '../game/banter';
+import type { BoardThemeId, DiceStyleId } from '../game/themes';
 
 export type Phase = 'loading' | 'menu' | 'setup' | 'playing';
 export type ModalId =
@@ -25,8 +27,10 @@ export interface Settings {
     sound: boolean;
     music: boolean;
     aiMute: boolean; // Mute AI talking/speech only
-    instrument: number; // 0..9
-    bg: number; // 0..9
+    bgmTrack: string; // bundled MP3 soundtrack id
+    bg: number; // 0..9 background arena
+    boardTheme: BoardThemeId;
+    diceStyle: DiceStyleId;
     lang: string;
     songName: string | null;
     timerEnabled: boolean; // Turn timer optional
@@ -39,6 +43,7 @@ export interface PlayerCfg {
     ai: boolean;
     avatar: string;
     wish: [number, number] | null;
+    personality?: AIPersonality;
 }
 
 export interface Popup {
@@ -101,8 +106,10 @@ const DEFAULT_SETTINGS: Settings = {
     sound: true,
     music: true,
     aiMute: false,
-    instrument: 0,
+    bgmTrack: 'afro-reggaeton',
     bg: 0,
+    boardTheme: 'classic',
+    diceStyle: 'classic',
     lang: 'en',
     songName: null,
     timerEnabled: true,
@@ -120,7 +127,15 @@ export function shouldShowCaptureWarning(mode: CaptureWarningMode | undefined, m
 function loadSettings(): Settings {
     try {
         const raw = readLocal();
-        if (raw) return { ...DEFAULT_SETTINGS, ...JSON.parse(raw), songName: null };
+        if (raw) {
+            const parsed = JSON.parse(raw);
+            return {
+                ...DEFAULT_SETTINGS,
+                ...parsed,
+                bgmTrack: typeof parsed.bgmTrack === 'string' && parsed.bgmTrack ? parsed.bgmTrack : DEFAULT_SETTINGS.bgmTrack,
+                songName: null,
+            };
+        }
     } catch {
         /* unreadable/corrupt save: use defaults */
     }
@@ -128,10 +143,10 @@ function loadSettings(): Settings {
 }
 
 export const DEFAULT_PLAYERS: PlayerCfg[] = [
-    { name: 'Shahbaz', ai: false, avatar: '🤴', wish: null },
-    { name: 'Mughal', ai: true, avatar: '🦁', wish: null },
-    { name: 'Zoi', ai: true, avatar: '🌟', wish: null },
-    { name: 'Kajal', ai: true, avatar: '💎', wish: null },
+    { name: 'Shahbaz', ai: false, avatar: '🤴', wish: null, personality: 'Strategist' },
+    { name: 'Mughal', ai: true, avatar: '🦁', wish: null, personality: 'Confidante' },
+    { name: 'Zoi', ai: true, avatar: '🌟', wish: null, personality: 'Rival' },
+    { name: 'Kajal', ai: true, avatar: '💎', wish: null, personality: 'Rideordie' },
 ];
 
 let state: AppState = {

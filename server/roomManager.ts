@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,14 +24,20 @@ import {
 } from '../src/game/rules';
 import {
     pickBanterIndex,
+    AI_PERSONALITIES,
+    getPersonalityForSeat,
+    normalizeAIPersonality,
     HIGH_PRIORITY_BANTER_EVENTS,
     BANTER_ROUTINE_COOLDOWN_MS,
     BANTER_HIGH_PRIORITY_COOLDOWN_MS,
+    type AIPersonality,
     type BanterEvent,
 } from '../src/game/banter';
 import {
     generateGuestIdentity,
+    getRecordsConfig,
     hashToken,
+    maskProfanity,
     sanitizeDisplayName,
     recordMatchEnded,
     type PlayerRecordData,
@@ -54,6 +61,7 @@ export interface RoomPlayer {
     connected: boolean;
     disconnectTime?: number | null;
     isAI: boolean;
+    personality?: AIPersonality;
     wish?: [number, number] | null;
     wishUsed?: boolean;
     capturesMade: number;
@@ -73,6 +81,7 @@ export interface ClientRoomPlayer {
     connected: boolean;
     disconnectTime?: number | null;
     isAI: boolean;
+    personality?: AIPersonality;
     wish?: [number, number] | null;
     capturesMade: number;
     timesCaptured: number;
@@ -85,6 +94,7 @@ export interface ClientRoomState {
     phase: 'lobby' | 'playing' | 'game_over';
     fillBots: boolean;
     players: (ClientRoomPlayer | null)[];
+    botPersonalities?: AIPersonality[];
     tokens: number[][];
     currentTurn: number;
     turnDeadline: number;
@@ -108,6 +118,7 @@ export interface Room {
     secretWhispers: boolean;
     messageCount: number;
     players: (RoomPlayer | null)[];
+    botPersonalities: AIPersonality[];
     tokens: Tokens;
     currentTurn: number;
     turnDeadline: number;
@@ -154,8 +165,8 @@ function calculateProgress(tokens: Tokens, p: number): number {
 }
 
 const MAX_ROOMS_IN_MEMORY = 500;
-const MAX_ROOM_CREATES_PER_5MIN = 12;
-const MAX_ROOM_JOINS_PER_MIN = 30;
+const MAX_ROOM_CREATES_PER_MIN = 6;
+const MAX_ROOM_JOINS_PER_MIN = 12;
 const SNAPSHOT_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 
 class RoomManager {
@@ -205,7 +216,8 @@ class RoomManager {
         if (!isHigh && now - prev < minGap) return;
         if (isHigh && now - prev < minGap) return;
         this.aiBanterCooldowns.set(key, now);
-        const { lineIdx, personality } = pickBanterIndex(event, seatIndex);
+        const seatPersonality = player.personality || room.botPersonalities?.[seatIndex] || getPersonalityForSeat(seatIndex);
+        const { lineIdx, personality } = pickBanterIndex(event, seatIndex, seatPersonality);
         this.broadcast(room.code, 'ai_banter', {
             seatIndex,
             event,
@@ -227,6 +239,7 @@ class RoomManager {
             secretWhispers: room.secretWhispers,
             messageCount: room.messageCount,
             players: room.players,
+            botPersonalities: room.botPersonalities,
             tokens: room.tokens,
             currentTurn: room.currentTurn,
             turnDeadline: room.turnDeadline,
@@ -312,6 +325,9 @@ class RoomManager {
                     secretWhispers: !!item.secretWhispers,
                     messageCount: Number(item.messageCount) || 0,
                     players,
+                    botPersonalities: Array.isArray(item.botPersonalities) && item.botPersonalities.length === 4
+                        ? item.botPersonalities.map((bp: unknown, sIdx: number) => normalizeAIPersonality(bp, sIdx))
+                        : AI_PERSONALITIES.slice(),
                     tokens: item.tokens || newTokens(),
                     currentTurn: item.currentTurn ?? 0,
                     turnDeadline: 0,
@@ -367,8 +383,14 @@ class RoomManager {
         }
     }
 
+    private normalizeCode(code: unknown): string {
+        return String(code || '').trim().toUpperCase();
+    }
+
     public getRoom(code: string): Room | undefined {
-        return this.rooms.get(code.toUpperCase().trim());
+        const clean = this.normalizeCode(code);
+        if (!clean) return undefined;
+        return this.rooms.get(clean);
     }
 
     public getClientRoomState(room: Room): ClientRoomState {
@@ -377,7 +399,7 @@ class RoomManager {
             hostId: room.hostId,
             phase: room.phase,
             fillBots: room.fillBots,
-            players: room.players.map((p) =>
+            players: room.players.map((p, seatIdx) =>
                 p
                     ? {
                           id: p.publicPlayerId,
@@ -391,6 +413,7 @@ class RoomManager {
                           connected: p.connected,
                           disconnectTime: p.disconnectTime,
                           isAI: p.isAI,
+                          personality: p.personality || room.botPersonalities?.[seatIdx] || getPersonalityForSeat(seatIdx),
                           wish: p.wish || null,
                           capturesMade: p.capturesMade || 0,
                           timesCaptured: p.timesCaptured || 0,
@@ -398,6 +421,7 @@ class RoomManager {
                       }
                     : null,
             ),
+            botPersonalities: room.botPersonalities || AI_PERSONALITIES.slice(),
             tokens: room.tokens,
             currentTurn: room.currentTurn,
             turnDeadline: room.turnDeadline,
@@ -423,7 +447,7 @@ class RoomManager {
     }
 
     public setPlayerWish(code: string, sessionToken: string, wish: [number, number] | null): boolean {
-        const room = this.rooms.get(code);
+        const room = this.getRoom(code);
         if (!room) return false;
         const found = this.findPlayerByToken(room, sessionToken);
         if (!found) return false;
@@ -442,13 +466,16 @@ class RoomManager {
         return true;
     }
 
-    private generateCode(): string {
-        const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-        let code = '';
-        for (let i = 0; i < 4; i++) {
-            code += chars.charAt(Math.floor(Math.random() * chars.length));
+    public generateRoomCode(): string {
+        const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+        for (let attempt = 0; attempt < 20; attempt++) {
+            let code = '';
+            for (let i = 0; i < 6; i++) {
+                code += alphabet[crypto.randomInt(0, alphabet.length)];
+            }
+            if (!this.rooms.has(code)) return code;
         }
-        return this.rooms.has(code) ? this.generateCode() : code;
+        return crypto.randomBytes(3).toString('hex').toUpperCase();
     }
 
     public getTurnLimitMs(room: Room): number {
@@ -456,7 +483,7 @@ class RoomManager {
     }
 
     public setTurnTime(code: string, sessionToken: string, turnTimeSec: number): boolean {
-        const room = this.rooms.get(code);
+        const room = this.getRoom(code);
         if (!room || room.phase !== 'lobby') return false;
         const found = this.findPlayerByToken(room, sessionToken);
         if (!found || found.player.publicPlayerId !== room.hostId) return false;
@@ -481,7 +508,7 @@ class RoomManager {
         secretSessionToken?: string;
         error?: string;
     } {
-        if (!this.checkSlidingRateLimit(this.roomCreateWindows, ip, MAX_ROOM_CREATES_PER_5MIN, 5 * 60 * 1000)) {
+        if (!this.checkSlidingRateLimit(this.roomCreateWindows, ip, MAX_ROOM_CREATES_PER_MIN, 60 * 1000)) {
             return { ok: false, error: 'Too many rooms created from this IP. Please wait a moment.' };
         }
         if (this.rooms.size >= MAX_ROOMS_IN_MEMORY) {
@@ -502,7 +529,7 @@ class RoomManager {
             return { ok: false, error: e.message };
         }
 
-        const code = this.generateCode();
+        const code = this.generateRoomCode();
         const numSeats = 4;
         const sanitized = sanitizeDisplayName(name || 'Host', identity.publicPlayerId);
 
@@ -536,6 +563,7 @@ class RoomManager {
             secretWhispers: false,
             messageCount: 0,
             players,
+            botPersonalities: AI_PERSONALITIES.slice(),
             tokens: newTokens(),
             currentTurn: 0,
             turnDeadline: 0,
@@ -573,6 +601,7 @@ class RoomManager {
         ip = '127.0.0.1',
     ): {
         ok: boolean;
+        roomCode?: string;
         playerIndex?: number;
         publicPlayerId?: string;
         secretSessionToken?: string;
@@ -581,7 +610,9 @@ class RoomManager {
         if (!this.checkSlidingRateLimit(this.roomJoinWindows, ip, MAX_ROOM_JOINS_PER_MIN, 60 * 1000)) {
             return { ok: false, error: 'Too many join attempts. Please slow down.' };
         }
-        const room = this.rooms.get(code);
+        const cleanCode = this.normalizeCode(code);
+        if (!cleanCode) return { ok: false, error: 'Invalid room code' };
+        const room = this.rooms.get(cleanCode);
         if (!room) return { ok: false, error: 'Room not found' };
 
         // Check if player is rejoining by token hash
@@ -603,6 +634,7 @@ class RoomManager {
                 this.broadcast(room.code, 'room_updated', this.getClientRoomState(room));
                 return {
                     ok: true,
+                    roomCode: room.code,
                     playerIndex: found.index,
                     publicPlayerId: player.publicPlayerId,
                     secretSessionToken: sessionToken,
@@ -657,6 +689,7 @@ class RoomManager {
         this.broadcast(room.code, 'room_updated', this.getClientRoomState(room));
         return {
             ok: true,
+            roomCode: room.code,
             playerIndex: openIdx,
             publicPlayerId: identity.publicPlayerId,
             secretSessionToken: identity.secretSessionToken,
@@ -667,8 +700,10 @@ class RoomManager {
         code: string,
         secretSessionToken: string,
         socketId: string,
-    ): { ok: boolean; playerIndex?: number; publicPlayerId?: string; error?: string } {
-        const room = this.rooms.get(code);
+    ): { ok: boolean; roomCode?: string; playerIndex?: number; publicPlayerId?: string; error?: string } {
+        const cleanCode = this.normalizeCode(code);
+        if (!cleanCode) return { ok: false, error: 'Invalid room code' };
+        const room = this.rooms.get(cleanCode);
         if (!room) return { ok: false, error: 'Room not found' };
         const found = this.findPlayerByToken(room, secretSessionToken);
         if (!found) return { ok: false, error: 'Invalid session token' };
@@ -687,13 +722,14 @@ class RoomManager {
         this.broadcast(room.code, 'room_updated', this.getClientRoomState(room));
         return {
             ok: true,
+            roomCode: room.code,
             playerIndex: found.index,
             publicPlayerId: player.publicPlayerId,
         };
     }
 
     public toggleReady(code: string, sessionToken: string): boolean {
-        const room = this.rooms.get(code);
+        const room = this.getRoom(code);
         if (!room || room.phase !== 'lobby') return false;
         const found = this.findPlayerByToken(room, sessionToken);
         if (!found) return false;
@@ -704,7 +740,7 @@ class RoomManager {
     }
 
     public toggleFillBots(code: string, sessionToken: string, fillBots: boolean): boolean {
-        const room = this.rooms.get(code);
+        const room = this.getRoom(code);
         if (!room || room.phase !== 'lobby') return false;
         const found = this.findPlayerByToken(room, sessionToken);
         if (!found || found.player.publicPlayerId !== room.hostId) return false;
@@ -713,8 +749,28 @@ class RoomManager {
         return true;
     }
 
+    public setSeatPersonality(code: string, sessionToken: string, seatIndex: number, personality: AIPersonality): boolean {
+        const room = this.getRoom(code);
+        if (!room || room.phase !== 'lobby') return false;
+        if (!Number.isInteger(seatIndex) || seatIndex < 0 || seatIndex > 3) return false;
+        const found = this.findPlayerByToken(room, sessionToken);
+        if (!found || found.player.publicPlayerId !== room.hostId) return false;
+        const clean = normalizeAIPersonality(personality, seatIndex);
+        if (!Array.isArray(room.botPersonalities) || room.botPersonalities.length !== 4) {
+            room.botPersonalities = AI_PERSONALITIES.slice();
+        }
+        room.botPersonalities[seatIndex] = clean;
+        const seatPlayer = room.players[seatIndex];
+        if (seatPlayer && seatPlayer.isAI) {
+            seatPlayer.personality = clean;
+        }
+        this.broadcast(room.code, 'room_updated', this.getClientRoomState(room));
+        this.scheduleSnapshotSave();
+        return true;
+    }
+
     public startGame(code: string, sessionToken: string): { ok: boolean; error?: string } {
-        const room = this.rooms.get(code);
+        const room = this.getRoom(code);
         if (!room) return { ok: false, error: 'Room not found' };
         const found = this.findPlayerByToken(room, sessionToken);
         if (!found || found.player.publicPlayerId !== room.hostId) {
@@ -741,6 +797,7 @@ class RoomManager {
                     isHost: false,
                     connected: true,
                     isAI: true,
+                    personality: room.botPersonalities?.[i] || getPersonalityForSeat(i),
                     capturesMade: 0,
                     timesCaptured: 0,
                     penalties: 0,
@@ -1396,11 +1453,12 @@ class RoomManager {
         if (!found) return false;
         const player = found.player;
 
+        const filteredText = maskProfanity((text || '').replace(/[<>]/g, '').trim().slice(0, 120));
         this.broadcast(room.code, 'chat_received', {
             p: found.index,
             name: player.name,
             avatar: player.avatar,
-            text: (text || '').slice(0, 120),
+            text: filteredText,
             emoji,
             time: Date.now(),
         });
@@ -1540,28 +1598,33 @@ class RoomManager {
             this.emitAiBanter(room, runnerUpAi.seat, 'loss');
         }
 
-        // Non-blocking async record
+        // Non-blocking async record (only persist ranked matches that meet human & duration thresholds)
         let recordRes: any = { ok: true };
-        try {
-            recordRes = await recordMatchEnded({
-                roomCode: room.code,
-                startedAt: room.startedAt,
-                endedAt: room.endedAt,
-                callerSeat: 0,
-                roomStarted: true,
-                alreadyEnded: false,
-                players: playerData,
-                results,
-                ip,
-            });
-        } catch (e: any) {
-            console.warn('[Records] Non-blocking match record note:', e?.message);
+        const recordsCfg = getRecordsConfig();
+        const humanCount = playerData.filter((p) => !p.isAI).length;
+        const durationSec = Math.floor((room.endedAt - room.startedAt) / 1000);
+        if (humanCount >= recordsCfg.minHumanPlayers && durationSec >= recordsCfg.matchDurationMinSeconds) {
+            try {
+                recordRes = await recordMatchEnded({
+                    roomCode: room.code,
+                    startedAt: room.startedAt,
+                    endedAt: room.endedAt,
+                    callerSeat: 0,
+                    roomStarted: true,
+                    alreadyEnded: false,
+                    players: playerData,
+                    results,
+                    ip,
+                });
+            } catch (e: any) {
+                console.warn('[Records] Non-blocking match record note:', e?.message);
+            }
         }
         return { ok: true, matchId: recordRes?.matchId };
     }
 
     public leaveRoom(code: string, sessionToken: string): boolean {
-        const room = this.rooms.get(code);
+        const room = this.getRoom(code);
         if (!room) return false;
         const found = this.findPlayerByToken(room, sessionToken);
         if (!found) return false;

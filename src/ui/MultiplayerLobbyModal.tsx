@@ -4,6 +4,7 @@ import { Modal } from './kit';
 import { safeStorage } from '../state/storage';
 import { store, useStore } from '../state/store';
 import { UniversalAudioCapture, requestMicrophonePermission, type AudioCaptureResult } from '../game/audioCapture';
+import { AI_PERSONALITIES, type AIPersonality } from '../game/banter';
 
 const AVATARS = ['👑', '🦁', '⚡', '💎', '🦅', '⚔️', '🔥', '🐉', '🎯', '🛡️'];
 
@@ -45,17 +46,17 @@ interface Props {
 
 function extractRoomCode(raw: string): string {
     const text = (raw || '').trim();
-    if (text.includes('room=')) {
+    if (text.includes('room=') || text.includes('invite=')) {
         try {
             const u = new URL(text);
-            const r = u.searchParams.get('room');
-            if (r) return r.toUpperCase().trim().slice(0, 8);
+            const r = u.searchParams.get('room') || u.searchParams.get('invite');
+            if (r) return r.trim().toUpperCase().slice(0, 8);
         } catch {
-            const m = text.match(/room=([a-zA-Z0-9]+)/);
-            if (m && m[1]) return m[1].toUpperCase().slice(0, 8);
+            const m = text.match(/(?:room|invite)=([a-zA-Z0-9]+)/);
+            if (m && m[1]) return m[1].trim().toUpperCase().slice(0, 8);
         }
     }
-    return text.replace(/[^a-zA-Z0-9]/g, '').toUpperCase().slice(0, 8);
+    return text.replace(/[^a-zA-Z0-9]/g, '').trim().toUpperCase().slice(0, 8);
 }
 
 function LuckyWishPicker({
@@ -301,7 +302,11 @@ export function MultiplayerLobbyModal({ onClose, initialRoomCode }: Props) {
     const [copied, setCopied] = useState(false);
     const [codeCopied, setCodeCopied] = useState(false);
     const [pastedNotice, setPastedNotice] = useState(false);
-    const [errorMsg, setErrorMsg] = useState<string | null>(null);
+    const [errorMsg, setErrorMsg] = useState<string | null>(() => {
+        const err = multiplayerClient.initialInviteError;
+        multiplayerClient.initialInviteError = null;
+        return err || null;
+    });
     const [loading, setLoading] = useState(false);
 
     // Wish numbers state for current player (Host or Guest)
@@ -368,7 +373,7 @@ export function MultiplayerLobbyModal({ onClose, initialRoomCode }: Props) {
     };
 
     const handleJoinRoom = async (codeToUse?: string) => {
-        const code = (codeToUse || joinCode).trim();
+        const code = (codeToUse || joinCode).trim().toUpperCase();
         if (!code) {
             setErrorMsg('Please enter or paste a valid room code.');
             return;
@@ -428,9 +433,16 @@ export function MultiplayerLobbyModal({ onClose, initialRoomCode }: Props) {
         });
     };
 
+    const buildInviteUrl = (code: string) => {
+        const url = new URL(window.location.href);
+        url.searchParams.delete('invite');
+        url.searchParams.set('room', code);
+        return url.toString();
+    };
+
     const handleCopyInvite = () => {
         if (!roomCode) return;
-        const link = `${window.location.origin}${window.location.pathname}?room=${roomCode}`;
+        const link = buildInviteUrl(roomCode);
         void navigator.clipboard?.writeText(link).then(() => {
             setCopied(true);
             setTimeout(() => setCopied(false), 2500);
@@ -439,7 +451,7 @@ export function MultiplayerLobbyModal({ onClose, initialRoomCode }: Props) {
 
     const handleShare = () => {
         if (!roomCode) return;
-        const link = `${window.location.origin}${window.location.pathname}?room=${roomCode}`;
+        const link = buildInviteUrl(roomCode);
         if (navigator.share) {
             void navigator.share({
                 title: 'Ludo Dethroned Match Invite',
@@ -768,7 +780,21 @@ export function MultiplayerLobbyModal({ onClose, initialRoomCode }: Props) {
                                             type="text"
                                             maxLength={8}
                                             value={joinCode}
-                                            onChange={(e) => setJoinCode(extractRoomCode(e.target.value))}
+                                            onChange={(e) => {
+                                                const v = e.target.value;
+                                                setJoinCode(v.includes('room=') || v.includes('invite=') ? extractRoomCode(v) : v.toUpperCase());
+                                            }}
+                                            onPaste={(e) => {
+                                                const pasted = e.clipboardData?.getData('text');
+                                                if (pasted) {
+                                                    e.preventDefault();
+                                                    setJoinCode(
+                                                        pasted.includes('room=') || pasted.includes('invite=')
+                                                            ? extractRoomCode(pasted)
+                                                            : pasted.trim().toUpperCase().slice(0, 8),
+                                                    );
+                                                }
+                                            }}
                                             onKeyDown={(e) => e.key === 'Enter' && handleJoinRoom()}
                                             placeholder="ROOM CODE"
                                             className="flex-1 min-w-0 bg-slate-950 border border-cyan-500/40 rounded-lg px-2.5 py-1 text-center font-mono font-black text-sm tracking-widest text-cyan-300 uppercase outline-none focus:border-cyan-300 placeholder:text-slate-600"
@@ -843,14 +869,14 @@ export function MultiplayerLobbyModal({ onClose, initialRoomCode }: Props) {
             ) : (
                 /* IN-ROOM TOURNAMENT LOBBY VIEW */
                 <div className="flex flex-col gap-1.5 text-slate-100">
-                    {/* Slim Arena Code Banner with Copy and Share (No crown icon) */}
-                    <div className="flex items-center justify-between gap-1.5 px-2 py-1 bg-gradient-to-r from-slate-950 via-slate-900 to-slate-950 rounded-lg border border-amber-500/30 shadow">
+                    {/* Slim Arena Code Banner with CODE: {roomCode}, COPY LINK, Code, and Share */}
+                    <div className="flex items-center justify-between gap-1.5 px-2 py-1.5 bg-gradient-to-r from-slate-950 via-slate-900 to-slate-950 rounded-lg border border-amber-500/30 shadow">
                         <div className="min-w-0">
                             <div className="text-[8px] uppercase tracking-wider text-amber-400/80 font-black">
-                                Arena Code ({effectiveMax} Players)
+                                Arena Lobby ({effectiveMax} Players)
                             </div>
-                            <div className="text-base font-black tracking-widest font-mono text-amber-300 leading-none">
-                                {roomCode}
+                            <div className="text-sm sm:text-base font-black tracking-widest font-mono text-amber-300 leading-none">
+                                CODE: {roomCode}
                             </div>
                         </div>
 
@@ -859,25 +885,25 @@ export function MultiplayerLobbyModal({ onClose, initialRoomCode }: Props) {
                             <button
                                 type="button"
                                 onClick={handleCopyCodeOnly}
-                                className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 border border-slate-600 rounded-md text-[10px] font-black text-white transition-all flex items-center gap-1 active:scale-95 shadow cursor-pointer"
+                                className="px-2 py-1 bg-slate-800 hover:bg-slate-700 border border-slate-600 rounded-md text-[10px] font-black text-white transition-all flex items-center gap-1 active:scale-95 shadow cursor-pointer"
                                 title="Copy room code"
                             >
                                 <span>{codeCopied ? '✓' : '📋'}</span>
-                                <span className="hidden sm:inline">{codeCopied ? 'Copied' : 'Code'}</span>
+                                <span className="hidden sm:inline">{codeCopied ? 'COPIED' : 'CODE'}</span>
                             </button>
                             <button
                                 type="button"
                                 onClick={handleCopyInvite}
-                                className="px-2 py-0.5 bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-400/50 rounded-md text-[10px] font-black text-cyan-200 transition-all flex items-center gap-1 active:scale-95 shadow cursor-pointer"
+                                className="px-2 py-1 bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-400/50 rounded-md text-[10px] font-black text-cyan-200 transition-all flex items-center gap-1 active:scale-95 shadow cursor-pointer"
                                 title="Copy invite link"
                             >
                                 <span>{copied ? '✓' : '🔗'}</span>
-                                <span className="hidden sm:inline">{copied ? 'Link Copied' : 'Link'}</span>
+                                <span>{copied ? 'COPIED' : 'COPY LINK'}</span>
                             </button>
                             <button
                                 type="button"
                                 onClick={handleShare}
-                                className="px-1.5 py-0.5 bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-400/50 rounded-md text-[10px] font-black text-emerald-200 transition-all flex items-center gap-1 active:scale-95 shadow cursor-pointer"
+                                className="px-1.5 py-1 bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-400/50 rounded-md text-[10px] font-black text-emerald-200 transition-all flex items-center gap-1 active:scale-95 shadow cursor-pointer"
                                 title="Share"
                             >
                                 <span>📤</span>
@@ -973,14 +999,38 @@ export function MultiplayerLobbyModal({ onClose, initialRoomCode }: Props) {
                                         </div>
                                     </div>
 
-                                    {/* Wish Number display for this player seat */}
-                                    <div className="flex items-center justify-between pt-0.5 border-t border-white/5 text-[9px]">
-                                        <span className="text-amber-300/80 font-bold flex items-center gap-0.5">
-                                            <span>✨ Wish:</span>
-                                        </span>
-                                        <span className="font-mono font-black text-amber-200">
-                                            {p?.wish ? `(${p.wish[0]}, ${p.wish[1]})` : isMe ? `(${wishDieA}, ${wishDieB})` : '(Set)'}
-                                        </span>
+                                    {/* Wish Number / Bot Personality display for this player seat */}
+                                    <div className="flex items-center justify-between gap-1 pt-0.5 border-t border-white/5 text-[9px]">
+                                        {(!p || p.isAI) ? (
+                                            <>
+                                                <span className="text-cyan-300/80 font-bold shrink-0">🤖 Persona:</span>
+                                                {isHost ? (
+                                                    <select
+                                                        aria-label={`Seat ${slotIdx + 1} AI Personality`}
+                                                        value={p?.personality || roomState.botPersonalities?.[slotIdx] || AI_PERSONALITIES[slotIdx % 4]}
+                                                        onChange={(e) => multiplayerClient.setSeatPersonality(slotIdx, e.target.value as AIPersonality)}
+                                                        className="rounded border border-cyan-400/40 bg-slate-950 text-cyan-200 px-1 py-0 text-[9px] font-bold outline-none cursor-pointer"
+                                                    >
+                                                        {AI_PERSONALITIES.map((per) => (
+                                                            <option key={per} value={per}>{per}</option>
+                                                        ))}
+                                                    </select>
+                                                ) : (
+                                                    <span className="font-bold text-cyan-200 truncate">
+                                                        {p?.personality || roomState.botPersonalities?.[slotIdx] || AI_PERSONALITIES[slotIdx % 4]}
+                                                    </span>
+                                                )}
+                                            </>
+                                        ) : (
+                                            <>
+                                                <span className="text-amber-300/80 font-bold flex items-center gap-0.5">
+                                                    <span>✨ Wish:</span>
+                                                </span>
+                                                <span className="font-mono font-black text-amber-200">
+                                                    {p?.wish ? `(${p.wish[0]}, ${p.wish[1]})` : isMe ? `(${wishDieA}, ${wishDieB})` : '(Set)'}
+                                                </span>
+                                            </>
+                                        )}
                                     </div>
                                 </div>
                             );

@@ -25,6 +25,10 @@ let config: RecordsConfig = {
     maxGuestIdsPerIpPer5Min: 15,
 };
 
+export function getRecordsConfig(): RecordsConfig {
+    return config;
+}
+
 try {
     const configPath = path.resolve(__dirname, '../supabase/game4/records-config.json');
     if (fs.existsSync(configPath)) {
@@ -36,9 +40,19 @@ try {
 
 let profanityWords: string[] = [];
 try {
-    const profanityPath = path.resolve(__dirname, '../supabase/game4/profanity-words.json');
-    if (fs.existsSync(profanityPath)) {
-        profanityWords = JSON.parse(fs.readFileSync(profanityPath, 'utf8'));
+    const candidatePaths = [
+        path.resolve(__dirname, '../profanity-words.json'),
+        path.resolve(__dirname, '../supabase/game4/profanity-words.json'),
+    ];
+    for (const profanityPath of candidatePaths) {
+        if (fs.existsSync(profanityPath)) {
+            const parsed = JSON.parse(fs.readFileSync(profanityPath, 'utf8'));
+            const rawList = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.words) ? parsed.words : [];
+            profanityWords = rawList
+                .filter((w: unknown): w is string => typeof w === 'string' && w.trim().length > 0)
+                .map((w: string) => w.trim());
+            if (profanityWords.length > 0) break;
+        }
     }
 } catch (e: any) {
     console.warn('[Records] Using empty profanity list:', e.message);
@@ -117,6 +131,25 @@ export function hashToken(token: string): string {
 
 const RESERVED_NAMES = new Set(['admin', 'root', 'system', 'host', 'moderator']);
 
+export function maskProfanity(rawText: string): string {
+    let text = String(rawText || '');
+    if (!text || profanityWords.length === 0) return text;
+    for (const word of profanityWords) {
+        if (!word) continue;
+        try {
+            const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const isAscii = /^[a-z0-9_.-]+$/i.test(word);
+            const regex = isAscii
+                ? new RegExp(`\\b${escaped}\\b`, 'gi')
+                : new RegExp(`(?<!\\p{L})${escaped}(?!\\p{L})`, 'giu');
+            text = text.replace(regex, '***');
+        } catch {
+            // Skip malformed pattern
+        }
+    }
+    return text;
+}
+
 export function sanitizeDisplayName(rawName: string, _publicPlayerId: string): string {
     let name = String(rawName || 'Player').trim();
     if (name.length > 24) name = name.slice(0, 24);
@@ -126,11 +159,7 @@ export function sanitizeDisplayName(rawName: string, _publicPlayerId: string): s
         name = 'Player';
     }
 
-    for (const word of profanityWords) {
-        if (!word) continue;
-        const regex = new RegExp(`\\b${word.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}\\b`, 'gi');
-        name = name.replace(regex, '***');
-    }
+    name = maskProfanity(name);
 
     return name;
 }

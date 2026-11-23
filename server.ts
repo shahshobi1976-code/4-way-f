@@ -6,7 +6,8 @@ import express from 'express';
 import { Server as SocketIOServer } from 'socket.io';
 import { createServer as createViteServer } from 'vite';
 import { roomManager } from './server/roomManager';
-import { fetchLeaderboard } from './server/supabaseRecords';
+import { fetchLeaderboard, maskProfanity } from './server/supabaseRecords';
+import type { AIPersonality } from './src/game/banter';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -157,7 +158,7 @@ app.get('/api/health', (_req, res) => {
 });
 
 app.get('/api/rooms/:code', (req, res) => {
-    const code = String(req.params.code || '').toUpperCase().trim();
+    const code = String(req.params?.code || '').trim().toUpperCase();
     const room = roomManager.getRoom(code);
     if (!room) {
         return res.status(404).json({ ok: false, error: 'Room not found' });
@@ -214,7 +215,7 @@ io.on('connection', (socket) => {
     socket.on('join_room', (data: { roomCode: string; name: string; avatar: string; sessionToken?: string }, callback) => {
         try {
             const { roomCode, name, avatar, sessionToken } = data || {};
-            const cleanCode = (roomCode || '').toUpperCase().trim();
+            const cleanCode = String(roomCode || '').trim().toUpperCase();
             const res = roomManager.joinRoom(cleanCode, sessionToken, name, avatar, socket.id, clientIp);
             if (res.ok) {
                 socket.join(cleanCode);
@@ -241,7 +242,7 @@ io.on('connection', (socket) => {
 
     socket.on('ludo:reconnect', (data: { roomCode: string; token: string }, callback) => {
         const { roomCode, token } = data || {};
-        const cleanCode = (roomCode || '').toUpperCase().trim();
+        const cleanCode = String(roomCode || '').trim().toUpperCase();
         const res = roomManager.reconnectPlayer(cleanCode, token, socket.id);
         if (res.ok) {
             socket.join(cleanCode);
@@ -285,6 +286,12 @@ io.on('connection', (socket) => {
         if (typeof callback === 'function') callback({ ok });
     });
 
+    socket.on('set_seat_personality', (data: { roomCode: string; sessionToken: string; seatIndex: number; personality: AIPersonality }, callback) => {
+        const { roomCode, sessionToken, seatIndex, personality } = data || {};
+        const ok = roomManager.setSeatPersonality(roomCode, sessionToken, seatIndex, personality);
+        if (typeof callback === 'function') callback({ ok });
+    });
+
     socket.on('start_game', (data: { roomCode: string; sessionToken: string }, callback) => {
         const { roomCode, sessionToken } = data || {};
         const res = roomManager.startGame(roomCode, sessionToken);
@@ -323,7 +330,7 @@ io.on('connection', (socket) => {
                 if (typeof callback === 'function') callback({ success: false, error: 'Slow down a moment', retryAfterMs: waitMs });
                 return;
             }
-            const cleanText = String(text || '').replace(/[<>]/g, '').trim().slice(0, 120);
+            const cleanText = maskProfanity(String(text || '').replace(/[<>]/g, '').trim().slice(0, 120));
             const cleanEmoji = emoji ? Array.from(String(emoji).trim()).slice(0, 8).join('') : undefined;
             if (!cleanText && !cleanEmoji) {
                 if (typeof callback === 'function') callback({ success: false, error: 'Empty message' });
@@ -541,8 +548,8 @@ io.on('connection', (socket) => {
     });
 
     socket.on('sync_state', (data: { roomCode: string; sessionToken: string }, callback) => {
-        const { roomCode } = data || {};
-        const room = roomManager.getRoom(roomCode);
+        const cleanCode = String(data?.roomCode || '').trim().toUpperCase();
+        const room = roomManager.getRoom(cleanCode);
         if (room && typeof callback === 'function') {
             callback({ ok: true, roomState: roomManager.getClientRoomState(room) });
         } else if (typeof callback === 'function') {
@@ -552,12 +559,12 @@ io.on('connection', (socket) => {
 
     socket.on('leave_room', (data: { roomCode: string; sessionToken: string }, callback) => {
         const { roomCode, sessionToken } = data || {};
-        const clean = String(roomCode || '').toUpperCase().trim();
+        const clean = String(roomCode || '').trim().toUpperCase();
         if (clean) {
             socket.leave(clean);
             socket.leave(`ludo:${clean}`);
         }
-        const ok = roomManager.leaveRoom(roomCode, sessionToken);
+        const ok = roomManager.leaveRoom(clean, sessionToken);
         if (typeof callback === 'function') callback({ ok });
     });
 

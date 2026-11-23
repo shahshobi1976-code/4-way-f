@@ -1,7 +1,8 @@
 import { useEffect } from 'react';
 import { store, useStore } from '../state/store';
 import { GameCanvas } from '../game/GameCanvas';
-import { audio } from '../game/sfx';
+import { audio, preloadSounds } from '../game/sfx';
+import { preloadDialoguePack } from '../game/banter';
 import { probeMicrophoneStatus } from '../game/audioCapture';
 import { startMusic } from '../game/music';
 import { BG_BASE } from '../game/draw';
@@ -16,6 +17,7 @@ import { FloatingControls } from './FloatingControls';
 export function App() {
     const phase = useStore((s) => s.phase);
     const bgIdx = useStore((s) => s.settings.bg);
+    const lang = useStore((s) => s.settings.lang);
     const currentBgHex = `#${(BG_BASE[bgIdx] ?? 0x0a0d26).toString(16).padStart(6, '0')}`;
 
     // keep the frame's design-unit size (--u), landscape flag and fullscreen class up to date
@@ -128,11 +130,16 @@ export function App() {
         };
     }, []);
 
+    useEffect(() => {
+        void preloadDialoguePack(lang);
+    }, [lang]);
+
     // browsers only allow sound after a tap: unlock audio and start the music on the first one
     useEffect(() => {
         void probeMicrophoneStatus();
         const unlock = () => {
             audio();
+            preloadSounds();
             if (store.get().settings.music) startMusic();
             window.removeEventListener('pointerdown', unlock);
         };

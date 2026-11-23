@@ -13,6 +13,7 @@ import {
     newTokens, offendingTokensForPenalty, percent, pickBestAIMove, randDie, type CaptureObligation, type Move, type Tokens,
 } from './rules';
 import { BG_BASE, circlePts, drawBackground, drawDie, drawPawn, mix, shade, starPts } from './draw';
+import { BOARD_THEMES } from './themes';
 import { TOKEN_URLS_BY_PLAYER, getCachedPawnTexture, loadPawnTexture } from './tokenAssets';
 import * as sfx from './sfx';
 import * as banter from './banter';
@@ -23,6 +24,7 @@ import {
     HIGH_PRIORITY_BANTER_EVENTS,
     getPersonalityForSeat,
     pickBanterLine,
+    preloadDialoguePack,
 } from './banter';
 
 export interface SceneOpts {
@@ -72,6 +74,7 @@ const wrap180 = (d: number) => ((((d + 180) % 360) + 360) % 360) - 180;
 
 export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts): Scene {
     let lang = opts.lang; // follows the Settings language live
+    void preloadDialoguePack(lang);
     const active = opts.active.slice();
     const cfgs = opts.players;
     const root = stage.root;
@@ -152,6 +155,15 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             return !!multiplayerClient.roomState?.players[p]?.isAI;
         }
         return !!cfgs[p]?.ai || !!store.get().players[p]?.ai;
+    };
+    const personalityOf = (p: number): AIPersonality => {
+        if (isOnline()) {
+            const netP = multiplayerClient.roomState?.players[p]?.personality;
+            if (netP) return netP;
+            const botP = multiplayerClient.roomState?.botPersonalities?.[p];
+            if (botP) return botP;
+        }
+        return store.get().players[p]?.personality || cfgs[p]?.personality || getPersonalityForSeat(p);
     };
     const nextActive = (p: number) => {
         for (let i = 1; i <= 4; i++) {
@@ -327,13 +339,14 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
 
     function drawBoard() {
         const st = store.get().settings;
+        const bt = BOARD_THEMES[st.boardTheme || 'classic'] || BOARD_THEMES.classic;
         bgG.clear();
         drawBackground(bgG, (x, y, z) => P(x, y, z ?? 0), st.bg, S);
         const g = boardG;
         g.clear();
         const T = 0.7;
         // slab: underside + 4 sides
-        poly(g, sq(0, 0, 15, 15), -T, 0x24160b);
+        poly(g, sq(0, 0, 15, 15), -T, bt.slabUnderside);
         const corners: [number, number][] = [[0, 0], [15, 0], [15, 15], [0, 15]];
         for (let i = 0; i < 4; i++) {
             const a = corners[i], b = corners[(i + 1) % 4];
@@ -342,16 +355,16 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                 const q = P(x, y, z);
                 flat.push(q.x, q.y);
             }
-            g.poly(flat).fill(i % 2 ? 0x6b4423 : 0x835530).stroke({ width: 1, color: 0x2c1a0c, alpha: 0.7 });
+            g.poly(flat).fill(i % 2 ? bt.slabSideDark : bt.slabSideLight).stroke({ width: 1, color: bt.slabUnderside, alpha: 0.7 });
         }
         // top surface
-        poly(g, sq(0, 0, 15, 15), 0, 0xf4f0e4);
+        poly(g, sq(0, 0, 15, 15), 0, bt.surface);
         // base yards
         const origins: [number, number][] = [[0, 0], [9, 0], [9, 9], [0, 9]];
         for (let c = 0; c < 4; c++) {
             const [ox, oy] = origins[c];
-            poly(g, sq(ox, oy, 6, 6), 0, active[c] ? COLORS[c] : mix(COLORS[c], 0xdddddd, 0.55), 1, { w: 1.2, c: shade(COLORS[c], 0.55) });
-            poly(g, sq(ox + 1, oy + 1, 4, 4), 0.02, 0xfaf8f0, 0.96, { w: 1, c: shade(COLORS[c], 0.7), a: 0.8 });
+            poly(g, sq(ox, oy, 6, 6), 0, active[c] ? COLORS[c] : mix(COLORS[c], bt.surface, 0.55), 1, { w: 1.2, c: shade(COLORS[c], 0.55) });
+            poly(g, sq(ox + 1, oy + 1, 4, 4), 0.02, bt.yardInner, 0.96, { w: 1, c: shade(COLORS[c], 0.7), a: 0.8 });
             for (const [sx, sy] of BASE_SPOTS[c]) poly(g, circlePts(sx, sy, 0.55, 14), 0.03, COLORS[c], 0.85, { w: 1, c: shade(COLORS[c], 0.5) });
         }
         // home columns
@@ -360,12 +373,12 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         for (let i = 0; i < 52; i++) {
             const [col, row] = TRACK[i];
             const startOf = START_IDX.indexOf(i);
-            poly(g, sq(col, row, 1, 1), 0.01, startOf >= 0 ? COLORS[startOf] : 0xffffff, 1, { w: 1, c: 0x8a8f96, a: 0.9 });
+            poly(g, sq(col, row, 1, 1), 0.01, startOf >= 0 ? COLORS[startOf] : bt.track, 1, { w: 1, c: bt.trackBorder, a: 0.9 });
         }
-        // safe stars (start squares get a white star, star squares a grey/gold one)
+        // safe stars (start squares get a white star, star squares a themed star)
         for (const i of STAR_IDX) {
             const [col, row] = TRACK[i];
-            poly(g, starPts(col + 0.5, row + 0.5, 0.36, 0.16), 0.02, 0xe8b923, 1, { w: 1, c: 0x9a7408 });
+            poly(g, starPts(col + 0.5, row + 0.5, 0.36, 0.16), 0.02, bt.starFill, 1, { w: 1, c: bt.starStroke });
         }
         for (let c = 0; c < 4; c++) {
             const [col, row] = TRACK[START_IDX[c]];
@@ -379,8 +392,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             [[9, 6], [9, 9], mid], // yellow (right)
             [[6, 9], mid, [9, 9]], // cyan (bottom)
         ];
-        for (let c = 0; c < 4; c++) poly(g, tri[c], 0.02, COLORS[c], 1, { w: 1, c: shade(COLORS[c], 0.5) });
-        // (Orange circle removed per user instruction; HOME text remains centered on triangles)
+        for (let c = 0; c < 4; c++) poly(g, tri[c], 0.02, COLORS[c], 1, { w: 1, c: bt.homeStroke });
         // active-player outline with a soft glow
         const flat: number[] = [];
         for (const [x, y] of [[0, 0], [15, 0], [15, 15], [0, 15]] as [number, number][]) {
@@ -619,8 +631,9 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             if (!active[p] || !pl.txt || pl.txt.destroyed) continue;
             const b = P(BASE_CENTER[p][0], BASE_CENTER[p][1]);
             const above = b.y < midY;
-            const px = Math.max(80, Math.min(stage.designWidth() - 80, b.x));
-            const py = above ? top - 26 : bottom + 28;
+            const padX = stage.landscape() ? 80 : 92;
+            const px = Math.max(padX, Math.min(stage.designWidth() - padX, b.x));
+            const py = above ? top - (stage.landscape() ? 26 : 22) : bottom + 28;
             if (pl.c?.position) {
                 pl.c.position.set(px, py);
             }
@@ -833,7 +846,11 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             const sel = !used && (selDie === i || selDie === 2) && !!waitChoice;
             const dimDice = !isMyTurn || (used && !waitRoll);
             if (dieG[i]) {
-                drawDie(dieG[i], diceSize, dice[i], diceColor, current === 2 ? 0x2a2a2a : 0xffffff, { dim: dimDice, glow: sel || rollingIdle });
+                drawDie(dieG[i], diceSize, dice[i], diceColor, current === 2 ? 0x2a2a2a : 0xffffff, {
+                    dim: dimDice,
+                    glow: sel || rollingIdle,
+                    styleId: store.get().settings.diceStyle,
+                });
             }
             if (dieC[i]?.scale) {
                 dieC[i].scale.set(pulse);
@@ -988,7 +1005,9 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             const y = f.fy + (f.ty - f.fy) * ease;
             const hop = Math.abs(Math.sin(u * Math.PI * 3.6)) * (1 - u) * S * 4.2;
             const face = u > 0.82 ? flyFinal[i] : 1 + Math.floor(Math.random() * 6);
-            drawDie(f.g, size, face, flyColor, flyColor === COLORS[2] ? 0x2a2a2a : 0xffffff);
+            drawDie(f.g, size, face, flyColor, flyColor === COLORS[2] ? 0x2a2a2a : 0xffffff, {
+                styleId: store.get().settings.diceStyle,
+            });
             if (f.c?.position) f.c.position.set(x, y - hop);
             if (f.c) f.c.rotation = f.rot + f.spin * u * (1 - u * 0.6) * 1.4;
             if (f.c?.scale) f.c.scale.set(1 + 0.06 * Math.sin(u * 30 + i));
@@ -1078,7 +1097,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             idx,
             vars,
             forcedLineIdx,
-            personalityOverride || getPersonalityForSeat(idx),
+            personalityOverride || personalityOf(idx),
         );
         if (!line) return;
         lastBanterMs[idx] = Date.now();
@@ -1122,7 +1141,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         };
         const mappedEvent = catToEvent[cat] || 'banter';
         if (!canSpeakBanter(idx, mappedEvent)) return;
-        const l = pickBanterLine(mappedEvent, lang, idx, vars);
+        const l = pickBanterLine(mappedEvent, lang, idx, vars, undefined, personalityOf(idx));
         if (l) {
             lastBanterMs[idx] = Date.now();
             lastSpoke[idx] = clock;
@@ -2354,7 +2373,10 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
 
         // camera
         const st = store.get().settings;
-        lang = st.lang;
+        if (lang !== st.lang) {
+            lang = st.lang;
+            void preloadDialoguePack(lang);
+        }
         if (!st.rotate) targetYaw = 0;
         const targetPitch = Math.max(20, Math.min(90, st.tilt));
         const rate = 1 - Math.exp(-(2.0 * BOARD_SPEED * dt) / 1000);
@@ -2365,7 +2387,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         outline = mix(outline, tc, Math.min(1, dt / 350));
 
         fitBoard();
-        const sig = [yaw.toFixed(1), pitch.toFixed(1), S.toFixed(1), OX.toFixed(0), OY.toFixed(0), outline, st.bg].join('|');
+        const sig = [yaw.toFixed(1), pitch.toFixed(1), S.toFixed(1), OX.toFixed(0), OY.toFixed(0), outline, st.bg, st.boardTheme || 'classic', st.diceStyle || 'classic'].join('|');
         if (sig !== lastSig) {
             lastSig = sig;
             drawBoard();

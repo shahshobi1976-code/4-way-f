@@ -18,8 +18,15 @@ import {
     globalIdx,
     type Tokens,
 } from '../src/game/rules';
+import fs from 'fs';
+import path from 'path';
 import { shouldShowCaptureWarning } from '../src/state/store';
 import { roomManager, type Room } from '../server/roomManager';
+import { maskProfanity, sanitizeDisplayName } from '../server/supabaseRecords';
+import { LANGS, tr } from '../src/i18n';
+import { BOARD_THEME_LIST, DICE_STYLE_LIST } from '../src/game/themes';
+import { BGM_TRACKS, DEFAULT_BGM_TRACK } from '../src/game/music';
+import { buildHowToPlayCards } from '../src/ui/TutorialModal';
 
 function assert(condition: boolean, msg: string) {
     if (!condition) {
@@ -604,5 +611,125 @@ console.log('--- RUNNING LUDO RULES & PENALTY & GUL TEST SUITE ---');
     assert(shouldShowCaptureWarning('off', 1) === false, "off disables warning even on match 1");
 }
 
-console.log('🎉 ALL LUDO RULES & PENALTY & GUL TESTS PASSED SUCCESSFULLY!');
-process.exit(0);
+// Test 19: Profanity Filter Masking (chat & player names) via profanity-words.json
+{
+    const rawProfanityPath = path.resolve(process.cwd(), 'profanity-words.json');
+    assert(fs.existsSync(rawProfanityPath), 'profanity-words.json exists at workspace root');
+    const maskedEn = maskProfanity('Nice roll fuck you friend');
+    assert(maskedEn.includes('***') && !maskedEn.toLowerCase().includes('fuck'), 'maskProfanity masks English profanity with ***');
+    const maskedRomanUr = maskProfanity('Oye harami chal');
+    assert(maskedRomanUr.includes('***') && !maskedRomanUr.toLowerCase().includes('harami'), 'maskProfanity masks Roman Urdu profanity with ***');
+    const maskedUrdu = maskProfanity('تم حرامی ہو');
+    assert(maskedUrdu.includes('***') && !maskedUrdu.includes('حرامی'), 'maskProfanity masks Urdu script profanity with ***');
+    const maskedClean = maskProfanity('Pass the star square classic board');
+    assert(maskedClean === 'Pass the star square classic board', 'maskProfanity leaves clean words untouched (no false positives)');
+    const cleanName = sanitizeDisplayName('Hero fuck 99', 'pub_1');
+    assert(!cleanName.toLowerCase().includes('fuck') && cleanName.includes('***'), 'sanitizeDisplayName masks profanity in player names');
+}
+
+// Test 20: Multiplayer Host Per-Seat AI Personality + SendChat Masking
+{
+    const emitted: { event: string; payload: any }[] = [];
+    roomManager.setBroadcastCallback((_room, event, payload) => {
+        emitted.push({ event, payload });
+    });
+    const rawHostTok = 'tok_persona_host_12345678901234';
+    const cRes = roomManager.createRoom(rawHostTok, 'HostP', '👑', 'sock_ph', 90, 4, '10.0.0.55');
+    assert(cRes.ok && !!cRes.roomCode, 'Created room for seat personality & chat filter test');
+    const hostTok = cRes.secretSessionToken || rawHostTok;
+    const setRes = roomManager.setSeatPersonality(cRes.roomCode!, hostTok, 2, 'Rideordie');
+    assert(setRes === true, 'Host sets seat 2 AI personality cleanly');
+    const roomObj = roomManager.getRoom(cRes.roomCode!)!;
+    const cState = roomManager.getClientRoomState(roomObj);
+    assert(cState?.botPersonalities[2] === 'Rideordie', 'ClientRoomState exposes updated botPersonalities[2]');
+    const chatRes = roomManager.sendChat(cRes.roomCode!, hostTok, 'hello bitch!');
+    const chatEv = emitted.find((e) => e.event === 'chat_received');
+    assert(
+        chatRes === true &&
+            !!chatEv &&
+            String(chatEv.payload?.text || '').includes('***') &&
+            !String(chatEv.payload?.text || '').toLowerCase().includes('bitch'),
+        'roomManager.sendChat masks profanity cleanly',
+    );
+    roomManager.setBroadcastCallback(() => {});
+}
+
+// Test 21: 20 Languages, 20 Dialogue Packs, and Localized 18 How-to-Play Cards
+{
+    assert(LANGS.length === 20, `LANGS exposes 20 supported languages (got ${LANGS.length})`);
+    for (const l of LANGS) {
+        const title = tr(l.code, 'guideTitle');
+        const cards = buildHowToPlayCards(l.code);
+        assert(typeof title === 'string' && title.length > 0, `UI guideTitle localized for ${l.code}`);
+        assert(cards.length === 18, `buildHowToPlayCards('${l.code}') returns 18 cards`);
+        const dlgPath = path.resolve(process.cwd(), 'public', 'dialogues', `${l.code}.json`);
+        assert(fs.existsSync(dlgPath), `Dialogue pack exists for ${l.code}`);
+        const parsed = JSON.parse(fs.readFileSync(dlgPath, 'utf-8'));
+        assert(parsed && typeof parsed === 'object' && Array.isArray(parsed.capture), `Dialogue pack ${l.code}.json parses cleanly`);
+    }
+}
+
+// Test 22: Board Themes, Dice Styles, Bundled MP3 BGM Tracks & Audio Files
+{
+    assert(BOARD_THEME_LIST.length === 6, `6 Board themes registered (got ${BOARD_THEME_LIST.length})`);
+    assert(DICE_STYLE_LIST.length === 10, `10 Dice styles registered (got ${DICE_STYLE_LIST.length})`);
+    assert(BGM_TRACKS.length === 7, `7 Bundled MP3 BGM tracks registered (got ${BGM_TRACKS.length})`);
+    assert(BGM_TRACKS.some((t) => t.id === DEFAULT_BGM_TRACK), 'DEFAULT_BGM_TRACK matches a valid bundled soundtrack');
+    for (const track of BGM_TRACKS) {
+        const audioPath = path.resolve(process.cwd(), 'public', track.url.replace(/^\//, ''));
+        assert(fs.existsSync(audioPath), `Bundled BGM audio file exists: ${track.url}`);
+    }
+}
+
+// Test 23: 6-Char Cryptographic Room Codes, Normalization, Join Rate-Limit & Safe Bot-Match End
+async function runAsyncRoomCodeTests() {
+    const codeRegex = /^[A-HJ-NP-Z2-9]{6}$/;
+    for (let i = 0; i < 60; i++) {
+        const generated = roomManager.generateRoomCode();
+        assert(
+            codeRegex.test(generated) && !/[0O1I]/.test(generated),
+            `generateRoomCode() #${i + 1} matches ^[A-HJ-NP-Z2-9]{6}$ (${generated})`,
+        );
+    }
+
+    const hostTok = 'tok_norm_host_12345678901234567';
+    const guestTok = 'tok_norm_guest_1234567890123456';
+    const cRes = roomManager.createRoom(hostTok, 'Host6', '👑', 'sock_norm_h', 90, 4, '10.10.0.1');
+    assert(cRes.ok && !!cRes.roomCode && codeRegex.test(cRes.roomCode), `createRoom returns 6-char unambiguous code (${cRes.roomCode})`);
+
+    const messyLower = `  ${cRes.roomCode!.toLowerCase()}  `;
+    assert(!!roomManager.getRoom(messyLower), 'getRoom trims and uppercases lowercase room code');
+
+    const jRes = roomManager.joinRoom(messyLower, guestTok, 'Guest6', '🦁', 'sock_norm_g', '10.10.0.2');
+    assert(jRes.ok && jRes.playerIndex === 1 && jRes.roomCode === cRes.roomCode, 'joinRoom accepts lowercase/whitespace code and normalizes cleanly');
+
+    const recRes = roomManager.reconnectPlayer(messyLower, guestTok, 'sock_norm_g2');
+    assert(recRes.ok && recRes.playerIndex === 1 && recRes.roomCode === cRes.roomCode, 'reconnectPlayer accepts lowercase/whitespace code');
+
+    // Join rate limit (12 attempts/min on isolated IP)
+    let joinBlocked = false;
+    for (let k = 0; k < 16; k++) {
+        const jr = roomManager.joinRoom('ZZZZZZ', `tok_rl_join_${k}_1234567890`, 'RL', '👑', `sock_rl_j_${k}`, '192.168.88.88');
+        if (!jr.ok && jr.error?.includes('Too many join')) {
+            joinBlocked = true;
+            break;
+        }
+    }
+    assert(joinBlocked, 'Room joining enforces per-IP 12/min rate limit');
+
+    // Ending a solo human + bots match completes cleanly without emitting human-count validation errors
+    const botRoomRes = roomManager.createRoom('tok_solo_end_host_1234567890123', 'SoloHost', '👑', 'sock_solo', 90, 4, '10.10.0.99');
+    assert(botRoomRes.ok && !!botRoomRes.roomCode, 'Created solo+bots room');
+    roomManager.startGame(botRoomRes.roomCode!, 'tok_solo_end_host_1234567890123');
+    const origWarn = console.warn;
+    const warnings: string[] = [];
+    console.warn = (...args: any[]) => warnings.push(args.join(' '));
+    const endRes = await roomManager.endMatchAndRecord(botRoomRes.roomCode!, 'tok_solo_end_host_1234567890123', '10.10.0.99');
+    console.warn = origWarn;
+    assert(endRes.ok && !warnings.some((w) => w.includes('Requires at least')), 'Ending 1-human + bots match succeeds without validation warnings');
+
+    console.log('🎉 ALL LUDO RULES & PENALTY & GUL TESTS PASSED SUCCESSFULLY!');
+    process.exit(0);
+}
+
+void runAsyncRoomCodeTests();
