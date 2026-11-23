@@ -1,6 +1,7 @@
 import { io, Socket } from 'socket.io-client';
 import type { ClientRoomState, RoomPlayer } from '../../server/roomManager';
-import type { AIPersonality } from '../game/banter';
+import type { AIPersonality, RivalryCalloutKind } from '../game/banter';
+import { createEmptyGrudges } from '../game/rules';
 import { store } from '../state/store';
 import { bus } from '../game/bus';
 import { safeStorage, safeSessionStorage } from '../state/storage';
@@ -20,7 +21,7 @@ export interface ChatBubble {
 
 export interface SocialLogEntry {
     id: string;
-    kind: 'chat' | 'voice' | 'whisper_in' | 'whisper_out' | 'whisper_notice';
+    kind: 'chat' | 'voice' | 'whisper_in' | 'whisper_out' | 'whisper_notice' | 'system';
     seatIndex: number;
     sender: string;
     avatar: string;
@@ -422,6 +423,62 @@ class MultiplayerClient {
             },
         );
 
+        this.socket.on(
+            'ludo:rivalry_event',
+            (data: { kind: RivalryCalloutKind; actorSeat: number; targetSeat: number; leaderPct: number; lineIdx?: number }) => {
+                if (!data || !this.roomState) return;
+                const players = this.roomState.players || [];
+                const emojiSets: Record<RivalryCalloutKind, string[]> = {
+                    dethrone_alert: ['🎯', '🚨', '😱', '🎯'],
+                    leader_hit: ['🔥', '🎯', '🚨', '🔥'],
+                    grudge_hit: ['🔥', '😱', '🎯', '🔥'],
+                };
+                const pool = emojiSets[data.kind] || emojiSets.dethrone_alert;
+                const until = Date.now() + 2800;
+                const nextReactions = { ...this.activeReactions };
+                let reacted = false;
+                for (let s = 0; s < players.length; s++) {
+                    const pl = players[s];
+                    if (!pl || !pl.isAI || s === data.targetSeat || this.mutedSeats.has(s)) continue;
+                    if (data.kind !== 'dethrone_alert' && s === data.actorSeat) continue;
+                    nextReactions[s] = {
+                        seatIndex: s,
+                        emoji: pool[s % pool.length],
+                        until,
+                        key: Date.now() + s * 17 + Math.random(),
+                    };
+                    reacted = true;
+                }
+                if (reacted) {
+                    this.activeReactions = nextReactions;
+                    this.scheduleReactionCleanup();
+                }
+
+                if (data.kind === 'dethrone_alert') {
+                    const mySeat = this.myPlayerIndex;
+                    const targetPlayer = players[data.targetSeat];
+                    const targetName = (targetPlayer?.name || `Seat ${data.targetSeat + 1}`).replace(/\s*#[a-zA-Z0-9_-]+$/, '').trim();
+                    const hasConnectedHumanOpponents = players.some(
+                        (p, idx) => idx !== mySeat && idx !== data.targetSeat && !!p && !p.isAI && p.connected,
+                    );
+                    if (mySeat !== data.targetSeat && hasConnectedHumanOpponents) {
+                        this.pushLogEntry({
+                            id: `sys_dethrone_${data.targetSeat}_${Date.now()}`,
+                            kind: 'system',
+                            seatIndex: -1,
+                            sender: 'Rivalry Tip',
+                            avatar: '🎯',
+                            text: `🤫 ${targetName} reached ${Math.round(data.leaderPct)}% — use a Private Whisper to coordinate against ${targetName}!`,
+                            timestamp: Date.now(),
+                        });
+                    }
+                }
+
+                this.notify();
+                bus.onRemoteRivalryEvent?.(data);
+            },
+        );
+
         this.socket.on('chat_received', (chat: ChatBubble) => {
             if (this.mutedSeats.has(chat.p)) return;
             this.recentChat = { ...chat, time: Date.now(), kind: 'chat' };
@@ -710,6 +767,10 @@ class MultiplayerClient {
             gameId: store.get().gameId + 1,
             result: null,
             popup: null,
+            rivalry: null,
+            grudges: createEmptyGrudges(),
+            rivalryBanner: null,
+            localReactions: {},
             wishNums: myWish || store.get().wishNums || [6, 5],
             wishUsable: true,
         });
@@ -1121,7 +1182,14 @@ class MultiplayerClient {
             } catch {}
         }
         this.notify();
-        store.patch({ phase: 'menu', modal: null });
+        store.patch({
+            phase: 'menu',
+            modal: null,
+            rivalry: null,
+            grudges: createEmptyGrudges(),
+            rivalryBanner: null,
+            localReactions: {},
+        });
     }
 }
 

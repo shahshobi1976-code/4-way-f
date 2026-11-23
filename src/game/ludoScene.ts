@@ -9,20 +9,22 @@ import { bus, type NameplateBound } from './bus';
 import { tr, colorName } from '../i18n';
 import {
     BASE_CENTER, BASE_SPOTS, COLORS, HOME, HOME_COL, IN_BASE, LAST_TRACK, PATH_START, SAFE, STAR_IDX, START_IDX, TRACK,
-    boardPos, evaluateCaptureObligation, fineProgress, globalIdx, hasWon, isLuckySum, legalMovesForTurn, luckySevenAllowed,
-    newTokens, offendingTokensForPenalty, percent, pickBestAIMove, randDie, type CaptureObligation, type Move, type Tokens,
+    boardPos, createEmptyGrudges, decrementSeatGrudge, evaluateCaptureObligation, evaluateRivalryState, fineProgress,
+    globalIdx, hasWon, isLuckySum, legalMovesForTurn, luckySevenAllowed, newTokens, offendingTokensForPenalty, percent,
+    pickBestAIMove, randDie, recordCaptureGrudge, type CaptureObligation, type Move, type Tokens,
 } from './rules';
 import { BG_BASE, circlePts, drawBackground, drawDie, drawPawn, mix, shade, starPts } from './draw';
 import { BOARD_THEMES } from './themes';
 import { TOKEN_URLS_BY_PLAYER, getCachedPawnTexture, loadPawnTexture } from './tokenAssets';
 import * as sfx from './sfx';
 import * as banter from './banter';
-import type { AIPersonality, BanterEvent, Cat } from './banter';
+import type { AIPersonality, BanterEvent, Cat, RivalryCalloutKind } from './banter';
 import {
     BANTER_HIGH_PRIORITY_COOLDOWN_MS,
     BANTER_ROUTINE_COOLDOWN_MS,
     HIGH_PRIORITY_BANTER_EVENTS,
     getPersonalityForSeat,
+    getRivalryCalloutLine,
     pickBanterLine,
     preloadDialoguePack,
 } from './banter';
@@ -120,6 +122,10 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     let turnObligation: CaptureObligation | null = null;
     const turnTokensCaptured = new Set<number>();
     const turnMovedToSquare = new Map<number, string>();
+    const grudges = createEmptyGrudges();
+    const dethroneAlertedLeaders = new Set<number>();
+    let rivalryBannerTimer: ReturnType<typeof setTimeout> | null = null;
+    let localReactionsTimer: ReturnType<typeof setTimeout> | null = null;
 
     let dice: [number, number] = [5, 2];
     let diceUsed: [boolean, boolean] = [true, true];
@@ -174,9 +180,12 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     };
 
     function publish() {
+        const rivalry = evaluateRivalryState(tokens, -1, active);
         store.patch({
             progress: [0, 1, 2, 3].map((p) => (active[p] ? percent(tokens, p) : 0)),
             current,
+            rivalry,
+            grudges: grudges.map((g) => (g ? { ...g } : null)),
         });
     }
 
@@ -1163,6 +1172,105 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         }
     }
 
+    function emitRivalryEvent(
+        kind: RivalryCalloutKind,
+        actorSeat: number,
+        targetSeat: number,
+        leaderPct: number,
+        forcedLineIdx?: number,
+    ) {
+        if (dead || targetSeat < 0 || targetSeat > 3) return;
+        const targetName = nameOf(targetSeat);
+        const actorName = actorSeat >= 0 && actorSeat <= 3 ? nameOf(actorSeat) : '';
+        const speakerSeat =
+            actorSeat >= 0 && isAI(actorSeat)
+                ? actorSeat
+                : [0, 1, 2, 3].find((s) => s !== targetSeat && active[s] && isAI(s)) ?? -1;
+        const speakerPersonality = speakerSeat >= 0 ? personalityOf(speakerSeat) : 'Strategist';
+        const callout = getRivalryCalloutLine(speakerPersonality, kind, targetName, leaderPct, forcedLineIdx);
+
+        // Local observer AI emoji reactions (online mode handles synced reactions via multiplayerClient)
+        if (!isOnline()) {
+            const emojiSets: Record<RivalryCalloutKind, string[]> = {
+                dethrone_alert: ['🎯', '🚨', '😱', '🎯'],
+                leader_hit: ['🔥', '🎯', '🚨', '🔥'],
+                grudge_hit: ['🔥', '😱', '🎯', '🔥'],
+            };
+            const pool = emojiSets[kind] || emojiSets.dethrone_alert;
+            const until = Date.now() + 2800;
+            const nextReactions: Record<number, { seatIndex: number; emoji: string; until: number; key: number }> = {
+                ...store.get().localReactions,
+            };
+            let added = false;
+            for (let s = 0; s < 4; s++) {
+                if (!active[s] || !isAI(s) || s === targetSeat) continue;
+                if (kind !== 'dethrone_alert' && s === actorSeat) continue;
+                nextReactions[s] = {
+                    seatIndex: s,
+                    emoji: pool[s % pool.length],
+                    until,
+                    key: Date.now() + s * 17 + Math.random(),
+                };
+                added = true;
+            }
+            if (added) {
+                store.patch({ localReactions: nextReactions });
+                if (localReactionsTimer) clearTimeout(localReactionsTimer);
+                localReactionsTimer = setTimeout(() => {
+                    localReactionsTimer = null;
+                    if (dead) return;
+                    const nowMs = Date.now();
+                    const kept: Record<number, { seatIndex: number; emoji: string; until: number; key: number }> = {};
+                    for (const [k, v] of Object.entries(store.get().localReactions)) {
+                        if (v.until > nowMs) kept[Number(k)] = v;
+                    }
+                    store.patch({ localReactions: kept });
+                }, 2900);
+            }
+        }
+
+        const icon = kind === 'dethrone_alert' ? '🚨' : kind === 'leader_hit' ? '🎯' : '🔥';
+        const title =
+            kind === 'dethrone_alert'
+                ? `TARGET LOCKED • ${targetName.toUpperCase()} (${Math.round(leaderPct)}%)`
+                : kind === 'leader_hit'
+                ? `LEADER DETHRONED • ${actorName || 'RIVAL'} HIT ${targetName.toUpperCase()}`
+                : `PAYBACK! • ${actorName || 'RIVAL'} VS ${targetName.toUpperCase()}`;
+
+        const bannerId = Date.now();
+        store.patch({
+            rivalryBanner: {
+                id: bannerId,
+                kind,
+                icon,
+                title,
+                message: callout,
+                targetSeat,
+                actorSeat,
+                leaderPct: Math.round(leaderPct),
+                until: bannerId + 4200,
+            },
+        });
+        if (rivalryBannerTimer) clearTimeout(rivalryBannerTimer);
+        rivalryBannerTimer = setTimeout(() => {
+            rivalryBannerTimer = null;
+            if (!dead && store.get().rivalryBanner?.id === bannerId) {
+                store.patch({ rivalryBanner: null });
+            }
+        }, 4300);
+
+        if (
+            speakerSeat >= 0 &&
+            isAI(speakerSeat) &&
+            !store.get().settings.aiMute &&
+            !multiplayerClient.isSeatMuted(speakerSeat)
+        ) {
+            lastBanterMs[speakerSeat] = Date.now();
+            lastSpoke[speakerSeat] = clock;
+            enqueue({ idx: speakerSeat, text: callout, priority: true, voice: true }, true);
+        }
+    }
+
     bus.onRemoteAiBanter = (data) => {
         if (dead || !isOnline()) return;
         const ev = (data.event || 'banter') as BanterEvent;
@@ -1174,6 +1282,11 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             data.lineIdx,
             data.personality as AIPersonality | undefined,
         );
+    };
+
+    bus.onRemoteRivalryEvent = (data) => {
+        if (dead || !isOnline()) return;
+        emitRivalryEvent(data.kind, data.actorSeat, data.targetSeat, data.leaderPct, data.lineIdx);
     };
 
     bus.chat = (idx, text, o) => {
@@ -1855,11 +1968,14 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     async function applyMove(p: number, m: Move, expectedEpoch?: number): Promise<{ captured: boolean; home: boolean }> {
         clearHighlights();
         const prevPos = tokens[p][m.tok];
+        const preRivalry = !isOnline() ? evaluateRivalryState(tokens, -1, active) : null;
         await moveToken(p, m, expectedEpoch);
         if (expectedEpoch !== undefined && isOnline() && turnEpoch !== expectedEpoch) {
             return { captured: false, home: false };
         }
         let captured = false;
+        let leaderVictim = -1;
+        let revengeVictim = -1;
         for (const c of m.captures) {
             // re-check: the victim is still on that square after landing
             captured = true;
@@ -1867,6 +1983,11 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             const victim = c.p;
             void sendHome(victim, c.t, 900);
             if (!isOnline()) {
+                const { revengeHit } = recordCaptureGrudge(grudges, p, victim);
+                if (revengeHit && revengeVictim === -1) revengeVictim = victim;
+                if (preRivalry && victim === preRivalry.leaderIdx && preRivalry.leaderPct >= 20 && leaderVictim === -1) {
+                    leaderVictim = victim;
+                }
                 emitLocalBanter('capture', p, { n: nameOf(victim) }, 0.9);
                 emitLocalBanter('captured', victim, undefined, 0.9);
             }
@@ -1876,6 +1997,14 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             return { captured, home: m.reachesHome };
         }
         if (!isOnline()) {
+            if (leaderVictim !== -1 && preRivalry?.tier === 'dethrone') {
+                emitRivalryEvent('leader_hit', p, leaderVictim, preRivalry.leaderPct);
+            } else if (revengeVictim !== -1) {
+                emitRivalryEvent('grudge_hit', p, revengeVictim, percent(tokens, revengeVictim));
+            } else if (leaderVictim !== -1 && preRivalry) {
+                emitRivalryEvent('leader_hit', p, leaderVictim, preRivalry.leaderPct);
+            }
+
             if (m.reachesHome) {
                 emitLocalBanter('pawn_home', p, undefined, 0.75);
             } else if (prevPos < PATH_START && m.to >= PATH_START) {
@@ -1885,6 +2014,18 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             }
         }
         publish();
+        if (!isOnline() && !hasWon(tokens, p)) {
+            const postRivalry = evaluateRivalryState(tokens, -1, active);
+            if (
+                postRivalry.tier === 'dethrone' &&
+                postRivalry.leaderIdx >= 0 &&
+                !dethroneAlertedLeaders.has(postRivalry.leaderIdx)
+            ) {
+                dethroneAlertedLeaders.add(postRivalry.leaderIdx);
+                const commentator = [0, 1, 2, 3].find((s) => s !== postRivalry.leaderIdx && active[s] && isAI(s)) ?? -1;
+                emitRivalryEvent('dethrone_alert', commentator, postRivalry.leaderIdx, postRivalry.leaderPct);
+            }
+        }
         return { captured, home: m.reachesHome };
     }
 
@@ -1984,7 +2125,17 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                         waitChoice = null;
                         const caps = optionsNow.filter((m) => m.captures.length > 0);
                         const pool = caps.length > 0 ? caps : optionsNow;
-                        const autoMove = pickBestAIMove(tokens, p, pool, active).move;
+                        const autoMove = pickBestAIMove(
+                            tokens,
+                            p,
+                            pool,
+                            active,
+                            dice,
+                            diceUsed,
+                            turnObligation,
+                            turnCapturesTaken,
+                            { personality: personalityOf(p), grudgeTargetIdx: grudges[p]?.targetIdx ?? null },
+                        ).move;
                         sfx.tick();
                         r(autoMove);
                     }
@@ -2204,6 +2355,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                         diceUsed,
                         turnObligation,
                         capturesTaken,
+                        { personality: personalityOf(p), grudgeTargetIdx: grudges[p]?.targetIdx ?? null },
                     );
                     selDie = chosen.die;
                     refreshHighlights();
@@ -2313,6 +2465,8 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             const extra = await takeTurn(p);
             if (dead) return;
             if (!isOnline()) {
+                decrementSeatGrudge(grudges, p);
+                publish();
                 chatterAfterTurn(p);
             }
             if (isOnline()) {
@@ -2450,6 +2604,15 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             bus.onGulDecision = undefined;
             bus.onSkipCaptureDecision = undefined;
             bus.onRemoteAiBanter = undefined;
+            bus.onRemoteRivalryEvent = undefined;
+            if (rivalryBannerTimer) {
+                clearTimeout(rivalryBannerTimer);
+                rivalryBannerTimer = null;
+            }
+            if (localReactionsTimer) {
+                clearTimeout(localReactionsTimer);
+                localReactionsTimer = null;
+            }
             bumpTurnEpoch();
             // release anything the turn loop is awaiting, so it can unwind cleanly
             if (turnChangeResolver) { const res = turnChangeResolver; turnChangeResolver = null; res(0); }
@@ -2461,7 +2624,19 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             tweens.length = 0;
             timers.length = 0;
             root.removeChildren();
-            store.patch({ wishNums: null, wishUsable: false, isWaitingRoll: false, gulPrompt: null, captureNotice: null, skipCapturePrompt: null, nameplateBounds: [] });
+            store.patch({
+                wishNums: null,
+                wishUsable: false,
+                isWaitingRoll: false,
+                gulPrompt: null,
+                captureNotice: null,
+                skipCapturePrompt: null,
+                rivalry: null,
+                grudges: createEmptyGrudges(),
+                rivalryBanner: null,
+                localReactions: {},
+                nameplateBounds: [],
+            });
         },
     };
 }

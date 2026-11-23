@@ -1,6 +1,6 @@
 import { store, useStore } from '../state/store';
 import { colorName, tr } from '../i18n';
-import { COLORS } from '../game/rules';
+import { COLORS, createEmptyGrudges } from '../game/rules';
 import { multiplayerClient } from '../network/multiplayerClient';
 import { CelebrationCanvas } from './CelebrationCanvas';
 import { U } from './kit';
@@ -32,14 +32,30 @@ export function WinnerOverlay() {
 
     const handleBackToMenu = () => {
         if (isMultiplayer) multiplayerClient.leaveRoom();
-        store.patch({ phase: 'menu', result: null, popup: null, modal: null });
+        store.patch({
+            phase: 'menu',
+            result: null,
+            popup: null,
+            modal: null,
+            rivalry: null,
+            grudges: createEmptyGrudges(),
+            rivalryBanner: null,
+            localReactions: {},
+        });
     };
 
     const handleRematchClick = async () => {
         if (isMultiplayer) {
             await multiplayerClient.voteRematch();
         } else {
-            store.patch({ gameId: store.get().gameId + 1, result: null });
+            store.patch({
+                gameId: store.get().gameId + 1,
+                result: null,
+                rivalry: null,
+                grudges: createEmptyGrudges(),
+                rivalryBanner: null,
+                localReactions: {},
+            });
         }
     };
 

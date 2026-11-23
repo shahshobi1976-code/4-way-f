@@ -608,3 +608,97 @@ export function quickPhrases(lang: string): Quick[] {
     return lang === 'hi' ? QUICK_HI : lang === 'ur' ? QUICK_UR : QUICK_EN;
 }
 export const REACTIONS = ['😂', '❤️', '🔥', '😡', '👍', '🤡', '👑', '🎲'];
+
+export type RivalryCalloutKind = 'dethrone_alert' | 'leader_hit' | 'grudge_hit';
+
+const RIVALRY_CALLOUTS: Record<AIPersonality, Record<RivalryCalloutKind, string[]>> = {
+    Rival: {
+        dethrone_alert: [
+            'Watch out! {target} just hit {pct}%—nobody takes my crown without a fight!',
+            '{target} at {pct}%?! All eyes on {target}—bring them back to base!',
+        ],
+        leader_hit: [
+            'BOOM! Knocked {target} off their {pct}% throne! Back to base!',
+            'That crown at {pct}% looked heavy, {target}—let me lighten it for you!',
+        ],
+        grudge_hit: [
+            'Payback served cold, {target}! Never touch my pawns again!',
+            'Told you I keep receipts, {target}! Grudge settled!',
+        ],
+    },
+    Strategist: {
+        dethrone_alert: [
+            'Threat alert: {target} reached {pct}%. Prioritize containment immediately.',
+            'Win-probability spike—{target} is at {pct}%. Intercept their runners now.',
+        ],
+        leader_hit: [
+            'Optimal counterplay! Interrupted {target} at {pct}% right on schedule.',
+            'Calculated intercept on {target} ({pct}%). The board is balanced again.',
+        ],
+        grudge_hit: [
+            'Long-horizon payback complete on {target}. Tactical ledger balanced.',
+            'That capture settled an old score with {target} cleanly.',
+        ],
+    },
+    Confidante: {
+        dethrone_alert: [
+            'Whoa friends, {target} is already at {pct}%! Truce until we slow them down?',
+            'Careful everyone—{target} climbed to {pct}%! Let us team up before it is too late!',
+        ],
+        leader_hit: [
+            'Sorry {target}, you were soaring at {pct}%—had to keep this match alive!',
+            'Nothing personal, {target}! At {pct}%, the whole table needed that stop!',
+        ],
+        grudge_hit: [
+            'Consider us even now, {target}—no hard feelings!',
+            'Friendly reminder to {target}: what goes around comes back around!',
+        ],
+    },
+    Rideordie: {
+        dethrone_alert: [
+            'SOUND THE SIRENS! {target} hit {pct}%—drop everything and hunt {target}!',
+            'Not on my watch! {target} is at {pct}%—squad up and stop the runaway!',
+        ],
+        leader_hit: [
+            'DETHRONED! Sent {target} packing from {pct}%! Crowd goes wild! 🔥',
+            'CRASHED THE CORONATION! No free walk at {pct}%, {target}!',
+        ],
+        grudge_hit: [
+            'SWEET REVENGE on {target}! Remember sending me back to base?!',
+            'BOOM! Crossed {target} right off my payback list! 🔥',
+        ],
+    },
+};
+
+export function pickRivalryCalloutIndex(
+    personality: AIPersonality | string | undefined,
+    kind: RivalryCalloutKind,
+): number {
+    const p = normalizeAIPersonality(personality, 0);
+    const pool = RIVALRY_CALLOUTS[p][kind] || RIVALRY_CALLOUTS.Strategist[kind];
+    return Math.floor(Math.random() * Math.max(1, pool.length));
+}
+
+export function getRivalryCalloutLine(
+    personality: AIPersonality | string | undefined,
+    kind: RivalryCalloutKind,
+    targetName: string,
+    leaderPct: number,
+    forcedLineIdx?: number,
+): string {
+    const p = normalizeAIPersonality(personality, 0);
+    const pool = RIVALRY_CALLOUTS[p][kind] || RIVALRY_CALLOUTS.Strategist[kind];
+    const idx =
+        forcedLineIdx !== undefined
+            ? Math.abs(Math.floor(forcedLineIdx)) % pool.length
+            : Math.floor(Math.random() * pool.length);
+    const pctStr = String(Math.max(0, Math.round(leaderPct)));
+    const targetStr = (targetName || 'the leader').trim();
+    const raw = pool[idx]
+        .split('{target}')
+        .join(targetStr)
+        .split('{pct}')
+        .join(pctStr);
+    return removeHahahaOnly(raw) || raw;
+}
+

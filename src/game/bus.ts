@@ -1,3 +1,5 @@
+import type { RivalryCalloutKind } from './banter';
+
 export interface NameplateBound {
     seatIdx: number;
     x: number;
@@ -40,5 +42,13 @@ export const bus: {
         personality: string;
         lineIdx: number;
         vars?: Record<string, string>;
+    }) => void;
+    /** Authoritative server-synced rivalry event (dethrone alert, leader hit, or grudge hit) */
+    onRemoteRivalryEvent?: (data: {
+        kind: RivalryCalloutKind;
+        actorSeat: number;
+        targetSeat: number;
+        leaderPct: number;
+        lineIdx?: number;
     }) => void;
 } = {};

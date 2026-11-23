@@ -13,8 +13,13 @@ import {
     offendingTokensForPenalty,
     luckySevenAllowed,
     getMatchLeader,
+    evaluateRivalryState,
+    createEmptyGrudges,
+    recordCaptureGrudge,
+    decrementSeatGrudge,
     isEntrySquareThreatened,
     pickBestAIMove,
+    scoreMove,
     globalIdx,
     type Tokens,
 } from '../src/game/rules';
@@ -27,6 +32,7 @@ import { LANGS, tr } from '../src/i18n';
 import { BOARD_THEME_LIST, DICE_STYLE_LIST } from '../src/game/themes';
 import { BGM_TRACKS, DEFAULT_BGM_TRACK } from '../src/game/music';
 import { buildHowToPlayCards } from '../src/ui/TutorialModal';
+import { AI_PERSONALITIES, getRivalryCalloutLine, type RivalryCalloutKind } from '../src/game/banter';
 
 function assert(condition: boolean, msg: string) {
     if (!condition) {
@@ -727,6 +733,166 @@ async function runAsyncRoomCodeTests() {
     const endRes = await roomManager.endMatchAndRecord(botRoomRes.roomCode!, 'tok_solo_end_host_1234567890123', '10.10.0.99');
     console.warn = origWarn;
     assert(endRes.ok && !warnings.some((w) => w.includes('Requires at least')), 'Ending 1-human + bots match succeeds without validation warnings');
+
+    // Test 24: Escalating Rivalry Tiers, 6-Turn Grudge Memory, AI Target Priority & Personality Callouts
+    {
+        const normalB = newTokens();
+        normalB[0] = [10, IN_BASE, IN_BASE, IN_BASE]; // ~5%
+        normalB[1] = [8, IN_BASE, IN_BASE, IN_BASE]; // ~4%
+        const rNorm = evaluateRivalryState(normalB, -1, [true, true, true, true]);
+        assert(rNorm.tier === 'normal', `evaluateRivalryState returns 'normal' early game (${rNorm.leaderPct}%)`);
+
+        const heatB = newTokens();
+        heatB[0] = [HOME, HOME, 12, IN_BASE]; // 56%
+        heatB[1] = [HOME, HOME, IN_BASE, IN_BASE]; // 50% (margin 6, leader >= 55 -> heat)
+        const rHeat1 = evaluateRivalryState(heatB, -1, [true, true, true, true]);
+        assert(rHeat1.tier === 'heat', `evaluateRivalryState triggers 'heat' at leaderPct=${rHeat1.leaderPct}%`);
+
+        const heatB2 = newTokens();
+        heatB2[0] = [HOME, 12, IN_BASE, IN_BASE]; // ~31%
+        heatB2[1] = [10, IN_BASE, IN_BASE, IN_BASE]; // ~5% (margin >= 12 -> heat)
+        const rHeat2 = evaluateRivalryState(heatB2, -1, [true, true, true, true]);
+        assert(rHeat2.tier === 'heat', `evaluateRivalryState triggers 'heat' at >=30% with margin=${rHeat2.leadMargin}%`);
+
+        const dethroneB = newTokens();
+        dethroneB[0] = [HOME, HOME, HOME, IN_BASE]; // 75%
+        dethroneB[1] = [HOME, HOME, IN_BASE, IN_BASE]; // 50%
+        const rDet1 = evaluateRivalryState(dethroneB, -1, [true, true, true, true]);
+        assert(rDet1.tier === 'dethrone', `evaluateRivalryState triggers 'dethrone' at leaderPct=${rDet1.leaderPct}%`);
+
+        const dethroneB2 = newTokens();
+        dethroneB2[0] = [HOME, HOME, IN_BASE, IN_BASE]; // 50%
+        dethroneB2[1] = [HOME, IN_BASE, IN_BASE, IN_BASE]; // 25% (margin 25 >= 20 -> dethrone)
+        const rDet2 = evaluateRivalryState(dethroneB2, -1, [true, true, true, true]);
+        assert(rDet2.tier === 'dethrone', `evaluateRivalryState triggers 'dethrone' at >=45% & margin=${rDet2.leadMargin}%`);
+
+        // Grudge 6-turn tracker
+        const grudges = createEmptyGrudges();
+        const cap1 = recordCaptureGrudge(grudges, 1, 2); // seat 1 hits seat 2 -> seat 2 holds grudge vs 1 for 6 turns
+        assert(!cap1.revengeHit && grudges[2]?.targetIdx === 1 && grudges[2]?.turnsLeft === 6, 'recordCaptureGrudge records 6-turn grudge on victim');
+        decrementSeatGrudge(grudges, 2);
+        assert(grudges[2]?.turnsLeft === 5, 'decrementSeatGrudge decrements turnsLeft to 5');
+        const capRevenge = recordCaptureGrudge(grudges, 2, 1); // seat 2 hits seat 1 -> revenge!
+        assert(capRevenge.revengeHit && grudges[2] === null && grudges[1]?.targetIdx === 2, 'Revenge hit clears attacker grudge and sets victim grudge');
+        for (let t = 0; t < 6; t++) decrementSeatGrudge(grudges, 1);
+        assert(grudges[1] === null, 'Grudge expires cleanly to null after 6 completed turns');
+
+        // Grudge capture vs standard capture ordering & hitsGrudge flag
+        const gBoard = newTokens();
+        const grudgeG29 = (29 - 39 + 52) % 52; // seat 3 at global 29
+        const otherG30 = (30 - 13 + 52) % 52; // seat 1 at global 30
+        gBoard[0] = [HOME, HOME, HOME, IN_BASE]; // seat 0 leader (off board)
+        gBoard[1] = [otherG30, IN_BASE, IN_BASE, IN_BASE]; // standard target
+        gBoard[3] = [grudgeG29, IN_BASE, IN_BASE, IN_BASE]; // grudge target
+        gBoard[2] = [1, 2, IN_BASE, IN_BASE]; // rel 1=g27 (+2 -> g29 grudge), rel 2=g28 (+2 -> g30 standard)
+        const gDice: [number, number] = [2, 5];
+        const gLegal = legalMovesForTurn(gBoard, 2, gDice, [false, false], [true, true, true, true]);
+        const gOb = evaluateCaptureObligation(gBoard, 2, gDice, [true, true, true, true]);
+        const gPick = pickBestAIMove(gBoard, 2, gLegal, [true, true, true, true], gDice, [false, false], gOb, 0, {
+            personality: 'Rival',
+            grudgeTargetIdx: 3,
+        });
+        assert(
+            gPick.hitsGrudge && !gPick.hitsLeader && gPick.move.captures.some((c) => c.p === 3),
+            'pickBestAIMove prioritizes Grudge capture over standard capture and flags hitsGrudge=true',
+        );
+
+        // Ambush & Don't-feed-the-leader danger scoring
+        const fBoard = newTokens();
+        fBoard[0] = [HOME, HOME, HOME, 10]; // Leader at global 10 (dethrone 75%+)
+        fBoard[1] = [1, IN_BASE, IN_BASE, IN_BASE]; // AI seat 1 at rel 1 (global 14) -> 4 steps ahead of Leader (danger if moving to global 15, safe if global 21 star)
+        const dangerMove = { tok: 0, to: 2, die: 0, value: 2, captures: [], fromBase: false, reachesHome: false }; // rel 2 -> global 15 (5 ahead of g10)
+        const safeStarMove = { tok: 0, to: 8, die: 0, value: 8, captures: [], fromBase: false, reachesHome: false }; // rel 8 -> global 21 (SAFE star)
+        let dangerSum = 0;
+        let safeSum = 0;
+        for (let k = 0; k < 5; k++) {
+            dangerSum += scoreMove(fBoard, 1, dangerMove, [true, true, false, false], { personality: 'Confidante' });
+            safeSum += scoreMove(fBoard, 1, safeStarMove, [true, true, false, false], { personality: 'Confidante' });
+        }
+        assert(safeSum > dangerSum, "Confidante strongly avoids feeding an exposed pawn 1-6 steps ahead of Dethrone Leader");
+
+        // All 4 personalities x 3 callout kinds interpolate {target} and {pct}
+        const kinds: RivalryCalloutKind[] = ['dethrone_alert', 'leader_hit', 'grudge_hit'];
+        for (const p of AI_PERSONALITIES) {
+            for (const kind of kinds) {
+                const line = getRivalryCalloutLine(p, kind, 'Zoi', 78);
+                assert(
+                    line.includes('Zoi') && (kind === 'grudge_hit' || line.includes('78')),
+                    `getRivalryCalloutLine('${p}', '${kind}') interpolates target & pct cleanly`,
+                );
+            }
+        }
+    }
+
+    // Test 25: Server authoritative ludo:rivalry_event & private grudges
+    {
+        const emitted: { event: string; payload: any }[] = [];
+        roomManager.setBroadcastCallback((_room, event, payload) => {
+            emitted.push({ event, payload });
+        });
+        const hTok = 'tok_rivalry_host_12345678901234';
+        const cRes = roomManager.createRoom(hTok, 'RivalHost', '👑', 'sock_rh', 90, 4, '10.10.1.50');
+        assert(cRes.ok && !!cRes.roomCode, 'Created room for server rivalry event test');
+        roomManager.startGame(cRes.roomCode!, hTok);
+        const rObj = roomManager.getRoom(cRes.roomCode!)!;
+        const clientState = roomManager.getClientRoomState(rObj) as any;
+        assert(!('grudges' in clientState), 'ClientRoomState keeps grudges private and omits it from match payload');
+
+        // Setup seat 0 approaching 75% (3 pawns HOME, 4th pawn at 49 -> +1 enters PATH_START 51 => triggers dethrone!)
+        rObj.tokens = [
+            [HOME, HOME, HOME, 49],
+            [0, IN_BASE, IN_BASE, IN_BASE],
+            [0, IN_BASE, IN_BASE, IN_BASE],
+            [0, IN_BASE, IN_BASE, IN_BASE],
+        ];
+        rObj.tokens = [
+            [HOME, HOME, 49, IN_BASE], // 74% -> moving tok 2 from 49 -> 51 makes 3 tokens >=51 = 75% (dethrone, NOT hasWon!)
+            [0, IN_BASE, IN_BASE, IN_BASE],
+            [0, IN_BASE, IN_BASE, IN_BASE],
+            [0, IN_BASE, IN_BASE, IN_BASE],
+        ];
+        rObj.currentTurn = 0;
+        rObj.dice = [1, 1];
+        rObj.diceUsed = [false, false];
+        emitted.length = 0;
+        const mvRes = roomManager.movePawn(cRes.roomCode!, hTok, 2, 2, 'gul', false);
+        assert(mvRes.ok, `Host moved pawn into home stretch reaching 75% (${mvRes.error || 'ok'})`);
+        const dethroneEv = emitted.find((e) => e.event === 'ludo:rivalry_event' && e.payload?.kind === 'dethrone_alert');
+        assert(
+            !!dethroneEv && dethroneEv.payload.targetSeat === 0 && dethroneEv.payload.leaderPct >= 75,
+            'Server broadcasts authoritative ludo:rivalry_event (dethrone_alert) when leader enters dethrone tier',
+        );
+
+        // Moving again should NOT re-emit dethrone_alert for the same leader
+        emitted.length = 0;
+        rObj.currentTurn = 0;
+        rObj.dice = [1, 1];
+        rObj.diceUsed = [false, false];
+        roomManager.movePawn(cRes.roomCode!, hTok, 2, 2, 'gul', false);
+        const dupAlert = emitted.find((e) => e.event === 'ludo:rivalry_event' && e.payload?.kind === 'dethrone_alert');
+        assert(!dupAlert, 'dethrone_alert fires at most once per leader per match');
+
+        // Seat 1 captures seat 0 (the dethrone leader) -> emits leader_hit + records grudge on seat 0
+        const leaderPosRel = 14; // seat 0 rel 14 = global 14
+        rObj.tokens = [
+            [HOME, HOME, HOME, leaderPosRel], // 75%
+            [0, IN_BASE, IN_BASE, IN_BASE], // seat 1 rel 0 = global 13
+            [0, IN_BASE, IN_BASE, IN_BASE],
+            [0, IN_BASE, IN_BASE, IN_BASE],
+        ];
+        rObj.currentTurn = 1;
+        rObj.dice = [1, 3]; // seat 1 moves tok 0 +1 -> rel 1 (global 14) capturing seat 0
+        rObj.diceUsed = [false, false];
+        emitted.length = 0;
+        const capMove = roomManager.movePawn(cRes.roomCode!, '', 0, 0, 'gul', true);
+        assert(capMove.ok, 'Seat 1 captured Dethrone leader token');
+        const hitEv = emitted.find((e) => e.event === 'ludo:rivalry_event' && e.payload?.kind === 'leader_hit');
+        assert(
+            !!hitEv && hitEv.payload.actorSeat === 1 && hitEv.payload.targetSeat === 0 && rObj.grudges[0]?.targetIdx === 1,
+            'Server emits leader_hit and records private 6-turn grudge on victim',
+        );
+        roomManager.setBroadcastCallback(() => {});
+    }
 
     console.log('🎉 ALL LUDO RULES & PENALTY & GUL TESTS PASSED SUCCESSFULLY!');
     process.exit(0);

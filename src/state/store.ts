@@ -1,7 +1,8 @@
 import { useSyncExternalStore } from 'react';
 import { readDevice, readLocal, write } from './persist';
 import type { NameplateBound } from '../game/bus';
-import type { AIPersonality } from '../game/banter';
+import type { AIPersonality, RivalryCalloutKind } from '../game/banter';
+import { createEmptyGrudges, type GrudgeEntry, type RivalryState } from '../game/rules';
 import type { BoardThemeId, DiceStyleId } from '../game/themes';
 
 export type Phase = 'loading' | 'menu' | 'setup' | 'playing';
@@ -92,6 +93,20 @@ export interface AppState {
     activeSpeechBalloon: { idx: number; text: string } | null;
     captureNotice: string | null;
     skipCapturePrompt: { message: string } | null;
+    rivalry: RivalryState | null;
+    grudges: (GrudgeEntry | null)[];
+    rivalryBanner: {
+        id: number;
+        kind: RivalryCalloutKind;
+        icon: string;
+        title: string;
+        message: string;
+        targetSeat: number;
+        actorSeat: number;
+        leaderPct: number;
+        until: number;
+    } | null;
+    localReactions: Record<number, { seatIndex: number; emoji: string; until: number; key: number }>;
     chatOpen: boolean;
     nameplateBounds: NameplateBound[];
     micPermission: MicPermissionState;
@@ -176,6 +191,10 @@ let state: AppState = {
     activeSpeechBalloon: null,
     captureNotice: null,
     skipCapturePrompt: null,
+    rivalry: null,
+    grudges: createEmptyGrudges(),
+    rivalryBanner: null,
+    localReactions: {},
     chatOpen: false,
     nameplateBounds: [],
     micPermission: 'unknown',

@@ -99,6 +99,7 @@ function JointPercentageBar({ compact = false }: { compact?: boolean }) {
     const players = useStore((s) => s.players);
     const lang = useStore((s) => s.settings.lang);
     const current = useStore((s) => s.current);
+    const rivalry = useStore((s) => s.rivalry);
     const idxs = [0, 1, 2, 3].filter((i) => active[i]);
 
     const nm = (i: number) => {
@@ -134,25 +135,40 @@ function JointPercentageBar({ compact = false }: { compact?: boolean }) {
                 const isTurn = current === i;
                 const widthPct = widths[index];
                 const pct = progress[i] || 0;
+                const isDethroneTarget = rivalry?.tier === 'dethrone' && rivalry.leaderIdx === i;
                 return (
                     <div
                         key={i}
                         className={`relative flex items-center justify-center font-black text-white text-center transition-[width] duration-500 ease-out overflow-hidden ${
-                            isTurn
+                            isDethroneTarget
+                                ? 'brightness-110 z-20'
+                                : isTurn
                                 ? 'brightness-110 drop-shadow-[0_0_8px_rgba(255,255,255,0.8)] z-10'
                                 : 'opacity-95'
                         }`}
                         style={{
                             width: `${widthPct}%`,
-                            background: hex(COLORS[i]),
+                            background: isDethroneTarget
+                                ? `linear-gradient(180deg, rgba(255,71,87,0.38) 0%, ${hex(COLORS[i])} 55%, rgba(255,71,87,0.38) 100%)`
+                                : hex(COLORS[i]),
                             textShadow: '0 1px 3px rgba(0,0,0,0.85)',
                             borderRight: index < idxs.length - 1 ? '1.5px solid rgba(255,255,255,0.35)' : 'none',
+                            boxShadow: isDethroneTarget
+                                ? 'inset 0 0 0 2px #ff4757, 0 0 12px rgba(255,71,87,0.85)'
+                                : undefined,
                         }}
-                        title={`${nm(i)}: ${pct}%`}
+                        title={isDethroneTarget ? `🎯 Target: ${nm(i)} (${pct}%)` : `${nm(i)}: ${pct}%`}
                     >
                         {/* Glowing active turn indicator atop the segment */}
                         {isTurn && (
                             <div className="absolute inset-x-0 top-0 h-1 bg-white animate-pulse shadow-[0_0_6px_#fff]" />
+                        )}
+                        {/* Subtle red bottom edge accent on Dethrone target */}
+                        {isDethroneTarget && (
+                            <div
+                                className="absolute inset-x-0 bottom-0 h-0.5 animate-pulse"
+                                style={{ backgroundColor: '#ff4757' }}
+                            />
                         )}
 
                         {/* Responsive label adapting to dynamic segment width */}
@@ -160,6 +176,11 @@ function JointPercentageBar({ compact = false }: { compact?: boolean }) {
                             className="px-1.5 flex items-center justify-center gap-1 truncate font-black tracking-wide"
                             style={{ fontSize: U(13) }}
                         >
+                            {isDethroneTarget && (
+                                <span className="shrink-0 leading-none" aria-label="Dethrone Target">
+                                    🎯
+                                </span>
+                            )}
                             {widthPct > 24 ? (
                                 <span className="truncate">
                                     {nm(i)}: {pct}%
@@ -280,6 +301,7 @@ function NameplateOverlays() {
     const activeVoiceSeat = multiplayerClient.activeVoiceSeat;
     const activeWhisperBadge = multiplayerClient.activeWhisperBadge;
     const activeReactions = multiplayerClient.activeReactions;
+    const localReactions = useStore((s) => s.localReactions);
     const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const didLongPressRef = useRef(false);
 
@@ -298,7 +320,7 @@ function NameplateOverlays() {
                     !!activeWhisperBadge &&
                     (activeWhisperBadge.fromSeat === nb.seatIdx || activeWhisperBadge.toSeats.includes(nb.seatIdx));
                 const isMuted = isMultiplayer && multiplayerClient.isSeatMuted(nb.seatIdx);
-                const reaction = isMultiplayer ? activeReactions[nb.seatIdx] : undefined;
+                const reaction = isMultiplayer ? activeReactions[nb.seatIdx] : localReactions[nb.seatIdx];
                 const roomPlayer = roomPlayers?.[nb.seatIdx];
                 const canWhisperTarget =
                     isMultiplayer &&
@@ -720,6 +742,7 @@ export function Hud() {
     const activeSpeechBalloon = useStore((s) => s.activeSpeechBalloon);
     const captureNotice = useStore((s) => s.captureNotice);
     const skipCapturePrompt = useStore((s) => s.skipCapturePrompt);
+    const rivalryBanner = useStore((s) => s.rivalryBanner);
 
     const [, setNetTick] = useState(0);
     const chatOpen = useStore((s) => s.chatOpen);
@@ -967,18 +990,21 @@ export function Hud() {
                                     (entry.kind === 'voice' || entry.kind === 'whisper_in' || entry.kind === 'whisper_out') &&
                                     !!entry.payload;
                                 const isWhisperRow = entry.kind === 'whisper_in' || entry.kind === 'whisper_out' || entry.kind === 'whisper_notice';
+                                const isSystemRow = entry.kind === 'system';
                                 return (
                                     <div
                                         key={entry.id}
                                         className={`flex items-center justify-between gap-1.5 px-2 py-1 rounded-lg text-[11px] ${
-                                            isWhisperRow
+                                            isSystemRow
+                                                ? 'bg-amber-950/45 border border-amber-400/35 text-amber-100 italic'
+                                                : isWhisperRow
                                                 ? 'bg-purple-950/50 border border-purple-500/30 text-purple-100'
                                                 : 'bg-slate-950/70 text-slate-200'
                                         }`}
                                     >
                                         <div className="min-w-0 truncate">
-                                            <span className="font-black text-cyan-300 mr-1">
-                                                {cleanPlayerName(entry.sender)}:
+                                            <span className={`font-black mr-1 ${isSystemRow ? 'text-amber-300' : 'text-cyan-300'}`}>
+                                                {isSystemRow ? '🎯' : `${cleanPlayerName(entry.sender)}:`}
                                             </span>
                                             <span>
                                                 {entry.emoji ? `${entry.emoji} ` : ''}
@@ -1131,6 +1157,38 @@ export function Hud() {
                         </div>
                     </div>
                 )
+            )}
+
+            {/* Rivalry Drama Banner (Dethrone Alert / Leader Hit / Grudge Payback) */}
+            {rivalryBanner && !modal && !captureNotice && !skipCapturePrompt && (
+                <div
+                    className="pointer-events-none absolute z-35 flex items-center justify-center transition-all"
+                    style={{
+                        top: landscape ? U(36) : U(50),
+                        left: '50%',
+                        transform: 'translateX(-50%)',
+                        width: 'max-content',
+                        maxWidth: '92vw',
+                    }}
+                >
+                    <div
+                        className={`flex flex-col items-center px-4 py-1.5 rounded-2xl border backdrop-blur-md shadow-xl select-none text-center ${
+                            rivalryBanner.kind === 'dethrone_alert'
+                                ? 'border-[#ff4757]/80 bg-red-950/90 text-red-100 shadow-[0_0_22px_rgba(255,71,87,0.45)]'
+                                : rivalryBanner.kind === 'leader_hit'
+                                ? 'border-amber-400/80 bg-slate-950/90 text-amber-100 shadow-[0_0_20px_rgba(245,158,11,0.35)]'
+                                : 'border-purple-400/80 bg-slate-950/90 text-purple-100 shadow-[0_0_20px_rgba(168,85,247,0.35)]'
+                        }`}
+                    >
+                        <div className="flex items-center gap-1.5 text-[11px] font-black tracking-wider uppercase">
+                            <span>{rivalryBanner.icon}</span>
+                            <span>{rivalryBanner.title}</span>
+                        </div>
+                        <div className="text-xs font-semibold text-white/90 max-w-[340px] truncate">
+                            {rivalryBanner.message}
+                        </div>
+                    </div>
+                </div>
             )}
 
             {/* Short Note: Capture available (First 3 matches only) */}

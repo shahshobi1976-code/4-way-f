@@ -1,4 +1,5 @@
 import { store, useStore, DEFAULT_PLAYERS } from '../state/store';
+import { createEmptyGrudges } from '../game/rules';
 import { LANGS, tr, colorName } from '../i18n';
 import { U } from './kit';
 import { multiplayerClient } from '../network/multiplayerClient';
@@ -42,7 +43,18 @@ export function SetupScreen() {
         const active = mode === 2 ? [false, true, false, true] : [true, true, true, true];
         // make sure at least one human takes a seat: otherwise the first seat becomes human
         if (!seats.some((i) => !players[i].ai)) store.patchPlayer(seats[seats.length - 1], { ai: false });
-        store.patch({ phase: 'playing', active, gameId: store.get().gameId + 1, result: null, popup: null, modal: null });
+        store.patch({
+            phase: 'playing',
+            active,
+            gameId: store.get().gameId + 1,
+            result: null,
+            popup: null,
+            modal: null,
+            rivalry: null,
+            grudges: createEmptyGrudges(),
+            rivalryBanner: null,
+            localReactions: {},
+        });
     };
 
     const goBackToMainMenu = () => {

@@ -278,6 +278,96 @@ export interface MatchLeaderResult {
     score: number;
 }
 
+export type RivalryTier = 'normal' | 'heat' | 'dethrone';
+
+export interface RivalryState {
+    leaderIdx: number;
+    leaderPct: number;
+    runnerUpPct: number;
+    leadMargin: number;
+    tier: RivalryTier;
+}
+
+export interface GrudgeEntry {
+    targetIdx: number;
+    turnsLeft: number;
+}
+
+export interface AIScoringOptions {
+    personality?: string;
+    grudgeTargetIdx?: number | null;
+}
+
+export function createEmptyGrudges(): (GrudgeEntry | null)[] {
+    return [null, null, null, null];
+}
+
+export function recordCaptureGrudge(
+    grudges: (GrudgeEntry | null)[],
+    attackerIdx: number,
+    victimIdx: number,
+): { revengeHit: boolean } {
+    if (
+        attackerIdx < 0 ||
+        attackerIdx >= grudges.length ||
+        victimIdx < 0 ||
+        victimIdx >= grudges.length ||
+        attackerIdx === victimIdx
+    ) {
+        return { revengeHit: false };
+    }
+    const revengeHit = grudges[attackerIdx]?.targetIdx === victimIdx;
+    if (revengeHit) {
+        grudges[attackerIdx] = null;
+    }
+    grudges[victimIdx] = { targetIdx: attackerIdx, turnsLeft: 6 };
+    return { revengeHit };
+}
+
+export function decrementSeatGrudge(grudges: (GrudgeEntry | null)[], seatIdx: number): void {
+    if (seatIdx < 0 || seatIdx >= grudges.length) return;
+    const entry = grudges[seatIdx];
+    if (!entry) return;
+    const nextTurns = entry.turnsLeft - 1;
+    grudges[seatIdx] = nextTurns > 0 ? { targetIdx: entry.targetIdx, turnsLeft: nextTurns } : null;
+}
+
+/**
+ * Evaluates escalating rivalry state (`normal` | `heat` | `dethrone`) across active seats
+ * (optionally excluding `excludePIdx`), returning `{ leaderIdx, leaderPct, runnerUpPct, leadMargin, tier }`.
+ */
+export function evaluateRivalryState(
+    pawns: Tokens,
+    excludePIdx = -1,
+    active: boolean[] = [true, true, true, true],
+): RivalryState {
+    const ranked: { p: number; pct: number; fine: number }[] = [];
+    for (let p = 0; p < pawns.length; p++) {
+        if (p === excludePIdx || !active[p]) continue;
+        ranked.push({
+            p,
+            pct: percent(pawns, p),
+            fine: fineProgress(pawns, p),
+        });
+    }
+    if (ranked.length === 0) {
+        return { leaderIdx: -1, leaderPct: 0, runnerUpPct: 0, leadMargin: 0, tier: 'normal' };
+    }
+    ranked.sort((a, b) => b.pct - a.pct || b.fine - a.fine);
+    const leaderIdx = ranked[0].p;
+    const leaderPct = ranked[0].pct;
+    const runnerUpPct = ranked.length > 1 ? ranked[1].pct : 0;
+    const leadMargin = Math.max(0, leaderPct - runnerUpPct);
+
+    let tier: RivalryTier = 'normal';
+    if (leaderPct >= 75 || (leaderPct >= 45 && leadMargin >= 20)) {
+        tier = 'dethrone';
+    } else if (leaderPct >= 55 || (leaderPct >= 30 && leadMargin >= 12)) {
+        tier = 'heat';
+    }
+    return { leaderIdx, leaderPct, runnerUpPct, leadMargin, tier };
+}
+
 /**
  * Scores every other active seat (`finished` pawns weighted 1000 + active pawn `pos + 1`)
  * and returns the current match leader `{ leaderIdx, score }`.
@@ -331,9 +421,30 @@ export function isEntrySquareThreatened(
 }
 
 /** The computer players pile on whoever is winning: captures and ambushes of the leader score highest. */
-export function scoreMove(tokens: Tokens, p: number, m: Move, active: boolean[]): number {
-    const { leaderIdx: leader } = getMatchLeader(tokens, p, active);
+export function scoreMove(
+    tokens: Tokens,
+    p: number,
+    m: Move,
+    active: boolean[],
+    opts?: AIScoringOptions,
+): number {
+    const globalRivalry = evaluateRivalryState(tokens, -1, active);
+    const rivalry =
+        globalRivalry.leaderIdx >= 0 && globalRivalry.leaderIdx !== p
+            ? globalRivalry
+            : evaluateRivalryState(tokens, p, active);
+    const matchLeader = getMatchLeader(tokens, p, active).leaderIdx;
+    const leader = rivalry.leaderIdx >= 0 ? rivalry.leaderIdx : matchLeader;
     const leaderPct = leader >= 0 ? percent(tokens, leader) / 100 : 0;
+    const personality = opts?.personality || '';
+    const grudgeTarget =
+        opts?.grudgeTargetIdx !== null &&
+        opts?.grudgeTargetIdx !== undefined &&
+        opts.grudgeTargetIdx >= 0 &&
+        opts.grudgeTargetIdx !== p &&
+        active[opts.grudgeTargetIdx]
+            ? opts.grudgeTargetIdx
+            : -1;
     const winStart = coloredPathStartIndex(p);
     const r0 = tokens[p][m.tok];
     let s = Math.random() * 6;
@@ -349,6 +460,7 @@ export function scoreMove(tokens: Tokens, p: number, m: Move, active: boolean[])
         const victimProg = tokens[c.p][c.t];
         s += 100 + victimProg * 0.8;
         if (c.p === leader && c.p !== p) s += 400 + 80 * leaderPct;
+        if (c.p === grudgeTarget) s += personality === 'Rival' ? 320 : 250;
     }
     if (r0 < winStart && m.to >= winStart) s += 130;
     if (m.reachesHome) s += 30;
@@ -358,12 +470,39 @@ export function scoreMove(tokens: Tokens, p: number, m: Move, active: boolean[])
     s += m.to * 0.35;
     if (m.to <= LAST_TRACK) {
         const g = globalIdx(p, m.to);
+        const existingFriendly = countColorOnGlobal(tokens, p, g, m.tok);
         if (SAFE.has(g)) s += 18;
-        else if (countColorOnGlobal(tokens, p, g, m.tok) >= 1) {
-            // Forming or reinforcing a protected friendly stack on an open square
-            s += 14;
+        else if (existingFriendly >= 1) {
+            // 2-Token Stack Shield & Leader Roadblock bonus
+            const shieldBase = personality === 'Strategist' || personality === 'Rideordie' ? 48 : 24;
+            const shieldTierMult = rivalry.tier === 'dethrone' ? 1.4 : rivalry.tier === 'heat' ? 1.15 : 1.0;
+            s += shieldBase * shieldTierMult;
+            if (leader >= 0 && leader !== p) {
+                let blocksLeader = false;
+                for (let u = 0; u < 4; u++) {
+                    const rr = tokens[leader][u];
+                    if (rr < 0 || rr > LAST_TRACK) continue;
+                    const distAheadOfLeader = (g - globalIdx(leader, rr) + 52) % 52;
+                    if (distAheadOfLeader >= 1 && distAheadOfLeader <= 8) {
+                        blocksLeader = true;
+                        break;
+                    }
+                }
+                if (blocksLeader) {
+                    s += rivalry.tier === 'dethrone' ? 85 : 55;
+                }
+            }
         }
-        // Ambush positioning: +260 + leaderPos for landing 1..6 squares behind an active leader pawn
+
+        // Tiered Ambush Positioning: stage 1..6 steps behind active Leader tokens
+        const ambushMult =
+            rivalry.tier === 'dethrone'
+                ? 1.55
+                : rivalry.tier === 'heat'
+                ? 1.25
+                : personality === 'Rival'
+                ? 1.2
+                : 1.0;
         if (leader >= 0 && leader !== p) {
             for (let u = 0; u < 4; u++) {
                 const rr = tokens[leader][u];
@@ -371,19 +510,56 @@ export function scoreMove(tokens: Tokens, p: number, m: Move, active: boolean[])
                 const lg = globalIdx(leader, rr);
                 const dist = (lg - g + 52) % 52;
                 if (dist >= 1 && dist <= 6 && !SAFE.has(lg)) {
-                    s += 260 + rr;
+                    const lateStretchBonus = personality === 'Strategist' && rr >= 34 ? 95 : 0;
+                    s += (260 + rr) * ambushMult + lateStretchBonus;
                 }
             }
         }
-        // avoid landing right in front of an opponent unless protected in a friendly stack
-        if (!SAFE.has(g) && countColorOnGlobal(tokens, p, g, m.tok) === 0) {
+
+        // Grudge Stalking: stage 1..6 steps behind grudge target
+        if (grudgeTarget >= 0) {
+            for (let u = 0; u < 4; u++) {
+                const rr = tokens[grudgeTarget][u];
+                if (rr < 0 || rr > LAST_TRACK) continue;
+                const gg = globalIdx(grudgeTarget, rr);
+                const dist = (gg - g + 52) % 52;
+                if (dist >= 1 && dist <= 6 && !SAFE.has(gg)) {
+                    s += personality === 'Rival' ? 190 : 140;
+                }
+            }
+        }
+
+        // "Don't Feed the Leader" Danger Penalty & general open-track exposure check
+        if (!SAFE.has(g) && existingFriendly === 0) {
+            let leaderFeedApplied = false;
             for (let q = 0; q < 4; q++) {
                 if (q === p || !active[q]) continue;
                 for (let u = 0; u < 4; u++) {
                     const rr = tokens[q][u];
                     if (rr < 0 || rr > LAST_TRACK) continue;
                     const dist = (g - globalIdx(q, rr) + 52) % 52;
-                    if (dist >= 1 && dist <= 6) s -= q === leader ? 8 : 22;
+                    if (dist >= 1 && dist <= 6) {
+                        if (q === leader) {
+                            if (!leaderFeedApplied) {
+                                leaderFeedApplied = true;
+                                const feedPenalty =
+                                    rivalry.tier === 'dethrone'
+                                        ? personality === 'Confidante'
+                                            ? 200
+                                            : 180
+                                        : rivalry.tier === 'heat'
+                                        ? personality === 'Confidante'
+                                            ? 175
+                                            : 155
+                                        : personality === 'Confidante'
+                                        ? 160
+                                        : 135;
+                                s -= feedPenalty;
+                            }
+                        } else {
+                            s -= 22;
+                        }
+                    }
                 }
             }
         }
@@ -401,27 +577,55 @@ export function pickBestAIMove(
     diceUsed?: [boolean, boolean],
     obligation?: CaptureObligation | null,
     capturesMade = 0,
-): { move: Move; hitsLeader: boolean } {
+    opts?: AIScoringOptions,
+): { move: Move; hitsLeader: boolean; hitsGrudge: boolean } {
     const pool =
         dice && diceUsed
             ? pickObligationAwarePool(tokens, p, dice, diceUsed, active, options, obligation, capturesMade)
             : options;
-    const { leaderIdx } = getMatchLeader(tokens, p, active);
+    const globalRivalry = evaluateRivalryState(tokens, -1, active);
+    const rivalry =
+        globalRivalry.leaderIdx >= 0 && globalRivalry.leaderIdx !== p
+            ? globalRivalry
+            : evaluateRivalryState(tokens, p, active);
+    const leaderIdx = rivalry.leaderIdx >= 0 ? rivalry.leaderIdx : getMatchLeader(tokens, p, active).leaderIdx;
+    const grudgeIdx =
+        opts?.grudgeTargetIdx !== null &&
+        opts?.grudgeTargetIdx !== undefined &&
+        opts.grudgeTargetIdx >= 0 &&
+        opts.grudgeTargetIdx !== p &&
+        active[opts.grudgeTargetIdx]
+            ? opts.grudgeTargetIdx
+            : -1;
+
+    // Order capture targets while keeping compulsory & 2-capture chains intact:
+    // Leader capture > Grudge capture > standard capture
     const leaderCapPool =
         leaderIdx >= 0 ? pool.filter((m) => m.captures.some((c) => c.p === leaderIdx)) : [];
-    const evalPool = leaderCapPool.length > 0 ? leaderCapPool : pool;
+    const grudgeCapPool =
+        grudgeIdx >= 0 ? pool.filter((m) => m.captures.some((c) => c.p === grudgeIdx)) : [];
+    const anyCapPool = pool.filter((m) => m.captures.length > 0);
+    const evalPool =
+        leaderCapPool.length > 0
+            ? leaderCapPool
+            : grudgeCapPool.length > 0
+            ? grudgeCapPool
+            : anyCapPool.length > 0
+            ? anyCapPool
+            : pool;
 
     let best = evalPool[0];
     let bs = -Infinity;
     for (const m of evalPool) {
-        const s = scoreMove(tokens, p, m, active);
+        const s = scoreMove(tokens, p, m, active, opts);
         if (s > bs) {
             bs = s;
             best = m;
         }
     }
     const hitsLeader = leaderIdx >= 0 && best.captures.some((c) => c.p === leaderIdx);
-    return { move: best, hitsLeader };
+    const hitsGrudge = grudgeIdx >= 0 && best.captures.some((c) => c.p === grudgeIdx);
+    return { move: best, hitsLeader, hitsGrudge };
 }
 
 export function pickMove(tokens: Tokens, p: number, options: Move[], active: boolean[]): Move {

@@ -18,12 +18,18 @@ import {
     LAST_TRACK,
     PATH_START,
     globalIdx,
+    evaluateRivalryState,
+    createEmptyGrudges,
+    recordCaptureGrudge,
+    decrementSeatGrudge,
+    type GrudgeEntry,
     type CaptureObligation,
     type Move,
     type Tokens,
 } from '../src/game/rules';
 import {
     pickBanterIndex,
+    pickRivalryCalloutIndex,
     AI_PERSONALITIES,
     getPersonalityForSeat,
     normalizeAIPersonality,
@@ -32,6 +38,7 @@ import {
     BANTER_HIGH_PRIORITY_COOLDOWN_MS,
     type AIPersonality,
     type BanterEvent,
+    type RivalryCalloutKind,
 } from '../src/game/banter';
 import {
     generateGuestIdentity,
@@ -141,6 +148,8 @@ export interface Room {
     hadCaptureOrHomeThisTurn?: boolean;
     turnAutoPlay?: boolean;
     initialTurnTokens?: Tokens;
+    grudges: (GrudgeEntry | null)[];
+    dethroneAlertedLeaders: Set<number>;
     turnTimeout?: NodeJS.Timeout | null;
     disconnectTimeouts: Map<number, NodeJS.Timeout>;
 }
@@ -228,6 +237,31 @@ class RoomManager {
         });
     }
 
+    private emitRivalryEvent(
+        room: Room,
+        kind: RivalryCalloutKind,
+        actorSeat: number,
+        targetSeat: number,
+        leaderPct: number,
+    ) {
+        const speakerSeat =
+            actorSeat >= 0 && room.players[actorSeat]?.isAI
+                ? actorSeat
+                : room.players.findIndex((p, s) => s !== targetSeat && !!p?.isAI);
+        const speakerPersonality =
+            speakerSeat >= 0
+                ? room.players[speakerSeat]?.personality || room.botPersonalities?.[speakerSeat] || getPersonalityForSeat(speakerSeat)
+                : 'Strategist';
+        const lineIdx = pickRivalryCalloutIndex(speakerPersonality, kind);
+        this.broadcast(room.code, 'ludo:rivalry_event', {
+            kind,
+            actorSeat,
+            targetSeat,
+            leaderPct: Math.round(leaderPct),
+            lineIdx,
+        });
+    }
+
     private serializeRoom(room: Room) {
         return {
             code: room.code,
@@ -262,6 +296,8 @@ class RoomManager {
             hadCaptureOrHomeThisTurn: room.hadCaptureOrHomeThisTurn,
             turnAutoPlay: room.turnAutoPlay,
             initialTurnTokens: room.initialTurnTokens,
+            grudges: room.grudges,
+            dethroneAlertedLeaders: Array.from(room.dethroneAlertedLeaders || []),
             savedAt: Date.now(),
         };
     }
@@ -350,6 +386,8 @@ class RoomManager {
                     hadCaptureOrHomeThisTurn: item.hadCaptureOrHomeThisTurn,
                     turnAutoPlay: false,
                     initialTurnTokens: item.initialTurnTokens,
+                    grudges: Array.isArray(item.grudges) && item.grudges.length === 4 ? item.grudges : createEmptyGrudges(),
+                    dethroneAlertedLeaders: new Set(Array.isArray(item.dethroneAlertedLeaders) ? item.dethroneAlertedLeaders : []),
                     disconnectTimeouts: new Map(),
                 };
                 this.rooms.set(room.code, room);
@@ -579,6 +617,8 @@ class RoomManager {
             capturePromise: 0,
             capturesTakenThisTurn: 0,
             turnAutoPlay: false,
+            grudges: createEmptyGrudges(),
+            dethroneAlertedLeaders: new Set(),
         };
 
         this.rooms.set(code, room);
@@ -831,6 +871,8 @@ class RoomManager {
         room.hadCaptureOrHomeThisTurn = false;
         room.turnAutoPlay = false;
         room.initialTurnTokens = room.tokens.map((r) => r.slice());
+        room.grudges = createEmptyGrudges();
+        room.dethroneAlertedLeaders = new Set();
 
         const turnLimitMs = this.getTurnLimitMs(room);
         room.turnDeadline = room.turnTimeSec > 0 ? Date.now() + turnLimitMs : 0;
@@ -973,6 +1015,9 @@ class RoomManager {
             : [];
 
         if (allMoves.length > 0) {
+            const botPlayer = room.players[botIdx];
+            const botPersonality = botPlayer?.personality || room.botPersonalities?.[botIdx] || getPersonalityForSeat(botIdx);
+            const grudgeTargetIdx = room.grudges?.[botIdx]?.targetIdx ?? null;
             const { move: chosen } = pickBestAIMove(
                 room.tokens,
                 botIdx,
@@ -982,6 +1027,7 @@ class RoomManager {
                 room.diceUsed,
                 room.turnObligation,
                 room.capturesTakenThisTurn || 0,
+                { personality: botPersonality, grudgeTargetIdx },
             );
             if (chosen) {
                 this.movePawn(room.code, '', chosen.die, chosen.tok, 'gul', true);
@@ -1213,6 +1259,7 @@ class RoomManager {
             return { ok: true };
         }
 
+        const preRivalry = evaluateRivalryState(room.tokens, -1, activeBools);
         const prevTokenPos = room.tokens[room.currentTurn][tokenIndex];
         room.tokens[room.currentTurn][tokenIndex] = move.to;
         if (dieIndex === 2) room.diceUsed = [true, true];
@@ -1244,10 +1291,20 @@ class RoomManager {
         if (destKey) room.turnMovedToSquare[tokenIndex] = destKey;
         else delete room.turnMovedToSquare[tokenIndex];
 
+        if (!Array.isArray(room.grudges) || room.grudges.length !== 4) {
+            room.grudges = createEmptyGrudges();
+        }
+        let leaderVictim = -1;
+        let revengeVictim = -1;
         for (const cap of move.captures) {
             room.tokens[cap.p][cap.t] = -1;
             room.capturesMade[room.currentTurn] = (room.capturesMade[room.currentTurn] || 0) + 1;
             room.timesCaptured[cap.p] = (room.timesCaptured[cap.p] || 0) + 1;
+            const { revengeHit } = recordCaptureGrudge(room.grudges, room.currentTurn, cap.p);
+            if (revengeHit && revengeVictim === -1) revengeVictim = cap.p;
+            if (cap.p === preRivalry.leaderIdx && preRivalry.leaderPct >= 20 && leaderVictim === -1) {
+                leaderVictim = cap.p;
+            }
         }
 
         // Mid-turn newly unlocked capture check when 1 die remains and initial obligation was 0
@@ -1310,6 +1367,35 @@ class RoomManager {
             return { ok: true };
         }
 
+        if (leaderVictim !== -1 && preRivalry.tier === 'dethrone') {
+            this.emitRivalryEvent(room, 'leader_hit', room.currentTurn, leaderVictim, preRivalry.leaderPct);
+        } else if (revengeVictim !== -1) {
+            const victimPct = calculateProgress(room.tokens, revengeVictim);
+            this.emitRivalryEvent(room, 'grudge_hit', room.currentTurn, revengeVictim, victimPct);
+        } else if (leaderVictim !== -1) {
+            this.emitRivalryEvent(room, 'leader_hit', room.currentTurn, leaderVictim, preRivalry.leaderPct);
+        }
+
+        if (!room.dethroneAlertedLeaders) room.dethroneAlertedLeaders = new Set();
+        const postRivalry = evaluateRivalryState(room.tokens, -1, activeBools);
+        if (
+            postRivalry.tier === 'dethrone' &&
+            postRivalry.leaderIdx >= 0 &&
+            !room.dethroneAlertedLeaders.has(postRivalry.leaderIdx)
+        ) {
+            room.dethroneAlertedLeaders.add(postRivalry.leaderIdx);
+            const commentatorSeat = room.players.findIndex(
+                (pl, s) => s !== postRivalry.leaderIdx && !!pl?.isAI,
+            );
+            this.emitRivalryEvent(
+                room,
+                'dethrone_alert',
+                commentatorSeat,
+                postRivalry.leaderIdx,
+                postRivalry.leaderPct,
+            );
+        }
+
         if (move.captures.length > 0 || reachedHome) {
             room.hadCaptureOrHomeThisTurn = true;
         }
@@ -1347,6 +1433,10 @@ class RoomManager {
     private advanceTurn(room: Room, extraTurn: boolean) {
         if (room.phase !== 'playing') return;
         if (room.turnTimeout) clearTimeout(room.turnTimeout);
+
+        if (Array.isArray(room.grudges)) {
+            decrementSeatGrudge(room.grudges, room.currentTurn);
+        }
 
         room.turnAutoPlay = false;
         if (!extraTurn) {
@@ -1499,6 +1589,8 @@ class RoomManager {
             room.hadCaptureOrHomeThisTurn = false;
             room.turnAutoPlay = false;
             room.initialTurnTokens = room.tokens.map((r) => r.slice());
+            room.grudges = createEmptyGrudges();
+            room.dethroneAlertedLeaders = new Set();
 
             const rematchTurnLimitMs = this.getTurnLimitMs(room);
             room.turnDeadline = room.turnTimeSec > 0 ? Date.now() + rematchTurnLimitMs : 0;
