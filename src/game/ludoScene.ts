@@ -2,19 +2,28 @@
 // computer players that gang up on the leader, penalties, Lucky Seven, talk and sound.
 import { Application, Circle, Container, Graphics, Rectangle, Sprite, Text } from 'pixi.js';
 import type { Stage } from './stage';
-import { store, shouldShowCaptureWarning, type PlayerCfg } from '../state/store';
+import { DEFAULT_PLAYERS, store, shouldShowCaptureWarning, type PlayerCfg } from '../state/store';
 import { multiplayerClient } from '../network/multiplayerClient';
 import { recordMatchStarted } from '../state/persist';
 import { bus, type NameplateBound } from './bus';
 import { tr, colorName } from '../i18n';
 import {
-    BASE_CENTER, BASE_SPOTS, COLORS, HOME, HOME_COL, IN_BASE, LAST_TRACK, PATH_START, SAFE, STAR_IDX, START_IDX, TRACK,
-    boardPos, createEmptyGrudges, decrementSeatGrudge, evaluateCaptureObligation, evaluateRivalryState, fineProgress,
-    globalIdx, hasWon, isLuckySum, legalMovesForTurn, luckySevenAllowed, newTokens, offendingTokensForPenalty, percent,
-    pickBestAIMove, randDie, recordCaptureGrudge, type CaptureObligation, type Move, type Tokens,
+    BASE_CENTER, BASE_SPOTS, CENTER_HOME_POS, COLORED_PATH_START_POS, COLORS, HOME, HOME_COL, IN_BASE, LAST_TRACK, PATH_START, SAFE, STAR_IDX, START_IDX, TRACK,
+    boardPos, createEmptyGrudges, decrementSeatGrudge, evaluateCaptureObligation, evaluateRivalryState, fineProgress, getTokenPathWorldDir,
+    globalIdx, hasWon, isLoneTokenOnTrack, isLuckySum, legalMovesForTurn, luckySevenAllowed, newTokens, offendingTokensForPenalty, percent,
+    pickBestAIMove, randDie, recordCaptureGrudge, resolveAutoPlayGulAction, resolvePawnTapMove, shouldPromptGulChoice, type CaptureObligation, type Move, type Tokens,
 } from './rules';
-import { BG_BASE, circlePts, drawBackground, drawDie, drawPawn, mix, shade, starPts } from './draw';
-import { BOARD_THEMES } from './themes';
+import { BG_BASE, drawBackground, drawBoardDie3D, drawDie, drawPawn, mix, shade } from './draw';
+import { resolveBoardTheme } from './themes';
+import { drawThemedBoardFX, drawThemedBoardSurface } from './boardThemesRender';
+import {
+    drawToken3D,
+    getTokenLocomotion,
+    isAnimalTokenKind,
+    resolveMatchSeatTokenKind,
+    type LocomotionMode,
+    type ResolvedTokenKind,
+} from './tokens';
 import { TOKEN_URLS_BY_PLAYER, getCachedPawnTexture, loadPawnTexture } from './tokenAssets';
 import * as sfx from './sfx';
 import * as banter from './banter';
@@ -52,6 +61,8 @@ interface Tween {
     u: number;
     stepMs: number;
     hop: number;
+    mode: LocomotionMode;
+    lastSfxSeg: number;
     done: () => void;
 }
 interface TokView {
@@ -65,6 +76,14 @@ interface TokView {
     vx: number;
     vy: number;
     vz: number;
+    renderX: number;
+    renderY: number;
+    prevRenderX: number;
+    prevRenderY: number;
+    travelPhase: number;
+    speedNorm: number;
+    facingRad: number;
+    celebrateUntil: number;
     tween: Tween | null;
     movable: boolean;
     flash: number; // ms of red penalty ring left
@@ -86,14 +105,18 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     const bgFill = new Graphics();
     const bgG = new Graphics();
     const boardG = new Graphics();
+    const boardFxG = new Graphics();
+    boardFxG.eventMode = 'none';
     const shadowLayer = new Container();
     const tokenLayer = new Container();
     tokenLayer.sortableChildren = true;
     const plateLayer = new Container();
     const flyLayer = new Container();
+    flyLayer.eventMode = 'none';
+    flyLayer.interactiveChildren = false;
     const uiLayer = new Container();
     const handLayer = new Container();
-    root.addChild(bgFill, bgG, boardG, shadowLayer, tokenLayer, plateLayer, flyLayer, uiLayer, handLayer);
+    root.addChild(bgFill, bgG, boardG, boardFxG, shadowLayer, tokenLayer, plateLayer, flyLayer, uiLayer, handLayer);
 
     const isOnline = () => {
         return Boolean(
@@ -111,7 +134,9 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         ? multiplayerClient.roomState.currentTurn
         : active.findIndex((a) => a);
     let winner = -1;
-    let ranking: { idx: number; pct: number }[] = [];
+    let ranking: { idx: number; pct: number; captures: number; penalties: number }[] = [];
+    const capturesMade = [0, 0, 0, 0];
+    const penalties = [0, 0, 0, 0];
     const wishUsed = [false, false, false, false];
 
     // Track matches played locally for Newcomers (first 3 matches) vs Always/Off setting
@@ -120,6 +145,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     let turnCapturePromise = 0;
     let turnCapturesTaken = 0;
     let turnObligation: CaptureObligation | null = null;
+    let turnInitialTokens: Tokens | null = null;
     const turnTokensCaptured = new Set<number>();
     const turnMovedToSquare = new Map<number, string>();
     const grudges = createEmptyGrudges();
@@ -138,6 +164,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     let waitRoll: ((forced?: [number, number]) => void) | null = null;
     let waitRollTarget = -1;
     let waitChoice: ((m?: Move) => void) | null = null;
+    let localTurnAutoPlay = false;
     let optionsNow: Move[] = [];
     let turnChangeResolver: ((newTurn: number) => void) | null = null;
     let statusText = '';
@@ -155,6 +182,14 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     };
     const plateName = (p: number) => nameOf(p).toUpperCase();
     const avatarOf = (p: number) => cfgs[p]?.avatar || '🎲';
+    const genderOf = (p: number): 'male' | 'female' => {
+        const explicit = cfgs[p]?.gender || store.get().players[p]?.gender;
+        if (explicit === 'female' || explicit === 'male') return explicit;
+        const av = avatarOf(p);
+        if (av === '👸') return 'female';
+        if (av === '🤴') return 'male';
+        return DEFAULT_PLAYERS[p]?.gender || 'male';
+    };
 
     const isAI = (p: number) => {
         if (isOnline()) {
@@ -291,10 +326,10 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             const bannerH = 220; // Doubled height in landscape/web
             adRect = { x: colX, y: bannerTop, w: colW, h: bannerH };
 
-            // 2. Clickable dice positioned DOWN below the doubled banner
-            diceSize = Math.min(68, colW * 0.22);
+            // 2. Clickable dice positioned DOWN below the doubled banner (1.2x larger)
+            diceSize = Math.min(82, colW * 0.26);
             diceCY = adRect.y + adRect.h + 36 + diceSize / 2;
-            diceCX = [colX + colW / 2 - diceSize * 1.25, colX + colW / 2 + diceSize * 1.25];
+            diceCX = [colX + colW / 2 - diceSize * 1.22, colX + colW / 2 + diceSize * 1.22];
 
             // 3. Turn message and AI chatter text positioned DOWN below the dice
             turnY = diceCY + diceSize * 0.5 + 32;
@@ -314,17 +349,17 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             const c0 = P(0, 0), c1 = P(15, 0), c2 = P(15, 15), c3 = P(0, 15);
             const actualBottom = Math.max(P(0, 15, -0.7).y, P(15, 15, -0.7).y, c0.y, c1.y, c2.y, c3.y);
 
-            // 1. Clickable dice placed cleanly below the board & bottom nameplates (pushed down)
-            diceSize = 60;
-            diceCY = Math.round(actualBottom + 54 + diceSize / 2);
-            diceCX = [W / 2 - diceSize * 1.25, W / 2 + diceSize * 1.25];
+            // 1. Clickable dice placed cleanly below the board & bottom nameplates (1.2x larger)
+            diceSize = 72;
+            diceCY = Math.round(actualBottom + 50 + diceSize / 2);
+            diceCX = [W / 2 - diceSize * 1.22, W / 2 + diceSize * 1.22];
 
             // 2. Turn message and chatter ("message place") positioned comfortably below the dice
-            turnY = Math.round(diceCY + diceSize * 0.5 + 24);
+            turnY = Math.round(diceCY + diceSize * 0.5 + 22);
             chatY = Math.round(turnY + 24);
 
             // 3. Advertisement banner placed cleanly UNDER the message place with 3x height
-            const bannerTop = Math.round(chatY + 52);
+            const bannerTop = Math.round(chatY + 46);
             const bannerH = Math.min(210, Math.max(130, Math.round(H - bannerTop - 50)));
             adRect = { x: 24, y: bannerTop, w: W - 48, h: bannerH };
         }
@@ -348,74 +383,52 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
 
     function drawBoard() {
         const st = store.get().settings;
-        const bt = BOARD_THEMES[st.boardTheme || 'classic'] || BOARD_THEMES.classic;
+        const bt = resolveBoardTheme(st.boardTheme);
         bgG.clear();
         drawBackground(bgG, (x, y, z) => P(x, y, z ?? 0), st.bg, S);
-        const g = boardG;
-        g.clear();
-        const T = 0.7;
-        // slab: underside + 4 sides
-        poly(g, sq(0, 0, 15, 15), -T, bt.slabUnderside);
-        const corners: [number, number][] = [[0, 0], [15, 0], [15, 15], [0, 15]];
-        for (let i = 0; i < 4; i++) {
-            const a = corners[i], b = corners[(i + 1) % 4];
-            const flat: number[] = [];
-            for (const [x, y, z] of [[a[0], a[1], 0], [b[0], b[1], 0], [b[0], b[1], -T], [a[0], a[1], -T]] as [number, number, number][]) {
-                const q = P(x, y, z);
-                flat.push(q.x, q.y);
-            }
-            g.poly(flat).fill(i % 2 ? bt.slabSideDark : bt.slabSideLight).stroke({ width: 1, color: bt.slabUnderside, alpha: 0.7 });
+        drawThemedBoardSurface(boardG, (x, y, z = 0) => P(x, y, z), bt, active, S, outline);
+        if (homeCenterTxt && !homeCenterTxt.destroyed) {
+            homeCenterTxt.style.fill = bt.homeTextFill;
+            homeCenterTxt.style.stroke = { color: bt.homeTextStroke, width: 4 };
         }
-        // top surface
-        poly(g, sq(0, 0, 15, 15), 0, bt.surface);
-        // base yards
-        const origins: [number, number][] = [[0, 0], [9, 0], [9, 9], [0, 9]];
-        for (let c = 0; c < 4; c++) {
-            const [ox, oy] = origins[c];
-            poly(g, sq(ox, oy, 6, 6), 0, active[c] ? COLORS[c] : mix(COLORS[c], bt.surface, 0.55), 1, { w: 1.2, c: shade(COLORS[c], 0.55) });
-            poly(g, sq(ox + 1, oy + 1, 4, 4), 0.02, bt.yardInner, 0.96, { w: 1, c: shade(COLORS[c], 0.7), a: 0.8 });
-            for (const [sx, sy] of BASE_SPOTS[c]) poly(g, circlePts(sx, sy, 0.55, 14), 0.03, COLORS[c], 0.85, { w: 1, c: shade(COLORS[c], 0.5) });
-        }
-        // home columns
-        for (let c = 0; c < 4; c++) for (const [col, row] of HOME_COL[c]) poly(g, sq(col, row, 1, 1), 0.01, COLORS[c], 1, { w: 1, c: shade(COLORS[c], 0.55), a: 0.9 });
-        // track
-        for (let i = 0; i < 52; i++) {
-            const [col, row] = TRACK[i];
-            const startOf = START_IDX.indexOf(i);
-            poly(g, sq(col, row, 1, 1), 0.01, startOf >= 0 ? COLORS[startOf] : bt.track, 1, { w: 1, c: bt.trackBorder, a: 0.9 });
-        }
-        // safe stars (start squares get a white star, star squares a themed star)
-        for (const i of STAR_IDX) {
-            const [col, row] = TRACK[i];
-            poly(g, starPts(col + 0.5, row + 0.5, 0.36, 0.16), 0.02, bt.starFill, 1, { w: 1, c: bt.starStroke });
-        }
-        for (let c = 0; c < 4; c++) {
-            const [col, row] = TRACK[START_IDX[c]];
-            poly(g, starPts(col + 0.5, row + 0.5, 0.3, 0.13), 0.02, 0xffffff, 0.95);
-        }
-        // centre triangles
-        const mid: [number, number] = [7.5, 7.5];
-        const tri: [number, number][][] = [
-            [[6, 6], mid, [6, 9]], // red (left)
-            [[6, 6], [9, 6], mid], // green (top)
-            [[9, 6], [9, 9], mid], // yellow (right)
-            [[6, 9], mid, [9, 9]], // cyan (bottom)
-        ];
-        for (let c = 0; c < 4; c++) poly(g, tri[c], 0.02, COLORS[c], 1, { w: 1, c: bt.homeStroke });
-        // active-player outline with a soft glow
-        const flat: number[] = [];
-        for (const [x, y] of [[0, 0], [15, 0], [15, 15], [0, 15]] as [number, number][]) {
-            const q = P(x, y, 0);
-            flat.push(q.x, q.y);
-        }
-        g.poly(flat).stroke({ width: Math.max(10, S * 0.45), color: outline, alpha: 0.22 });
-        g.poly(flat).stroke({ width: Math.max(5, S * 0.2), color: outline, alpha: 0.95 });
     }
 
     // ---------------------------------------------------------------- tokens
     const views: TokView[][] = [[], [], [], []];
+    const seatTokenKind = (p: number): ResolvedTokenKind => {
+        const st = store.get();
+        return resolveMatchSeatTokenKind(
+            st.settings.tokenStyle,
+            p,
+            st.players.map((pl) => !!pl.ai),
+            st.gameId,
+        );
+    };
+
+    const resolveHumanGender = (p: number): 'girl' | 'boy' => {
+        const mode = store.get().settings.humanGenderMode;
+        if (mode === 'girl' || mode === 'boy') return mode;
+        return genderOf(p) === 'female' ? 'girl' : 'boy';
+    };
+
+    const paintTokenShadow = (shG: Graphics, seatIdx: number, kind: ResolvedTokenKind) => {
+        shG.clear();
+        if (isAnimalTokenKind(kind)) {
+            const c = COLORS[seatIdx];
+            shG.ellipse(0, 0, 0.58, 0.24).fill({ color: c, alpha: 0.30 });
+            shG.ellipse(0, 0, 0.43, 0.17).fill({ color: mix(0x000000, c, 0.38), alpha: 0.48 });
+            shG.ellipse(0, 0, 0.54, 0.22).stroke({ width: 0.065, color: c, alpha: 0.92 });
+            shG.ellipse(0, 0, 0.47, 0.19).stroke({ width: 0.025, color: mix(c, 0xffffff, 0.45), alpha: 0.55 });
+        } else {
+            shG.ellipse(0, 0, 0.38, 0.15).fill({ color: 0x000000, alpha: 0.35 });
+        }
+    };
+
+    let lastRenderedTokenSig = '';
+
     for (let p = 0; p < 4; p++) {
         const tokenUrl = TOKEN_URLS_BY_PLAYER[p];
+        const initKind = seatTokenKind(p);
         for (let t = 0; t < 4; t++) {
             const c = new Container();
             const body = new Graphics();
@@ -426,11 +439,54 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             c.interactiveChildren = false; // hitArea receives taps directly without child interception
             c.hitArea = new Circle(0, -0.65, 1.4);
             const shadow = new Graphics();
-            shadow.ellipse(0, 0, 0.38, 0.15).fill({ color: 0x000000, alpha: 0.35 });
+            paintTokenShadow(shadow, p, initKind);
             const ring = new Graphics();
-            ring.ellipse(0, 0, 0.52, 0.22).stroke({ width: 0.08, color: 0xffffff, alpha: 0.95 });
+            ring.ellipse(0, 0, 0.62, 0.26).stroke({ width: 0.08, color: 0xffffff, alpha: 0.95 });
             ring.visible = false;
-            const v: TokView = { p, t, c, body, shadow, ring, vx: 0, vy: 0, vz: 0, tween: null, movable: false, flash: 0, phase: Math.random() * 6 };
+            const [bx, by] = boardPos(p, IN_BASE, t);
+            const pathScreenFacingRad = (seatP: number, posR: number, tokIdx: number, tw: Tween | null): number => {
+                let wx = 1, wy = 0;
+                if (tw && tw.pts.length > tw.seg + 1) {
+                    const aPt = tw.pts[tw.seg], bPt = tw.pts[tw.seg + 1];
+                    const dx = bPt[0] - aPt[0], dy = bPt[1] - aPt[1];
+                    const dLen = Math.hypot(dx, dy);
+                    if (dLen > 1e-4) {
+                        wx = dx / dLen;
+                        wy = dy / dLen;
+                    } else {
+                        [wx, wy] = getTokenPathWorldDir(seatP, posR, tokIdx);
+                    }
+                } else {
+                    [wx, wy] = getTokenPathWorldDir(seatP, posR, tokIdx);
+                }
+                const aYaw = rad(yaw), caYaw = Math.cos(aYaw), saYaw = Math.sin(aYaw);
+                const sdx = wx * caYaw - wy * saYaw;
+                const sdy = wx * saYaw + wy * caYaw;
+                return Math.atan2(sdy, sdx);
+            };
+            const v: TokView = {
+                p,
+                t,
+                c,
+                body,
+                shadow,
+                ring,
+                vx: bx,
+                vy: by,
+                vz: 0,
+                renderX: bx,
+                renderY: by,
+                prevRenderX: bx,
+                prevRenderY: by,
+                travelPhase: Math.random() * 6,
+                speedNorm: 0,
+                facingRad: pathScreenFacingRad(p, tokens[p][t], t, null),
+                celebrateUntil: 0,
+                tween: null,
+                movable: false,
+                flash: 0,
+                phase: Math.random() * 6,
+            };
 
             const attachSprite = (tex: any) => {
                 if (dead || c.destroyed || !tex) return;
@@ -447,7 +503,13 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                 const scale = targetW / natW;
                 sp.scale.set(scale, scale);
                 sp.eventMode = 'none';
-                body.visible = false;
+                if (seatTokenKind(p) === 'default') {
+                    body.visible = false;
+                    sp.visible = true;
+                } else {
+                    sp.visible = false;
+                    body.visible = true;
+                }
                 c.addChild(sp);
                 v.sprite = sp;
             };
@@ -463,9 +525,6 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                 });
             }
 
-            const [bx, by] = boardPos(p, IN_BASE, t);
-            v.vx = bx;
-            v.vy = by;
             c.visible = shadow.visible = active[p];
             c.on('pointertap', () => onTokenTap(v));
             shadowLayer.addChild(shadow, ring);
@@ -474,7 +533,14 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         }
     }
 
-    function tween(tok: TokView, pts: [number, number][], stepMs: number, hop: number, expectedEpoch?: number): Promise<void> {
+    function tween(
+        tok: TokView,
+        pts: [number, number][],
+        stepMs: number,
+        hop: number,
+        expectedEpoch?: number,
+        mode: LocomotionMode = 'hop',
+    ): Promise<void> {
         return new Promise<void>((res) => {
             if (dead || pts.length < 2 || (typeof document !== 'undefined' && document.hidden) || (expectedEpoch !== undefined && isOnline() && turnEpoch !== expectedEpoch)) {
                 const lastPt = pts[pts.length - 1];
@@ -511,7 +577,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                 tok.vz = 0;
                 finishTween();
             };
-            const tw: Tween = { tok, pts, seg: 0, u: 0, stepMs, hop, done: finishTween };
+            const tw: Tween = { tok, pts, seg: 0, u: 0, stepMs, hop, mode, lastSfxSeg: -1, done: finishTween };
             tok.tween = tw;
             tweens.push(tw);
             if (isOnline()) {
@@ -531,12 +597,51 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                 tw.u -= 1;
                 tw.seg++;
             }
+            const totalSegs = Math.max(1, tw.pts.length - 1);
+            const kind = seatTokenKind(tw.tok.p);
+            if (kind !== 'default' && tw.seg !== tw.lastSfxSeg) {
+                tw.lastSfxSeg = tw.seg;
+                sfx.playTokenStepSfx(kind, tw.seg, totalSegs);
+            }
             const last = tw.seg >= tw.pts.length - 2 && tw.u >= 1;
             const u = Math.min(1, tw.u);
             const a = tw.pts[tw.seg], b = tw.pts[tw.seg + 1];
-            tw.tok.vx = a[0] + (b[0] - a[0]) * u;
-            tw.tok.vy = a[1] + (b[1] - a[1]) * u;
-            tw.tok.vz = Math.sin(Math.PI * u) * tw.hop;
+            const baseX = a[0] + (b[0] - a[0]) * u;
+            const baseY = a[1] + (b[1] - a[1]) * u;
+            const totalU = Math.min(1, (tw.seg + u) / totalSegs);
+
+            if (tw.mode === 'slither') {
+                // Grounded sinusoidal S-wave path glide along the board surface with zero vertical jump
+                const sdx = b[0] - a[0];
+                const sdy = b[1] - a[1];
+                const len = Math.hypot(sdx, sdy) || 1;
+                const perpX = -sdy / len;
+                const perpY = sdx / len;
+                const env = Math.sin(Math.min(1, totalU * 5) * Math.PI * 0.5) * Math.sin(Math.min(1, (1 - totalU) * 5) * Math.PI * 0.5);
+                const wave = Math.sin(totalU * totalSegs * Math.PI * 2) * 0.14 * env;
+                tw.tok.vx = baseX + perpX * wave;
+                tw.tok.vy = baseY + perpY * wave;
+                tw.tok.vz = 0;
+            } else if (tw.mode === 'fly') {
+                // Sustained aerial soar over intermediate squares, landing cleanly at destination
+                const env = Math.pow(Math.sin(Math.PI * totalU), 0.65);
+                const cruise = Math.min(1, totalU * 4) * Math.min(1, (1 - totalU) * 4);
+                const wingLift = Math.sin(totalU * totalSegs * Math.PI * 2) * 0.08 * cruise;
+                tw.tok.vx = baseX;
+                tw.tok.vy = baseY;
+                tw.tok.vz = tw.hop * env + wingLift;
+            } else if (tw.mode === 'walk') {
+                // Smooth grounded walk/trot/gallop with zero tile-by-tile hop on track
+                tw.tok.vx = baseX;
+                tw.tok.vy = baseY;
+                tw.tok.vz = Math.sin(Math.PI * u) * tw.hop;
+            } else {
+                // True jumping/hopping arc per step (frog, kangaroo, climber, gymnast, default pawn)
+                tw.tok.vx = baseX;
+                tw.tok.vy = baseY;
+                tw.tok.vz = Math.sin(Math.PI * u) * tw.hop;
+            }
+
             if (last) {
                 tw.tok.tween = null;
                 tweens.splice(i, 1);
@@ -545,7 +650,14 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         }
     }
 
-    function updateTokens(now: number) {
+    function updateTokens(now: number, dt: number) {
+        const stSnap = store.get();
+        const stSettings = stSnap.settings;
+        const aiSig = stSnap.players.map((pl) => (pl.ai ? '1' : '0')).join('');
+        const tokenSig = `${stSettings.tokenStyle}|${stSettings.humanGenderMode}|${stSnap.gameId}|${aiSig}`;
+        const styleSwitched = tokenSig !== lastRenderedTokenSig;
+        if (styleSwitched) lastRenderedTokenSig = tokenSig;
+
         // stacking offsets for tokens sharing a square
         const groups = new Map<string, TokView[]>();
         for (let p = 0; p < 4; p++) {
@@ -568,19 +680,116 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         groups.forEach((arr) => {
             if (arr.length > 1) arr.forEach((v, i) => off.set(v, (i - (arr.length - 1) / 2) * 0.3));
         });
+
+        const dtSec = Math.max(0.001, dt / 1000);
+        const timeSec = now / 1000;
+        const settleRate = 1 - Math.exp(-12 * dtSec);
+
         for (let p = 0; p < 4; p++) {
             if (!active[p]) continue;
+            const seatKind = seatTokenKind(p);
+            const seatGender = resolveHumanGender(p);
+
             for (const v of views[p]) {
                 const o = off.get(v) || 0;
+                const targetX = v.vx + o;
+                const targetY = v.vy;
+
+                if (v.tween) {
+                    v.renderX = targetX;
+                    v.renderY = targetY;
+                } else {
+                    // Smoothly walk/settle into stacked offset positions so animals/humans step rather than snap!
+                    v.renderX += (targetX - v.renderX) * settleRate;
+                    v.renderY += (targetY - v.renderY) * settleRate;
+                }
+
+                const dxWorld = v.renderX - v.prevRenderX;
+                const dyWorld = v.renderY - v.prevRenderY;
+                const distWorld = Math.hypot(dxWorld, dyWorld);
+                v.prevRenderX = v.renderX;
+                v.prevRenderY = v.renderY;
+
+                const instSpeed = Math.min(1, (distWorld / dtSec) / 3.2);
+                v.speedNorm += (instSpeed - v.speedNorm) * Math.min(1, dtSec * 14);
+                if (v.speedNorm > 0.04) {
+                    v.travelPhase += dtSec * (7.5 + v.speedNorm * 8.5);
+                }
+
+                // Always keep human & animal tokens facing the exact path direction (standing OR moving, across camera rotation)
+                let wx = 1, wy = 0;
+                if (v.tween && v.tween.pts.length > v.tween.seg + 1) {
+                    const aPt = v.tween.pts[v.tween.seg], bPt = v.tween.pts[v.tween.seg + 1];
+                    const dx = bPt[0] - aPt[0], dy = bPt[1] - aPt[1];
+                    const dLen = Math.hypot(dx, dy);
+                    if (dLen > 1e-4) {
+                        wx = dx / dLen;
+                        wy = dy / dLen;
+                    } else {
+                        [wx, wy] = getTokenPathWorldDir(p, tokens[p][v.t], v.t);
+                    }
+                } else {
+                    [wx, wy] = getTokenPathWorldDir(p, tokens[p][v.t], v.t);
+                }
+                const aYaw = rad(yaw), caYaw = Math.cos(aYaw), saYaw = Math.sin(aYaw);
+                const targetFacingRad = Math.atan2(wx * saYaw + wy * caYaw, wx * caYaw - wy * saYaw);
+                const angDiff = Math.atan2(Math.sin(targetFacingRad - v.facingRad), Math.cos(targetFacingRad - v.facingRad));
+                if (styleSwitched) {
+                    v.facingRad = targetFacingRad;
+                } else {
+                    v.facingRad = Math.atan2(
+                        Math.sin(v.facingRad + angDiff * Math.min(1, dtSec * 15)),
+                        Math.cos(v.facingRad + angDiff * Math.min(1, dtSec * 15)),
+                    );
+                }
+
                 const crowd = o !== 0 ? 0.82 : 1;
-                const pr = P(v.vx + o, v.vy, v.vz);
-                const gr = P(v.vx + o, v.vy, 0);
-                const bounce = v.movable ? Math.abs(Math.sin((now / 1000) * 6 + v.phase)) * 0.38 : 0;
+                const pr = P(v.renderX, v.renderY, v.vz);
+                const gr = P(v.renderX, v.renderY, 0);
+                const isCustom = seatKind !== 'default';
+                const isCelebrating = v.celebrateUntil > now;
+                const celebratePhase = isCelebrating ? Math.min(1, 1 - (v.celebrateUntil - now) / 1100) : 0;
+
+                if (styleSwitched) {
+                    paintTokenShadow(v.shadow, p, seatKind);
+                    if (isCustom) {
+                        if (v.sprite && !v.sprite.destroyed) v.sprite.visible = false;
+                        v.body.visible = true;
+                    } else if (v.sprite && !v.sprite.destroyed) {
+                        v.sprite.visible = true;
+                        v.body.visible = false;
+                    } else {
+                        drawPawn(v.body, COLORS[p]);
+                        v.body.visible = true;
+                    }
+                }
+
+                if (isCustom) {
+                    v.body.visible = true;
+                    drawToken3D(v.body, seatKind, COLORS[p], {
+                        timeSec,
+                        travelPhase: v.travelPhase,
+                        speedNorm: v.speedNorm,
+                        hopZ: v.vz,
+                        facingRad: v.facingRad,
+                        gender: seatGender,
+                        animState: isCelebrating ? 'celebrate' : (v.speedNorm > 0.06 || !!v.tween ? 'move' : 'idle'),
+                        celebratePhase,
+                    });
+                }
+
+                const loco = getTokenLocomotion(seatKind);
+                const bounce = v.movable && loco.movableBounce > 0
+                    ? Math.abs(Math.sin(timeSec * 6 + v.phase)) * loco.movableBounce
+                    : 0;
                 if (v.c?.position) v.c.position.set(pr.x, pr.y - bounce * S * pr.k);
                 if (v.c?.scale) v.c.scale.set(S * pr.k * crowd * TOKEN_SIZE_SCALE);
                 if (v.c) v.c.zIndex = -gr.d * 100 + (v.tween ? 500 : 0);
                 if (v.shadow?.position) v.shadow.position.set(gr.x, gr.y);
-                if (v.shadow?.scale) v.shadow.scale.set(S * gr.k * crowd * TOKEN_SIZE_SCALE * (1 - Math.min(0.5, v.vz * 0.25)));
+                const shAirScale = isAnimalTokenKind(seatKind)
+                    ? Math.max(0.68, 1 - Math.min(0.32, v.vz * 0.22))
+                    : (1 - Math.min(0.5, v.vz * 0.25));
+                if (v.shadow?.scale) v.shadow.scale.set(S * gr.k * crowd * TOKEN_SIZE_SCALE * shAirScale);
                 if (v.ring?.position) v.ring.position.set(gr.x, gr.y);
                 if (v.ring?.scale) v.ring.scale.set(S * gr.k * crowd * TOKEN_SIZE_SCALE);
                 v.ring.visible = v.movable || v.flash > 0;
@@ -850,10 +1059,11 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
 
         for (let i = 0; i < 2; i++) {
             const used = diceUsed[i];
-            const choosingDie = !!waitChoice && !used && !dieConfirmed && isMyTurn;
+            const hasLegalForDie = !waitChoice || optionsNow.some((m) => m.die === i);
+            const choosingDie = !!waitChoice && !used && hasLegalForDie && !dieConfirmed && isMyTurn;
             const pulse = (rollingIdle || dieFlash > 0 ? 1 + 0.08 * Math.sin(now / 160) : 1) * (choosingDie ? 1 + 0.04 * Math.sin(now / 220) : 1);
-            const sel = !used && (selDie === i || selDie === 2) && !!waitChoice;
-            const dimDice = !isMyTurn || (used && !waitRoll);
+            const sel = !used && hasLegalForDie && (selDie === i || selDie === 2) && !!waitChoice;
+            const dimDice = !isMyTurn || (used && !waitRoll) || (!!waitChoice && !used && !hasLegalForDie);
             if (dieG[i]) {
                 drawDie(dieG[i], diceSize, dice[i], diceColor, current === 2 ? 0x2a2a2a : 0xffffff, {
                     dim: dimDice,
@@ -871,12 +1081,12 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             if (hasCombined) {
                 const activeSum = selDie === 2;
                 const total = dice[0] + dice[1];
-                sumTxt.text = `${dice[0]}+${dice[1]} = ${total}`;
-                sumTxt.style.fill = activeSum ? 0x0f172a : 0xfef08a;
+                sumTxt.text = `USE ${total}`;
+                sumTxt.style.fill = 0xffffff;
                 sumG.clear()
                     .roundRect(-42, -13, 84, 26, 13)
-                    .fill({ color: activeSum ? 0xfacc15 : 0x0f172a, alpha: 0.95 })
-                    .stroke({ width: activeSum ? 2.5 : 1.5, color: 0xfacc15, alpha: 0.95 });
+                    .fill({ color: activeSum ? 0x16a34a : 0x14532d, alpha: 0.96 })
+                    .stroke({ width: activeSum ? 2.5 : 1.5, color: 0x4ade80, alpha: 0.96 });
             }
         }
         if (dieFlash > 0) dieFlash = Math.max(0, dieFlash - 16);
@@ -977,58 +1187,181 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         turnTxt.style.fill = statusText ? 0xffffff : (waitRoll ? 0x22c55e : mix(COLORS[current], 0xffffff, 0.25));
     }
 
-    // ---------------------------------------------------------------- 3D-style rolling dice on the board
-    interface Fly { c: Container; g: Graphics; sh: Graphics; fx: number; fy: number; tx: number; ty: number; rot: number; spin: number }
+    // ---------------------------------------------------------------- real 3D dice on the board
+    const BOARD_DIE_HALF = 0.42 * 1.2; // 1.2x bigger 3D board dice
+    const BOARD_REST_SPOTS: [[number, number], [number, number]] = [[6.2, 7.75], [8.8, 7.25]];
+    const BOARD_REST_ROT_Z: [number, number] = [-0.24, 0.28];
+    const boardDieSh = [new Graphics(), new Graphics()];
+    const boardDieG = [new Graphics(), new Graphics()];
+    for (const sh of boardDieSh) {
+        sh.eventMode = 'none';
+        flyLayer.addChild(sh);
+    }
+    for (const g of boardDieG) {
+        g.eventMode = 'none';
+        flyLayer.addChild(g);
+    }
+
+    interface Fly {
+        fromX: number;
+        fromY: number;
+        toX: number;
+        toY: number;
+        endRotZ: number;
+        spinX: number;
+        spinY: number;
+        spinZ: number;
+        tumbleFace: number;
+        nextFaceT: number;
+    }
     let flying: Fly[] = [];
     let flyT = -1;
     let flyDur = 0;
     let flyFinal: [number, number] = [1, 1];
     let flyColor = 0xffffff;
+    let flySeat = current;
+    let flyHoldingResult = false;
+    let flyBounceStage = 0;
+
     function startFly(p: number, a: number, b: number, dur: number) {
-        flyLayer.removeChildren().forEach((c) => c.destroy({ children: true }));
-        flying = [];
         flyDur = dur;
         flyT = 0;
         flyFinal = [a, b];
+        flySeat = p;
         flyColor = COLORS[p];
-        const from = P(BASE_CENTER[p][0], BASE_CENTER[p][1]);
-        for (let i = 0; i < 2; i++) {
-            const c = new Container();
-            const sh = new Graphics();
-            const g = new Graphics();
-            c.addChild(g);
-            flyLayer.addChild(sh, c);
-            const to = P(7.5 + (i ? 1.6 : -1.6), 7.5 + (i ? 0.7 : -0.7));
-            flying.push({ c, g, sh, fx: from.x + (i ? 24 : -24), fy: from.y, tx: to.x, ty: to.y, rot: Math.random() * 6, spin: (i ? -1 : 1) * (9 + Math.random() * 4) });
-        }
+        flyHoldingResult = true;
+        flyBounceStage = 0;
+        const bc = BASE_CENTER[p];
+        const startX = bc[0] + (7.5 - bc[0]) * 0.22;
+        const startY = bc[1] + (7.5 - bc[1]) * 0.22;
+        flying = [0, 1].map((i) => ({
+            fromX: startX + (i ? 0.55 : -0.55),
+            fromY: startY + (i ? 0.28 : -0.28),
+            toX: BOARD_REST_SPOTS[i][0],
+            toY: BOARD_REST_SPOTS[i][1],
+            endRotZ: BOARD_REST_ROT_Z[i],
+            spinX: (i ? -1 : 1) * (4.4 + Math.random() * 1.6),
+            spinY: (i ? 1 : -1) * (4.8 + Math.random() * 1.6),
+            spinZ: (i ? -1 : 1) * (Math.PI * 3.5 + Math.random() * 1.5),
+            tumbleFace: 1 + Math.floor(Math.random() * 6),
+            nextFaceT: 70,
+        }));
     }
-    function updateFly(dt: number) {
-        if (flyT < 0) return;
-        flyT += dt;
-        const u = Math.min(1, flyT / flyDur);
-        const ease = 1 - Math.pow(1 - u, 3);
-        const size = S * 1.5 * 1.0; // 1.5x bigger dice
-        for (let i = 0; i < flying.length; i++) {
-            const f = flying[i];
-            const x = f.fx + (f.tx - f.fx) * ease;
-            const y = f.fy + (f.ty - f.fy) * ease;
-            const hop = Math.abs(Math.sin(u * Math.PI * 3.6)) * (1 - u) * S * 4.2;
-            const face = u > 0.82 ? flyFinal[i] : 1 + Math.floor(Math.random() * 6);
-            drawDie(f.g, size, face, flyColor, flyColor === COLORS[2] ? 0x2a2a2a : 0xffffff, {
-                styleId: store.get().settings.diceStyle,
-            });
-            if (f.c?.position) f.c.position.set(x, y - hop);
-            if (f.c) f.c.rotation = f.rot + f.spin * u * (1 - u * 0.6) * 1.4;
-            if (f.c?.scale) f.c.scale.set(1 + 0.06 * Math.sin(u * 30 + i));
-            if (f.sh?.position) {
-                f.sh.clear().ellipse(0, 0, size * 0.55, size * 0.2).fill({ color: 0x000000, alpha: 0.28 * (1 - hop / (S * 5)) });
-                f.sh.position.set(x, y + size * 0.35);
-            }
+
+    function updateFly(dt: number, nowMs: number) {
+        if (dead) return;
+        if (winner >= 0) {
+            flyLayer.visible = false;
+            return;
         }
-        if (u >= 1 && flyT > flyDur + 900) {
-            flyLayer.removeChildren().forEach((c) => c.destroy({ children: true }));
-            flying = [];
-            flyT = -1;
+        flyLayer.visible = true;
+        const styleId = store.get().settings.diceStyle;
+
+        if (flyT >= 0 && flying.length === 2) {
+            flyT += dt;
+            const u = Math.min(1, flyT / Math.max(1, flyDur));
+            const easePos = 1 - Math.pow(1 - Math.min(1, u / 0.92), 2.4);
+            const pipColor = flySeat === 2 ? 0x2a2a2a : 0xffffff;
+
+            const prevStage = flyBounceStage;
+            if (flyBounceStage < 1 && u >= 0.62) {
+                flyBounceStage = 1;
+                sfx.diceHit(1.0);
+                sfx.diceRoll((1 - 0.62) * flyDur + 150);
+            }
+            if (flyBounceStage < 2 && u >= 0.84) {
+                flyBounceStage = 2;
+                if (prevStage === 1) sfx.diceHit(0.55);
+            }
+            if (flyBounceStage < 3 && u >= 1) {
+                flyBounceStage = 3;
+                if (prevStage === 2) sfx.diceHit(0.32);
+            }
+
+            for (let i = 0; i < 2; i++) {
+                const f = flying[i];
+                const cx = f.fromX + (f.toX - f.fromX) * easePos;
+                const cy = f.fromY + (f.toY - f.fromY) * easePos;
+                let cz = 0;
+                if (u < 0.62) {
+                    cz = Math.sin((u / 0.62) * Math.PI) * 3.4;
+                } else if (u < 0.84) {
+                    cz = Math.sin(((u - 0.62) / 0.22) * Math.PI) * 1.1;
+                } else if (u < 1) {
+                    cz = Math.sin(((u - 0.84) / 0.16) * Math.PI) * 0.35;
+                }
+
+                const settle = u > 0.78 ? (u - 0.78) / 0.22 : 0;
+                const spinScale = Math.pow(1 - settle, 2);
+                const rotX = f.spinX * spinScale * Math.sin(u * Math.PI * 3.2);
+                const rotY = f.spinY * spinScale * Math.cos(u * Math.PI * 2.8);
+                const rotZ = f.spinZ * (1 - settle) + f.endRotZ * settle;
+
+                if (u < 0.78 && flyT >= f.nextFaceT) {
+                    f.tumbleFace = 1 + ((f.tumbleFace + Math.floor(Math.random() * 5)) % 6);
+                    f.nextFaceT = flyT + 75;
+                }
+                const face = u >= 0.78 ? flyFinal[i] : f.tumbleFace;
+
+                drawBoardDie3D(
+                    boardDieG[i],
+                    boardDieSh[i],
+                    (x, y, z = 0) => P(x, y, z),
+                    cx,
+                    cy,
+                    cz,
+                    BOARD_DIE_HALF,
+                    face,
+                    flyColor,
+                    pipColor,
+                    {
+                        rotX,
+                        rotY,
+                        rotZ,
+                        styleId,
+                    },
+                );
+            }
+
+            if (u >= 1) {
+                flyT = -1;
+                flying = [];
+            }
+            return;
+        }
+
+        // Resting 3D dice on the board surface between rolls and during move selection
+        const isMyTurn = isOnline() ? multiplayerClient.myPlayerIndex === current : !isAI(current);
+        const pipColor = (flyHoldingResult ? flySeat : current) === 2 ? 0x2a2a2a : 0xffffff;
+        const activeColor = flyHoldingResult ? flyColor : diceColor;
+        for (let i = 0; i < 2; i++) {
+            const used = !flyHoldingResult && diceUsed[i];
+            const waitingIdle = !flyHoldingResult && !!waitRoll && isMyTurn;
+            const hasLegalForDie = !waitChoice || optionsNow.some((m) => m.die === i);
+            const selectedGlow = (!flyHoldingResult && !used && hasLegalForDie && (selDie === i || selDie === 2) && !!waitChoice && isMyTurn) || waitingIdle;
+            const dimDie = !flyHoldingResult && !!waitChoice && (used || !hasLegalForDie);
+            const cz = waitingIdle ? 0.04 + Math.abs(Math.sin(nowMs / 360 + i * 1.1)) * 0.08 : 0;
+            const rotZ = BOARD_REST_ROT_Z[i] + (waitingIdle ? Math.sin(nowMs / 420 + i) * 0.06 : 0);
+            const shownVal = flyHoldingResult ? flyFinal[i] : dice[i];
+
+            drawBoardDie3D(
+                boardDieG[i],
+                boardDieSh[i],
+                (x, y, z = 0) => P(x, y, z),
+                BOARD_REST_SPOTS[i][0],
+                BOARD_REST_SPOTS[i][1],
+                cz,
+                BOARD_DIE_HALF,
+                shownVal,
+                activeColor,
+                pipColor,
+                {
+                    dim: dimDie,
+                    glow: selectedGlow,
+                    rotZ,
+                    styleId,
+                },
+            );
         }
     }
 
@@ -1049,7 +1382,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             const it = queue.shift()!;
             lines.push({ idx: it.idx, text: it.text, born: clock });
             if (lines.length > 6) lines.shift();
-            if (it.voice) await sfx.speak({ text: it.text, altText: it.alt, altLang: 'hi', lang, player: it.idx });
+            if (it.voice) await sfx.speak({ text: it.text, altText: it.alt, altLang: 'hi', lang, player: it.idx, gender: genderOf(it.idx) });
             else await delay(1400);
             await delay(450);
         }
@@ -1392,9 +1725,8 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             store.patch({ gulPrompt: null, captureNotice: null, skipCapturePrompt: null });
         }
         if (passed) {
-            if (dieIndex === 2) diceUsed = [true, true];
-            else diceUsed[dieIndex] = true;
-            popup('info', 'PASSED', `${nameOf(rp)} passed the Gul!`, 2000);
+            diceUsed = [true, true];
+            popup('info', 'PASSED', `${nameOf(rp)} passed the turn!`, 2000);
             if (waitChoice && current === rp) {
                 const r = waitChoice;
                 waitChoice = null;
@@ -1489,6 +1821,9 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         }
         current = newTurn;
         diceColor = COLORS[newTurn];
+        flyT = -1;
+        flying = [];
+        flyHoldingResult = false;
         targetYaw = store.get().settings.rotate ? YAW_FOR[newTurn] : 0;
         publish();
         refreshTurnText();
@@ -1533,6 +1868,9 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         }
         current = state.currentTurn;
         diceColor = COLORS[current];
+        flyT = -1;
+        flying = [];
+        flyHoldingResult = false;
         targetYaw = store.get().settings.rotate ? YAW_FOR[current] : 0;
         publish();
         refreshTurnText();
@@ -1543,6 +1881,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     // Humans can tap either a die first OR tap a movable token directly.
     // If a token is tapped directly, the game smart-matches the appropriate die instantly!
     function onDieTap(i: number) {
+        if (!isOnline() && localTurnAutoPlay) return;
         if (isOnline()) {
             const myIdx = multiplayerClient.myPlayerIndex;
             const serverTurn = multiplayerClient.roomState?.currentTurn;
@@ -1622,7 +1961,14 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         }
         if (waitChoice && (!isOnline() ? !isAI(current) : multiplayerClient.myPlayerIndex === current)) {
             if (i === 2) {
-                if (diceUsed[0] || diceUsed[1] || !optionsNow.some((m) => m.die === 2)) return;
+                if (diceUsed[0] || diceUsed[1]) return;
+                const combinedOpts = optionsNow.filter((m) => m.die === 2 || m.combined);
+                if (combinedOpts.length === 0) return;
+                if (combinedOpts.length === 1) {
+                    selDie = 2;
+                    executePlayerMove(combinedOpts[0]);
+                    return;
+                }
             } else if (diceUsed[i]) {
                 return;
             } else if (!optionsNow.some((m) => m.die === i)) {
@@ -1640,95 +1986,61 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             syncHand();
         }
     }
-    function onTokenTap(v: TokView) {
+
+    function executePlayerMove(m: Move) {
         if (!waitChoice) return;
-        if (isOnline()) {
-            const myIdx = multiplayerClient.myPlayerIndex;
-            const serverTurn = multiplayerClient.roomState?.currentTurn;
-            if (myIdx !== null && serverTurn === myIdx && current !== myIdx) {
-                current = myIdx;
-                diceColor = COLORS[myIdx];
-                publish();
-                refreshTurnText();
-            }
-            if (myIdx !== current || v.p !== myIdx) {
-                return;
-            }
-        }
-        if (!isOnline() && isAI(current)) return;
-        if (v.p !== current) return;
-
-        // Smart die resolution:
-        // 1) Does currently selected die work for this token?
-        let m = optionsNow.find((o) => o.die === selDie && o.tok === v.t);
-        // 2) If user hasn't locked a single die, prefer a combined capture on this token if available
-        if (!m || (!dieConfirmed && optionsNow.some((o) => o.tok === v.t && o.die === 2 && o.captures.length > 0))) {
-            const capCombined = !dieConfirmed ? optionsNow.find((o) => o.tok === v.t && o.die === 2 && o.captures.length > 0) : undefined;
-            if (capCombined) {
-                m = capCombined;
-                selDie = 2;
-            } else if (!m) {
-                m = optionsNow.find((o) => o.tok === v.t);
-                if (m) {
-                    selDie = m.die;
-                }
-            }
-        }
-
-        if (!m) {
-            setStatus(tr(lang, 'pieceNeedsOtherDie'));
-            flashDies();
-            return;
-        }
-
         dieConfirmed = true;
         sfx.tap();
 
         const proceedWithMove = () => {
             sfx.stopHeartbeat();
-            if (m!.reachesHome) {
+            if (shouldPromptGulChoice(tokens, current, m.value, m.die, dice, turnInitialTokens, m.tok)) {
                 store.patch({
                     gulPrompt: {
                         p: current,
-                        tokenIndex: v.t,
-                        dieIndex: m!.die,
-                        value: m!.value,
+                        tokenIndex: m.tok,
+                        dieIndex: m.die,
+                        value: m.value,
                     },
                 });
                 bus.onGulDecision = (decision: 'gul' | 'pass') => {
+                    if (!isOnline() && localTurnAutoPlay) return;
                     bus.onGulDecision = undefined;
                     if (decision === 'gul') {
                         dieConfirmed = true;
                         sfx.tap();
                         if (isOnline()) {
-                            pendingLocalMoves.push({ dieIndex: m!.die, tokenIndex: v.t });
-                            void multiplayerClient.movePawn(m!.die, v.t, 'gul').then((res) => {
-                                if (res && !res.ok && !dead) void multiplayerClient.syncState();
-                            });
-                        }
-                        const r = waitChoice;
-                        waitChoice = null;
-                        if (r) r(m!);
-                    } else {
-                        dieConfirmed = true;
-                        sfx.tap();
-                        if (isOnline()) {
-                            pendingLocalMoves.push({ dieIndex: m!.die, tokenIndex: v.t });
-                            void multiplayerClient.movePawn(m!.die, v.t, 'pass').then((res) => {
+                            pendingLocalMoves.push({ dieIndex: m.die, tokenIndex: m.tok });
+                            void multiplayerClient.movePawn(m.die, m.tok, 'gul').then((res) => {
                                 if (res && !res.ok && !dead) {
-                                    const idx = pendingLocalMoves.findIndex((pm) => pm.dieIndex === m!.die && pm.tokenIndex === v.t);
+                                    const idx = pendingLocalMoves.findIndex((pm) => pm.dieIndex === m.die && pm.tokenIndex === m.tok);
                                     if (idx !== -1) pendingLocalMoves.splice(idx, 1);
                                     void multiplayerClient.syncState();
                                 }
                             });
                         }
-                        if (m!.die === 2 || m!.combined) diceUsed = [true, true];
-                        else diceUsed[m!.die] = true;
-                        clearHighlights();
-                        popup('info', 'PASSED', `${nameOf(current)} passed the Gul!`, 2000);
                         const r = waitChoice;
                         waitChoice = null;
-                        if (r) r({ ...m!, reachesHome: false, to: tokens[current][v.t], passed: true } as any);
+                        if (r) r(m);
+                    } else {
+                        dieConfirmed = true;
+                        sfx.tap();
+                        if (isOnline()) {
+                            pendingLocalMoves.push({ dieIndex: m.die, tokenIndex: m.tok });
+                            void multiplayerClient.movePawn(m.die, m.tok, 'pass').then((res) => {
+                                if (res && !res.ok && !dead) {
+                                    const idx = pendingLocalMoves.findIndex((pm) => pm.dieIndex === m.die && pm.tokenIndex === m.tok);
+                                    if (idx !== -1) pendingLocalMoves.splice(idx, 1);
+                                    void multiplayerClient.syncState();
+                                }
+                            });
+                        }
+                        diceUsed = [true, true];
+                        clearHighlights();
+                        popup('info', 'PASSED', `${nameOf(current)} passed the turn!`, 2000);
+                        const r = waitChoice;
+                        waitChoice = null;
+                        if (r) r({ ...m, reachesHome: false, to: tokens[current][m.tok], passed: true } as any);
                     }
                 };
                 return;
@@ -1736,10 +2048,10 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
 
             if (isOnline()) {
                 // Track local move so server echo does not double-move or consume next die
-                pendingLocalMoves.push({ dieIndex: m!.die, tokenIndex: v.t });
-                void multiplayerClient.movePawn(m!.die, v.t).then((res) => {
+                pendingLocalMoves.push({ dieIndex: m.die, tokenIndex: m.tok });
+                void multiplayerClient.movePawn(m.die, m.tok, 'gul').then((res) => {
                     if (res && !res.ok && !dead) {
-                        const idx = pendingLocalMoves.findIndex((pm) => pm.dieIndex === m!.die && pm.tokenIndex === v.t);
+                        const idx = pendingLocalMoves.findIndex((pm) => pm.dieIndex === m.die && pm.tokenIndex === m.tok);
                         if (idx !== -1) pendingLocalMoves.splice(idx, 1);
                         void multiplayerClient.syncState();
                     }
@@ -1747,13 +2059,13 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                 // Execute move locally immediately for zero-latency instant response!
                 const r = waitChoice;
                 waitChoice = null;
-                if (r) r(m!);
+                if (r) r(m);
                 return;
             }
 
             const r = waitChoice;
             waitChoice = null;
-            if (r) r(m!);
+            if (r) r(m);
         };
 
         // Respect configurable captureWarningMode ('first3' | 'always' | 'off') in both local Play & online pre-move checks
@@ -1811,6 +2123,46 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         }
 
         proceedWithMove();
+    }
+
+    function onTokenTap(v: TokView) {
+        if (!isOnline() && localTurnAutoPlay) return;
+        if (!waitChoice) return;
+        if (isOnline()) {
+            const myIdx = multiplayerClient.myPlayerIndex;
+            const serverTurn = multiplayerClient.roomState?.currentTurn;
+            if (myIdx !== null && serverTurn === myIdx && current !== myIdx) {
+                current = myIdx;
+                diceColor = COLORS[myIdx];
+                publish();
+                refreshTurnText();
+            }
+            if (myIdx !== current || v.p !== myIdx) {
+                return;
+            }
+        }
+        if (!isOnline() && isAI(current)) return;
+        if (v.p !== current) return;
+
+        const m = resolvePawnTapMove(
+            tokens,
+            current,
+            v.t,
+            optionsNow,
+            selDie,
+            dieConfirmed,
+            dice,
+            diceUsed,
+        );
+
+        if (!m) {
+            setStatus(tr(lang, 'pieceNeedsOtherDie'));
+            flashDies();
+            return;
+        }
+
+        selDie = m.die;
+        executePlayerMove(m);
     }
     function flashDies() {
         dieFlash = 900;
@@ -1913,8 +2265,8 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         diceUsed = [true, true];
         diceColor = COLORS[p];
         startFly(p, a, b, dur);
-        sfx.diceRoll(dur);
         await delay(dur + 150, expectedEpoch !== undefined);
+        flyHoldingResult = false;
         if (expectedEpoch !== undefined && isOnline() && turnEpoch !== expectedEpoch) {
             return { a, b, lucky };
         }
@@ -1930,7 +2282,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             dice = [6, 6];
             sfx.fanfare();
             popup('lucky', tr(lang, 'luckyT'), tr(lang, 'luckyS'), 3600);
-            void sfx.speak({ text: tr(lang, 'sayLucky'), lang, player: p, cancelCurrent: true });
+            void sfx.speak({ text: tr(lang, 'sayLucky'), lang, player: p, gender: genderOf(p), cancelCurrent: true });
             anyAI('lucky', p, undefined, 0.8);
             await delay(2800, expectedEpoch !== undefined);
         }
@@ -1947,10 +2299,13 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         const pts: [number, number][] = [boardPos(p, from, m.tok)];
         if (from === IN_BASE) pts.push(boardPos(p, 0, m.tok));
         else for (let r = from + 1; r <= m.to; r++) pts.push(boardPos(p, r, m.tok));
-        const stepMs = 280;
-        sfx.carMove(Math.min(2600, (pts.length - 1) * stepMs));
-        // the token keeps its old logical position until the hop ends
-        await tween(v, pts, stepMs, 0.55, expectedEpoch);
+        const kind = seatTokenKind(p);
+        const loco = getTokenLocomotion(kind, from === IN_BASE);
+        if (kind === 'default') {
+            sfx.carMove(Math.min(2600, (pts.length - 1) * loco.stepMs));
+        }
+        // the token keeps its old logical position until the move ends
+        await tween(v, pts, loco.stepMs, loco.hop, expectedEpoch, loco.mode);
         // Never overwrite authoritative synced state if turn already changed mid-animation
         if (expectedEpoch === undefined || !isOnline() || turnEpoch === expectedEpoch) {
             tokens[p][m.tok] = m.to;
@@ -1961,7 +2316,16 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         const v = views[p][t];
         const from = boardPos(p, tokens[p][t], t);
         const to = boardPos(p, IN_BASE, t);
-        await tween(v, [from, to], ms, 1.8);
+        const kind = seatTokenKind(p);
+        const loco = getTokenLocomotion(kind, false);
+        await tween(
+            v,
+            [from, to],
+            ms,
+            loco.mode === 'slither' ? 0 : 1.8,
+            undefined,
+            loco.mode === 'slither' ? 'slither' : 'hop',
+        );
         tokens[p][t] = IN_BASE;
     }
 
@@ -1976,10 +2340,16 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         let captured = false;
         let leaderVictim = -1;
         let revengeVictim = -1;
+        const kind = seatTokenKind(p);
+        if (m.captures.length > 0) {
+            sfx.capture();
+            views[p][m.tok].celebrateUntil = now + 1100;
+            sfx.playTokenEventSfx(kind, 'capture');
+        }
         for (const c of m.captures) {
             // re-check: the victim is still on that square after landing
             captured = true;
-            sfx.heartbeat();
+            capturesMade[p] += 1;
             const victim = c.p;
             void sendHome(victim, c.t, 900);
             if (!isOnline()) {
@@ -1996,6 +2366,13 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         if (expectedEpoch !== undefined && isOnline() && turnEpoch !== expectedEpoch) {
             return { captured, home: m.reachesHome };
         }
+        if (m.reachesHome) {
+            views[p][m.tok].celebrateUntil = now + 1100;
+            if (!captured) sfx.playTokenEventSfx(kind, 'home');
+        } else if (prevPos < COLORED_PATH_START_POS && m.to >= COLORED_PATH_START_POS) {
+            views[p][m.tok].celebrateUntil = now + 900;
+            if (!captured) sfx.playTokenEventSfx(kind, 'home_stretch');
+        }
         if (!isOnline()) {
             if (leaderVictim !== -1 && preRivalry?.tier === 'dethrone') {
                 emitRivalryEvent('leader_hit', p, leaderVictim, preRivalry.leaderPct);
@@ -2007,7 +2384,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
 
             if (m.reachesHome) {
                 emitLocalBanter('pawn_home', p, undefined, 0.75);
-            } else if (prevPos < PATH_START && m.to >= PATH_START) {
+            } else if (prevPos < COLORED_PATH_START_POS && m.to >= COLORED_PATH_START_POS) {
                 emitLocalBanter('home_stretch', p, undefined, 0.7);
             } else if (m.fromBase) {
                 emitLocalBanter('turn', p, undefined, 0.35);
@@ -2034,6 +2411,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         if (isPenalizing || tokenIndices.length === 0) return;
         isPenalizing = true;
         try {
+            penalties[p] += tokenIndices.length;
             const name = nameOf(p);
             for (const t of tokenIndices) {
                 const v = views[p]?.[t];
@@ -2074,8 +2452,14 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         // camera: bring this colour to the bottom-left
         targetYaw = store.get().settings.rotate ? YAW_FOR[p] : 0;
         diceColor = COLORS[p];
+        flyT = -1;
+        flying = [];
+        flyHoldingResult = false;
         current = p;
+        localTurnAutoPlay = false;
         diceUsed = [true, true];
+        dieConfirmed = false;
+        turnInitialTokens = null;
         setStatus('');
         clearHighlights();
         bus.onGulDecision = undefined;
@@ -2112,6 +2496,22 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                     sfx.tick();
                 }
                 if (left <= 0) {
+                    localTurnAutoPlay = true;
+                    if (turnTimerInterval) {
+                        clearInterval(turnTimerInterval);
+                        turnTimerInterval = null;
+                    }
+                    // Timeout while "Gul or Pass?" modal is open -> ALWAYS Auto-PASS (never Auto-Gul)
+                    if (bus.onGulDecision && waitChoice) {
+                        const decide = bus.onGulDecision;
+                        bus.onGulDecision = undefined;
+                        store.patch({ gulPrompt: null });
+                        localTurnAutoPlay = false; // allow decide('pass') internal resolution, then immediately re-lock
+                        decide('pass');
+                        localTurnAutoPlay = true;
+                        sfx.tick();
+                        return;
+                    }
                     // Offline / singleplayer auto-roll or auto-move
                     if (waitRoll) {
                         const r = waitRoll;
@@ -2137,7 +2537,14 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                             { personality: personalityOf(p), grudgeTargetIdx: grudges[p]?.targetIdx ?? null },
                         ).move;
                         sfx.tick();
-                        r(autoMove);
+                        if (resolveAutoPlayGulAction(tokens, p, autoMove, dice, true, turnInitialTokens) === 'pass') {
+                            diceUsed = [true, true];
+                            clearHighlights();
+                            popup('info', 'AUTO-PASSED', `${nameOf(p)} timed out — turn passed!`, 2000);
+                            r({ ...autoMove, reachesHome: false, to: tokens[p][autoMove.tok], passed: true } as any);
+                        } else {
+                            r(autoMove);
+                        }
                     }
                 }
             }, 250);
@@ -2217,6 +2624,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             let extra = double6;
 
             // --- use each die
+            turnInitialTokens = tokens.map((row) => row.slice());
             turnObligation = evaluateCaptureObligation(tokens, p, dice, active, diceUsed);
             let capturePromise = turnObligation.required;
             turnCapturePromise = capturePromise;
@@ -2374,11 +2782,59 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                 }
 
                 if (turnAborted()) break;
+                if (!isOnline() && localTurnAutoPlay) {
+                    const caps = optionsNow.filter((m) => m.captures.length > 0);
+                    const pool = caps.length > 0 ? caps : optionsNow;
+                    const autoMove = pickBestAIMove(
+                        tokens,
+                        p,
+                        pool,
+                        active,
+                        dice,
+                        diceUsed,
+                        turnObligation,
+                        capturesTaken,
+                        { personality: personalityOf(p), grudgeTargetIdx: grudges[p]?.targetIdx ?? null },
+                    ).move;
+                    await delay(650);
+                    if (turnAborted()) break;
+                    if (resolveAutoPlayGulAction(tokens, p, autoMove, dice, true, turnInitialTokens) === 'pass') {
+                        diceUsed = [true, true];
+                        clearHighlights();
+                        extra = false;
+                        popup('info', 'AUTO-PASSED', `${nameOf(p)} timed out — turn passed!`, 2000);
+                        optionsNow = [];
+                        continue;
+                    }
+                    if (autoMove.die === 2 || autoMove.combined) diceUsed = [true, true];
+                    else diceUsed[autoMove.die] = true;
+                    const res = await applyMove(p, autoMove, myTurnEpoch);
+                    if (turnAborted()) break;
+                    recordMoveCaptureAndUpgrade(autoMove);
+                    if (res.captured || res.home) extra = true;
+                    if (hasWon(tokens, p)) {
+                        winner = p;
+                        return false;
+                    }
+                    optionsNow = [];
+                    continue;
+                }
                 // --- human: tap a die (or combined sum) to choose it, then tap a token to move it
+                dieConfirmed = false;
                 setStatus(tr(lang, 'pickDie'));
                 const usableDies = [0, 1].filter((i) => !diceUsed[i] && optionsNow.some((m) => m.die === i));
                 const hasCombined = !diceUsed[0] && !diceUsed[1] && optionsNow.some((m) => m.die === 2);
-                if (usableDies.length > 0) {
+                const loneTokIdx = isLoneTokenOnTrack(tokens, p)
+                    ? tokens[p].findIndex((r) => r >= 0 && r < CENTER_HOME_POS)
+                    : -1;
+                const preferCombinedByDefault =
+                    hasCombined &&
+                    loneTokIdx >= 0 &&
+                    (tokens[p][loneTokIdx] + dice[0] + dice[1] >= COLORED_PATH_START_POS ||
+                        !(tokens[p].some((r) => r === IN_BASE) && (dice[0] === 6 || dice[1] === 6)));
+                if (preferCombinedByDefault) {
+                    selDie = 2;
+                } else if (usableDies.length > 0) {
                     if (!usableDies.includes(selDie) && !(selDie === 2 && hasCombined)) selDie = usableDies[0];
                 } else if (hasCombined) {
                     selDie = 2;
@@ -2396,6 +2852,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                 if (chosen.die === 2 || chosen.combined) diceUsed = [true, true];
                 else diceUsed[chosen.die] = true;
                 if ((chosen as any).passed) {
+                    extra = false;
                     optionsNow = [];
                     continue;
                 }
@@ -2421,6 +2878,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                 }
             }
             turnObligation = null;
+            turnInitialTokens = null;
             diceUsed = [true, true];
             clearHighlights();
             return extra;
@@ -2445,7 +2903,12 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             .filter((p) => active[p])
             .map((p) => ({ idx: p, pct: p === winner ? 100 : percent(tokens, p), fine: fineProgress(tokens, p) }));
         rows.sort((a, b) => (a.idx === winner ? -1 : b.idx === winner ? 1 : b.pct - a.pct || b.fine - a.fine));
-        ranking = rows.map((r) => ({ idx: r.idx, pct: r.pct }));
+        ranking = rows.map((r) => ({
+            idx: r.idx,
+            pct: r.pct,
+            captures: capturesMade[r.idx] ?? 0,
+            penalties: penalties[r.idx] ?? 0,
+        }));
         publish();
         sfx.fanfare();
         if (!isOnline()) {
@@ -2546,15 +3009,16 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             lastSig = sig;
             drawBoard();
         }
+        drawThemedBoardFX(boardFxG, (x, y, z = 0) => P(x, y, z), resolveBoardTheme(st.boardTheme), now, S);
         bgFill.tint = 0xffffff;
-        updateTokens(now);
+        updateTokens(now, dt);
         updatePlates(dt);
         if (homeCenterTxt?.position && homeCenterTxt?.scale && !homeCenterTxt.destroyed) {
             const midP = P(7.5, 7.5, 0.05);
             homeCenterTxt.position.set(midP.x, midP.y);
             homeCenterTxt.scale.set(Math.max(0.7, S * 0.024));
         }
-        updateFly(dt);
+        updateFly(dt, now);
         drawDice(now);
         syncHand();
         updateHand(dt);

@@ -3,7 +3,8 @@ import { store, useStore } from '../state/store';
 import { LANGS, tr, colorName } from '../i18n';
 import { BGM_TRACKS, DEFAULT_BGM_TRACK, setBgmTrack, setMusicOn, setSong, clearSong, stopMusic } from '../game/music';
 import { BG_NAMES } from '../game/draw';
-import { BOARD_THEME_LIST, DICE_STYLE_LIST } from '../game/themes';
+import { BOARD_THEME_LIST, DICE_STYLE_LIST, resolveBoardTheme } from '../game/themes';
+import { TOKEN_STYLE_LIST, normalizeTokenStyleId, type HumanGenderMode } from '../game/tokens';
 import { REACTIONS, quickPhrases } from '../game/banter';
 import { bus } from '../game/bus';
 import { Chip, Modal, Toggle, U } from './kit';
@@ -59,6 +60,14 @@ function Settings() {
     const s = useStore((st) => st.settings);
     const phase = useStore((st) => st.phase);
     const landscape = useStore((st) => st.landscape);
+    const activeBoardThemeId = resolveBoardTheme(s.boardTheme).id;
+    const activeTokenStyleId = normalizeTokenStyleId(s.tokenStyle);
+    const activeGenderMode = s.humanGenderMode || 'auto';
+    const previewSeatRef = useRef(0);
+
+    const classicTokens = TOKEN_STYLE_LIST.filter((t) => t.category === 'classic');
+    const humanTokens = TOKEN_STYLE_LIST.filter((t) => t.category === 'human');
+    const animalTokens = TOKEN_STYLE_LIST.filter((t) => t.category === 'animal');
 
     return (
         <Modal title="⚙️ Settings" onClose={close} wide={landscape}>
@@ -168,10 +177,80 @@ function Settings() {
                             {BOARD_THEME_LIST.map((theme) => (
                                 <Chip
                                     key={theme.id}
-                                    active={(s.boardTheme || 'classic') === theme.id}
+                                    active={activeBoardThemeId === theme.id}
                                     onClick={() => store.patchSettings({ boardTheme: theme.id })}
                                 >
-                                    {theme.name}
+                                    {theme.icon} {theme.name}
+                                </Chip>
+                            ))}
+                        </div>
+                    </div>
+
+                    <div className="flex flex-col gap-1.5 rounded-xl bg-white/5 border border-white/10 p-2">
+                        <div className="flex items-center justify-between gap-2">
+                            <span className="font-bold text-cyan-200 text-xs">🎭 Token Style</span>
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    const seat = previewSeatRef.current % 4;
+                                    previewSeatRef.current = (previewSeatRef.current + 1) % 4;
+                                    sfx.playTokenPreviewSfx(activeTokenStyleId, seat, activeGenderMode);
+                                }}
+                                className="px-2 py-0.5 rounded-lg bg-amber-400/20 border border-amber-400/60 text-amber-200 font-extrabold text-[10px] hover:bg-amber-400/35 cursor-pointer"
+                            >
+                                🔊 Preview
+                            </button>
+                        </div>
+
+                        <div className="grid grid-cols-1 gap-1">
+                            {classicTokens.map((tk) => (
+                                <Chip
+                                    key={tk.id}
+                                    active={activeTokenStyleId === tk.id}
+                                    onClick={() => store.patchSettings({ tokenStyle: tk.id })}
+                                >
+                                    {tk.icon} {tk.name}
+                                </Chip>
+                            ))}
+                        </div>
+
+                        <div className="flex items-center justify-between gap-1 pt-0.5">
+                            <span className="text-[10px] font-bold text-cyan-200/90">Human Style</span>
+                            <div className="grid grid-cols-3 gap-1">
+                                {(['auto', 'girl', 'boy'] as HumanGenderMode[]).map((gm) => (
+                                    <Chip
+                                        key={gm}
+                                        active={activeGenderMode === gm}
+                                        onClick={() => store.patchSettings({ humanGenderMode: gm })}
+                                    >
+                                        {gm === 'auto' ? 'Auto' : gm === 'girl' ? 'Girl' : 'Boy'}
+                                    </Chip>
+                                ))}
+                            </div>
+                        </div>
+
+                        <div className="text-[10px] font-bold text-white/60">Human 3D Characters</div>
+                        <div className="grid grid-cols-2 gap-1">
+                            {humanTokens.map((tk) => (
+                                <Chip
+                                    key={tk.id}
+                                    active={activeTokenStyleId === tk.id}
+                                    onClick={() => store.patchSettings({ tokenStyle: tk.id })}
+                                >
+                                    {tk.icon} {tk.name}
+                                </Chip>
+                            ))}
+                        </div>
+
+                        <div className="text-[10px] font-bold text-white/60 pt-0.5">Articulated 3D Animals</div>
+                        <div className="grid grid-cols-2 gap-1">
+                            {animalTokens.map((tk) => (
+                                <Chip
+                                    key={tk.id}
+                                    active={activeTokenStyleId === tk.id}
+                                    onClick={() => store.patchSettings({ tokenStyle: tk.id })}
+                                >
+                                    {tk.icon} {tk.name}
                                 </Chip>
                             ))}
                         </div>
@@ -229,7 +308,7 @@ function HowTo() {
         'Unlimited Double 6s (6+6): Rolling 6+6, capturing an opponent, or entering the centre home (Gul) gives you an extra turn with no consecutive limit.',
         'Pair / Stack Protection: Two or more tokens of the same colour on a non-safe square form a protected stack. A capture only succeeds if your tokens on the landing square equal or outnumber the opponent stack (myCount >= otherCount).',
         'Lone Token Full-Total Rule: When you only have 1 active token out on the board, it can only enter its coloured home path or centre home using the full combined total of both dice (partial single-die entry is blocked while 2 dice remain), and it may move by the combined sum when legal.',
-        'Gul or Pass: Landing directly on the centre home (56) asks "Gul or Pass?" — choose Gul to enter and earn an extra turn, or Pass to consume the die and stay on the path.',
+        'Gul or Pass: Prompts "Gul or Pass?" when a lone active token reaches centre home (56) on the combined dice total, OR when your only 2 active tokens are inside the coloured path and both reach 56 on one die each. Choosing Pass stays on the path and passes the turn.',
         'Compulsory Capture Penalty: If total (final square) or pair capture options exist, 1 capture is required; otherwise, you must take the maximum independent single-die captures possible. If captures made < required at the end of the turn, every token that had a capture option and did not capture goes back to base. Your first 3 matches warn before skipping.',
         'Lucky 7: Active only when 0 tokens are on the open track and at least 1 token is still in base — rolling 1+6, 2+5, or 3+4 converts to 6+6 and an extra turn.',
         'Optional Turn Timer (60s, 90s, 120s, or Off): Choose your timer before starting; if time expires, the move plays automatically.',

@@ -2,7 +2,7 @@ import { io, Socket } from 'socket.io-client';
 import type { ClientRoomState, RoomPlayer } from '../../server/roomManager';
 import type { AIPersonality, RivalryCalloutKind } from '../game/banter';
 import { createEmptyGrudges } from '../game/rules';
-import { store } from '../state/store';
+import { DEFAULT_PLAYERS, store } from '../state/store';
 import { bus } from '../game/bus';
 import { safeStorage, safeSessionStorage } from '../state/storage';
 import * as sfx from '../game/sfx';
@@ -406,8 +406,18 @@ class MultiplayerClient {
             this.notify();
 
             const rows = data.rankings && data.rankings.length > 0
-                ? data.rankings.map((r: any) => ({ idx: r.playerIndex, pct: r.rank === 1 ? 100 : Math.round(r.progress || 0) }))
-                : [0, 1, 2, 3].map((p) => ({ idx: p, pct: p === data.winner ? 100 : 0 }));
+                ? data.rankings.map((r: any) => ({
+                      idx: r.playerIndex,
+                      pct: r.rank === 1 ? 100 : Math.round(r.progress || 0),
+                      captures: typeof r.capturesMade === 'number' ? r.capturesMade : this.roomState?.players[r.playerIndex]?.capturesMade,
+                      penalties: typeof r.penalties === 'number' ? r.penalties : this.roomState?.players[r.playerIndex]?.penalties,
+                  }))
+                : [0, 1, 2, 3].map((p) => ({
+                      idx: p,
+                      pct: p === data.winner ? 100 : 0,
+                      captures: this.roomState?.players[p]?.capturesMade ?? 0,
+                      penalties: this.roomState?.players[p]?.penalties ?? 0,
+                  }));
             store.patch({ result: rows, popup: null, wishUsable: false });
 
             if (bus.onRemoteGameOver) {
@@ -749,11 +759,18 @@ class MultiplayerClient {
             if (p) {
                 active[i] = true;
                 const cleanName = (p.name || '').replace(/\s*#[a-zA-Z0-9_-]+$/, '').trim();
+                const inferredGender: 'male' | 'female' =
+                    p.avatar === '👸'
+                        ? 'female'
+                        : p.avatar === '🤴'
+                        ? 'male'
+                        : DEFAULT_PLAYERS[i]?.gender || 'male';
                 store.patchPlayer(i, {
                     name: cleanName || p.name,
                     avatar: p.avatar,
                     ai: p.isAI,
                     personality: p.personality || state.botPersonalities?.[i],
+                    gender: inferredGender,
                 });
             }
         });

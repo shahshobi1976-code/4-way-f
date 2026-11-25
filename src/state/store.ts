@@ -3,7 +3,8 @@ import { readDevice, readLocal, write } from './persist';
 import type { NameplateBound } from '../game/bus';
 import type { AIPersonality, RivalryCalloutKind } from '../game/banter';
 import { createEmptyGrudges, type GrudgeEntry, type RivalryState } from '../game/rules';
-import type { BoardThemeId, DiceStyleId } from '../game/themes';
+import { resolveBoardTheme, type BoardThemeId, type DiceStyleId } from '../game/themes';
+import { normalizeTokenStyleId, type HumanGenderMode, type TokenStyleId } from '../game/tokens';
 
 export type Phase = 'loading' | 'menu' | 'setup' | 'playing';
 export type ModalId =
@@ -32,6 +33,8 @@ export interface Settings {
     bg: number; // 0..9 background arena
     boardTheme: BoardThemeId;
     diceStyle: DiceStyleId;
+    tokenStyle: TokenStyleId;
+    humanGenderMode: HumanGenderMode;
     lang: string;
     songName: string | null;
     timerEnabled: boolean; // Turn timer optional
@@ -45,6 +48,7 @@ export interface PlayerCfg {
     avatar: string;
     wish: [number, number] | null;
     personality?: AIPersonality;
+    gender?: 'male' | 'female';
 }
 
 export interface Popup {
@@ -56,6 +60,8 @@ export interface Popup {
 export interface RankRow {
     idx: number;
     pct: number;
+    captures?: number;
+    penalties?: number;
 }
 
 export interface GulPrompt {
@@ -125,6 +131,8 @@ const DEFAULT_SETTINGS: Settings = {
     bg: 0,
     boardTheme: 'classic',
     diceStyle: 'classic',
+    tokenStyle: 'default',
+    humanGenderMode: 'auto',
     lang: 'en',
     songName: null,
     timerEnabled: true,
@@ -147,6 +155,12 @@ function loadSettings(): Settings {
             return {
                 ...DEFAULT_SETTINGS,
                 ...parsed,
+                boardTheme: resolveBoardTheme(parsed.boardTheme).id,
+                tokenStyle: normalizeTokenStyleId(parsed.tokenStyle),
+                humanGenderMode:
+                    parsed.humanGenderMode === 'girl' || parsed.humanGenderMode === 'boy' || parsed.humanGenderMode === 'auto'
+                        ? parsed.humanGenderMode
+                        : DEFAULT_SETTINGS.humanGenderMode,
                 bgmTrack: typeof parsed.bgmTrack === 'string' && parsed.bgmTrack ? parsed.bgmTrack : DEFAULT_SETTINGS.bgmTrack,
                 songName: null,
             };
@@ -158,10 +172,10 @@ function loadSettings(): Settings {
 }
 
 export const DEFAULT_PLAYERS: PlayerCfg[] = [
-    { name: 'Shahbaz', ai: false, avatar: '🤴', wish: null, personality: 'Strategist' },
-    { name: 'Mughal', ai: true, avatar: '🦁', wish: null, personality: 'Confidante' },
-    { name: 'Zoi', ai: true, avatar: '🌟', wish: null, personality: 'Rival' },
-    { name: 'Kajal', ai: true, avatar: '💎', wish: null, personality: 'Rideordie' },
+    { name: 'Shahbaz', ai: false, avatar: '🤴', wish: null, personality: 'Strategist', gender: 'male' },
+    { name: 'Mughal', ai: true, avatar: '🦁', wish: null, personality: 'Confidante', gender: 'male' },
+    { name: 'Zoi', ai: true, avatar: '🌟', wish: null, personality: 'Rival', gender: 'female' },
+    { name: 'Kajal', ai: true, avatar: '💎', wish: null, personality: 'Rideordie', gender: 'female' },
 ];
 
 let state: AppState = {
@@ -243,7 +257,20 @@ export async function hydrateSettings(): Promise<void> {
     if (!raw) return;
     try {
         const saved = JSON.parse(raw) as Partial<Settings>;
-        state = { ...state, settings: { ...state.settings, ...saved, songName: state.settings.songName } };
+        state = {
+            ...state,
+            settings: {
+                ...state.settings,
+                ...saved,
+                boardTheme: resolveBoardTheme(saved.boardTheme ?? state.settings.boardTheme).id,
+                tokenStyle: normalizeTokenStyleId(saved.tokenStyle ?? state.settings.tokenStyle),
+                humanGenderMode:
+                    saved.humanGenderMode === 'girl' || saved.humanGenderMode === 'boy' || saved.humanGenderMode === 'auto'
+                        ? saved.humanGenderMode
+                        : state.settings.humanGenderMode,
+                songName: state.settings.songName,
+            },
+        };
         listeners.forEach((l) => l());
     } catch {
         /* corrupt host save: keep what we already have */

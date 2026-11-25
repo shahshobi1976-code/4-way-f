@@ -17,6 +17,10 @@ import {
     pickObligationAwarePool,
     LAST_TRACK,
     PATH_START,
+    COLORED_PATH_START_POS,
+    CENTER_HOME_POS,
+    shouldPromptGulChoice,
+    resolveAutoPlayGulAction,
     globalIdx,
     evaluateRivalryState,
     createEmptyGrudges,
@@ -68,6 +72,7 @@ export interface RoomPlayer {
     connected: boolean;
     disconnectTime?: number | null;
     isAI: boolean;
+    tempBotTakeover?: boolean;
     personality?: AIPersonality;
     wish?: [number, number] | null;
     wishUsed?: boolean;
@@ -108,7 +113,7 @@ export interface ClientRoomState {
     dice: [number, number] | null;
     diceUsed: [boolean, boolean];
     winner: number | null;
-    rankings: { playerIndex: number; name: string; avatar: string; rank: number; progress?: number }[];
+    rankings: { playerIndex: number; name: string; avatar: string; rank: number; progress?: number; capturesMade?: number; penalties?: number }[];
     turnTimeSec?: number;
     maxPlayers?: number;
     secretWhispers?: boolean;
@@ -132,7 +137,7 @@ export interface Room {
     dice: [number, number] | null;
     diceUsed: [boolean, boolean];
     winner: number | null;
-    rankings: { playerIndex: number; name: string; avatar: string; rank: number; progress?: number }[];
+    rankings: { playerIndex: number; name: string; avatar: string; rank: number; progress?: number; capturesMade?: number; penalties?: number }[];
     rematchVotes: Set<string>;
     startedAt?: number;
     endedAt?: number;
@@ -663,6 +668,11 @@ class RoomManager {
                 player.socketId = socketId;
                 player.connected = true;
                 player.disconnectTime = null;
+                if (player.tempBotTakeover) {
+                    player.isAI = false;
+                    player.tempBotTakeover = false;
+                    player.name = player.name.replace(/ \(Bot\)$/, '');
+                }
                 if (avatar) player.avatar = avatar;
 
                 const existingTimeout = room.disconnectTimeouts.get(found.index);
@@ -752,6 +762,11 @@ class RoomManager {
         player.socketId = socketId;
         player.connected = true;
         player.disconnectTime = null;
+        if (player.tempBotTakeover) {
+            player.isAI = false;
+            player.tempBotTakeover = false;
+            player.name = player.name.replace(/ \(Bot\)$/, '');
+        }
 
         const existingTimeout = room.disconnectTimeouts.get(found.index);
         if (existingTimeout) {
@@ -903,7 +918,7 @@ class RoomManager {
         }, turnLimitMs);
     }
 
-    private handleTurnTimeout(code: string) {
+    public handleTurnTimeout(code: string) {
         const room = this.rooms.get(code);
         if (!room || room.phase !== 'playing') return;
 
@@ -1030,7 +1045,19 @@ class RoomManager {
                 { personality: botPersonality, grudgeTargetIdx },
             );
             if (chosen) {
-                this.movePawn(room.code, '', chosen.die, chosen.tok, 'gul', true);
+                const isAutoPassSeat =
+                    !!room.turnAutoPlay ||
+                    !!botPlayer?.tempBotTakeover ||
+                    (!botPlayer?.isAI && !botPlayer?.connected);
+                const autoAction = resolveAutoPlayGulAction(
+                    room.tokens,
+                    botIdx,
+                    chosen,
+                    room.dice,
+                    isAutoPassSeat,
+                    room.initialTurnTokens,
+                );
+                this.movePawn(room.code, '', chosen.die, chosen.tok, autoAction, true);
                 return;
             }
         }
@@ -1214,11 +1241,24 @@ class RoomManager {
         if (!move) return { ok: false, error: 'Illegal move' };
 
         if (action === 'pass') {
-            if (move.to !== 56) {
-                return { ok: false, error: 'Cannot pass non-home move' };
+            if (
+                !shouldPromptGulChoice(
+                    room.tokens,
+                    room.currentTurn,
+                    move.value,
+                    dieIndex,
+                    room.dice,
+                    room.initialTurnTokens,
+                    tokenIndex,
+                )
+            ) {
+                return {
+                    ok: false,
+                    error: 'Gul or Pass choice is only allowed for a lone combined Gul or two coloured-path tokens reaching Gul together',
+                };
             }
-            if (dieIndex === 2) room.diceUsed = [true, true];
-            else room.diceUsed[dieIndex] = true;
+            // Pass = pass the turn (consume all remaining dice immediately)
+            room.diceUsed = [true, true];
 
             this.broadcast(room.code, 'pawn_moved', {
                 p: room.currentTurn,
@@ -1231,31 +1271,15 @@ class RoomManager {
                 passed: true,
             });
 
-            const remPassMoves = (!room.diceUsed[0] || !room.diceUsed[1])
-                ? legalMovesForTurn(room.tokens, room.currentTurn, room.dice, room.diceUsed, activeBools)
-                : [];
-            const canPlayOther = remPassMoves.length > 0;
-            if (!canPlayOther) room.diceUsed = [true, true];
-
             const passTurnAtSchedule = room.currentTurn;
-            if (!canPlayOther) {
-                const penaltyApplied = this.checkAndApplyMissedCapturePenalty(room);
-                const doubleSix = room.dice[0] === 6 && room.dice[1] === 6;
-                const extraTurn = !penaltyApplied && (doubleSix || !!room.hadCaptureOrHomeThisTurn);
-                setTimeout(() => {
-                    const r = this.rooms.get(code);
-                    if (r && r.phase === 'playing' && r.currentTurn === passTurnAtSchedule) {
-                        this.advanceTurn(r, extraTurn);
-                    }
-                }, penaltyApplied ? 1100 : 450);
-            } else if (curPlayer.isAI || room.turnAutoPlay) {
-                setTimeout(() => {
-                    const r = this.rooms.get(code);
-                    if (r && r.phase === 'playing' && r.currentTurn === passTurnAtSchedule) {
-                        this.executeBotMoves(r);
-                    }
-                }, 1400);
-            }
+            const penaltyApplied = this.checkAndApplyMissedCapturePenalty(room);
+            const extraTurn = false;
+            setTimeout(() => {
+                const r = this.rooms.get(code);
+                if (r && r.phase === 'playing' && r.currentTurn === passTurnAtSchedule) {
+                    this.advanceTurn(r, extraTurn);
+                }
+            }, penaltyApplied ? 1100 : 450);
             return { ok: true };
         }
 
@@ -1335,8 +1359,11 @@ class RoomManager {
             }
         }
 
-        const reachedHome = move.to === 56;
-        const enteredHomeStretch = prevTokenPos < PATH_START && move.to >= PATH_START && !reachedHome;
+        const reachedHome = move.to === CENTER_HOME_POS;
+        const enteredHomeStretch =
+            prevTokenPos < COLORED_PATH_START_POS &&
+            move.to >= COLORED_PATH_START_POS &&
+            !reachedHome;
 
         this.broadcast(room.code, 'pawn_moved', {
             p: room.currentTurn,
@@ -1659,6 +1686,8 @@ class RoomManager {
             avatar: item.player.avatar,
             rank: rIdx + 1,
             progress: rIdx === 0 ? 100 : Math.round(calculateProgress(room.tokens, item.seat)),
+            capturesMade: room.capturesMade[item.seat] || 0,
+            penalties: room.penalties[item.seat] || 0,
         }));
 
         room.rankings = rankings;
@@ -1799,6 +1828,7 @@ class RoomManager {
                     if (r && r.players[idx] && !r.players[idx]!.connected) {
                         const timedOutId = r.players[idx]!.publicPlayerId;
                         r.players[idx]!.isAI = true;
+                        r.players[idx]!.tempBotTakeover = true;
                         r.players[idx]!.isHost = false;
                         r.players[idx]!.name = `${r.players[idx]!.name} (Bot)`;
                         this.reassignHostIfNeeded(r, timedOutId);

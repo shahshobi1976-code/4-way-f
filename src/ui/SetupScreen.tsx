@@ -34,8 +34,24 @@ export function SetupScreen() {
     const setGender = (g: 'male' | 'female') => {
         store.patch({ gender: g });
         players.forEach((p, i) => {
-            if (!p.ai) store.patchPlayer(i, { avatar: g === 'male' ? '🤴' : '👸' });
+            if (!p.ai) store.patchPlayer(i, { avatar: g === 'male' ? '🤴' : '👸', gender: g });
         });
+    };
+
+    const pickAvatar = (i: number, a: string) => {
+        if (a === '🤴') store.patchPlayer(i, { avatar: a, gender: 'male' });
+        else if (a === '👸') store.patchPlayer(i, { avatar: a, gender: 'female' });
+        else store.patchPlayer(i, { avatar: a });
+    };
+
+    const toggleSeatGender = (i: number) => {
+        const cur = players[i]?.gender || (players[i]?.avatar === '👸' ? 'female' : 'male');
+        const next: 'male' | 'female' = cur === 'female' ? 'male' : 'female';
+        const patch: Partial<(typeof players)[number]> = { gender: next };
+        if (players[i]?.avatar === '🤴' || players[i]?.avatar === '👸') {
+            patch.avatar = next === 'female' ? '👸' : '🤴';
+        }
+        store.patchPlayer(i, patch);
     };
 
     const start = () => {
@@ -284,7 +300,7 @@ export function SetupScreen() {
                                                 <button
                                                     key={a}
                                                     type="button"
-                                                    onClick={() => store.patchPlayer(i, { avatar: a })}
+                                                    onClick={() => pickAvatar(i, a)}
                                                     className={`w-5 h-5 rounded text-[11px] flex items-center justify-center transition-all cursor-pointer ${
                                                         p.avatar === a ? 'bg-cyan-400 text-black ring-1 ring-cyan-300 font-bold' : 'bg-white/10 hover:bg-white/20'
                                                     }`}
@@ -295,26 +311,54 @@ export function SetupScreen() {
                                         </div>
 
                                         {!p.ai ? (
-                                            <button
-                                                type="button"
-                                                onClick={() => store.patch({ modal: `wish:${i}` })}
-                                                className="py-1 px-2 rounded-lg bg-gradient-to-r from-amber-400 to-orange-500 font-black text-slate-950 text-[10px] shadow hover:brightness-105 active:scale-95 transition-all text-center cursor-pointer truncate"
-                                            >
-                                                ✨ {T('setWish')} {p.wish ? `(${p.wish[0]}, ${p.wish[1]})` : '(6, 5)'}
-                                            </button>
+                                            <div className="flex items-center gap-1">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => store.patch({ modal: `wish:${i}` })}
+                                                    className="flex-1 py-1 px-2 rounded-lg bg-gradient-to-r from-amber-400 to-orange-500 font-black text-slate-950 text-[10px] shadow hover:brightness-105 active:scale-95 transition-all text-center cursor-pointer truncate"
+                                                >
+                                                    ✨ {T('setWish')} {p.wish ? `(${p.wish[0]}, ${p.wish[1]})` : '(6, 5)'}
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => toggleSeatGender(i)}
+                                                    title={`Voice Gender: ${(p.gender || (p.avatar === '👸' ? 'female' : 'male')) === 'female' ? 'Female 👸' : 'Male 🤴'} (Click to switch)`}
+                                                    className={`px-1.5 py-1 rounded-lg border text-[10px] font-black cursor-pointer shrink-0 transition-all ${
+                                                        (p.gender || (p.avatar === '👸' ? 'female' : 'male')) === 'female'
+                                                            ? 'border-pink-400/60 bg-pink-500/20 text-pink-200'
+                                                            : 'border-cyan-400/50 bg-cyan-500/15 text-cyan-200'
+                                                    }`}
+                                                >
+                                                    {(p.gender || (p.avatar === '👸' ? 'female' : 'male')) === 'female' ? '👸' : '🤴'}
+                                                </button>
+                                            </div>
                                         ) : (
                                             <div className="flex items-center justify-between gap-1 text-[10px] text-slate-300 py-0.5">
                                                 <span className="truncate italic text-slate-400">🤖 {def.name}</span>
-                                                <select
-                                                    aria-label={`AI Personality ${def.name}`}
-                                                    value={p.personality || getPersonalityForSeat(i)}
-                                                    onChange={(e) => store.patchPlayer(i, { personality: e.target.value as AIPersonality })}
-                                                    className="rounded border border-cyan-400/40 bg-[#0e1530] text-cyan-200 px-1 py-0.5 text-[10px] font-bold outline-none cursor-pointer"
-                                                >
-                                                    {AI_PERSONALITIES.map((per) => (
-                                                        <option key={per} value={per}>{per}</option>
-                                                    ))}
-                                                </select>
+                                                <div className="flex items-center gap-1 shrink-0">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => toggleSeatGender(i)}
+                                                        title={`AI Voice Gender: ${(p.gender || def.gender || 'male') === 'female' ? 'Female 👸' : 'Male 🤴'} (Click to switch)`}
+                                                        className={`px-1.5 py-0.5 rounded border text-[10px] font-black cursor-pointer transition-all ${
+                                                            (p.gender || def.gender || 'male') === 'female'
+                                                                ? 'border-pink-400/60 bg-pink-500/20 text-pink-200'
+                                                                : 'border-cyan-400/50 bg-cyan-500/15 text-cyan-200'
+                                                        }`}
+                                                    >
+                                                        {(p.gender || def.gender || 'male') === 'female' ? '👸' : '🤴'}
+                                                    </button>
+                                                    <select
+                                                        aria-label={`AI Personality ${def.name}`}
+                                                        value={p.personality || getPersonalityForSeat(i)}
+                                                        onChange={(e) => store.patchPlayer(i, { personality: e.target.value as AIPersonality })}
+                                                        className="rounded border border-cyan-400/40 bg-[#0e1530] text-cyan-200 px-1 py-0.5 text-[10px] font-bold outline-none cursor-pointer"
+                                                    >
+                                                        {AI_PERSONALITIES.map((per) => (
+                                                            <option key={per} value={per}>{per}</option>
+                                                        ))}
+                                                    </select>
+                                                </div>
                                             </div>
                                         )}
                                     </div>
@@ -468,7 +512,7 @@ export function SetupScreen() {
                                     <button
                                         key={a}
                                         type="button"
-                                        onClick={() => store.patchPlayer(i, { avatar: a })}
+                                        onClick={() => pickAvatar(i, a)}
                                         className={`w-5 h-5 rounded text-[10px] flex items-center justify-center transition-all cursor-pointer ${
                                             p.avatar === a ? 'bg-cyan-400 text-black ring-1 ring-cyan-300 font-bold' : 'bg-white/10 hover:bg-white/20'
                                         }`}
@@ -478,28 +522,56 @@ export function SetupScreen() {
                                 ))}
                             </div>
 
-                            {/* Wish Button or AI status */}
+                            {/* Wish Button or AI status + per-seat Voice Gender (🤴/👸) */}
                             {!p.ai ? (
-                                <button
-                                    type="button"
-                                    onClick={() => store.patch({ modal: `wish:${i}` })}
-                                    className="w-full py-0.5 px-1 rounded-md bg-gradient-to-r from-amber-400 to-orange-500 font-black text-slate-950 text-[9px] sm:text-[10px] shadow hover:brightness-105 active:scale-95 transition-all text-center cursor-pointer truncate leading-tight"
-                                >
-                                    ✨ {T('setWish')} {p.wish ? `(${p.wish[0]}, ${p.wish[1]})` : '(6, 5)'}
-                                </button>
+                                <div className="flex items-center gap-1">
+                                    <button
+                                        type="button"
+                                        onClick={() => store.patch({ modal: `wish:${i}` })}
+                                        className="flex-1 py-0.5 px-1 rounded-md bg-gradient-to-r from-amber-400 to-orange-500 font-black text-slate-950 text-[9px] sm:text-[10px] shadow hover:brightness-105 active:scale-95 transition-all text-center cursor-pointer truncate leading-tight"
+                                    >
+                                        ✨ {T('setWish')} {p.wish ? `(${p.wish[0]}, ${p.wish[1]})` : '(6, 5)'}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => toggleSeatGender(i)}
+                                        title={`Voice Gender: ${(p.gender || (p.avatar === '👸' ? 'female' : 'male')) === 'female' ? 'Female 👸' : 'Male 🤴'} (Click to switch)`}
+                                        className={`px-1 py-0 rounded border text-[9px] font-black cursor-pointer shrink-0 leading-tight ${
+                                            (p.gender || (p.avatar === '👸' ? 'female' : 'male')) === 'female'
+                                                ? 'border-pink-400/60 bg-pink-500/20 text-pink-200'
+                                                : 'border-cyan-400/50 bg-cyan-500/15 text-cyan-200'
+                                        }`}
+                                    >
+                                        {(p.gender || (p.avatar === '👸' ? 'female' : 'male')) === 'female' ? '👸' : '🤴'}
+                                    </button>
+                                </div>
                             ) : (
                                 <div className="flex items-center justify-between gap-1 text-[9px] sm:text-[10px] text-slate-300 leading-tight">
                                     <span className="truncate italic text-slate-400">🤖 {def.name}</span>
-                                    <select
-                                        aria-label={`AI Personality ${def.name}`}
-                                        value={p.personality || getPersonalityForSeat(i)}
-                                        onChange={(e) => store.patchPlayer(i, { personality: e.target.value as AIPersonality })}
-                                        className="rounded border border-cyan-400/40 bg-[#0e1530] text-cyan-200 px-1 py-0 text-[9px] font-bold outline-none cursor-pointer shrink-0"
-                                    >
-                                        {AI_PERSONALITIES.map((per) => (
-                                            <option key={per} value={per}>{per}</option>
-                                        ))}
-                                    </select>
+                                    <div className="flex items-center gap-1 shrink-0">
+                                        <button
+                                            type="button"
+                                            onClick={() => toggleSeatGender(i)}
+                                            title={`AI Voice Gender: ${(p.gender || def.gender || 'male') === 'female' ? 'Female 👸' : 'Male 🤴'} (Click to switch)`}
+                                            className={`px-1 py-0 rounded border text-[9px] font-black cursor-pointer leading-tight ${
+                                                (p.gender || def.gender || 'male') === 'female'
+                                                    ? 'border-pink-400/60 bg-pink-500/20 text-pink-200'
+                                                    : 'border-cyan-400/50 bg-cyan-500/15 text-cyan-200'
+                                            }`}
+                                        >
+                                            {(p.gender || def.gender || 'male') === 'female' ? '👸' : '🤴'}
+                                        </button>
+                                        <select
+                                            aria-label={`AI Personality ${def.name}`}
+                                            value={p.personality || getPersonalityForSeat(i)}
+                                            onChange={(e) => store.patchPlayer(i, { personality: e.target.value as AIPersonality })}
+                                            className="rounded border border-cyan-400/40 bg-[#0e1530] text-cyan-200 px-1 py-0 text-[9px] font-bold outline-none cursor-pointer shrink-0"
+                                        >
+                                            {AI_PERSONALITIES.map((per) => (
+                                                <option key={per} value={per}>{per}</option>
+                                            ))}
+                                        </select>
+                                    </div>
                                 </div>
                             )}
                         </div>

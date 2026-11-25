@@ -3,6 +3,17 @@ import {
     tokenShare,
     HOME,
     PATH_START,
+    LAST_TRACK,
+    COLORED_PATH_START_POS,
+    CENTER_HOME_POS,
+    HOME_COL,
+    getPawnPath,
+    getTokenPathWorldDir,
+    isLoneTokenOnTrack,
+    isTwoColoredTokensExactGulTurn,
+    resolvePawnTapMove,
+    resolveAutoPlayGulAction,
+    shouldPromptGulChoice,
     IN_BASE,
     newTokens,
     legalMoves,
@@ -29,10 +40,22 @@ import { shouldShowCaptureWarning } from '../src/state/store';
 import { roomManager, type Room } from '../server/roomManager';
 import { maskProfanity, sanitizeDisplayName } from '../server/supabaseRecords';
 import { LANGS, tr } from '../src/i18n';
-import { BOARD_THEME_LIST, DICE_STYLE_LIST } from '../src/game/themes';
+import { BOARD_THEME_LIST, DICE_STYLE_LIST, resolveBoardTheme } from '../src/game/themes';
+import {
+    ANIMAL_KINDS,
+    HUMAN_KINDS,
+    TOKEN_STYLE_LIST,
+    getTokenLocomotion,
+    isAnimalTokenKind,
+    isHumanTokenKind,
+    normalizeTokenStyleId,
+    resolveMatchSeatTokenKind,
+    resolveSeatTokenKind,
+} from '../src/game/tokens';
 import { BGM_TRACKS, DEFAULT_BGM_TRACK } from '../src/game/music';
-import { buildHowToPlayCards } from '../src/ui/TutorialModal';
+import { buildHowToPlayCards, HOW_TO_PLAY_CARDS } from '../src/ui/TutorialModal';
 import { AI_PERSONALITIES, getRivalryCalloutLine, type RivalryCalloutKind } from '../src/game/banter';
+import { computeDieFaceBasis3D, projectDieFacePipPoly } from '../src/game/draw';
 
 function assert(condition: boolean, msg: string) {
     if (!condition) {
@@ -194,27 +217,46 @@ console.log('--- RUNNING LUDO RULES & PENALTY & GUL TEST SUITE ---');
     assert(room.tokens[0][0] === IN_BASE && room.tokens[0][1] === IN_BASE, 'Every option token that did not capture goes back to base');
 }
 
-// Test 7: Centre "Gul or Pass?" choice logic
+// Test 7: Strict Centre "Gul or Pass?" choice logic (lone token + combined only; multi-token enters directly)
 {
     const res = roomManager.createRoom('tok_test_gul_token_1234567890123', 'Host', '👑', 'sock_2');
     const room = roomManager.getRoom(res.roomCode!)!;
     room.phase = 'playing';
     room.currentTurn = 0;
+
+    // 7A: Multi-token on path ([53, 10, -1, -1]) reaching HOME on single die 3 enters directly & rejects 'pass'
     room.tokens = newTokens();
     room.tokens[0][0] = 53;
-    room.tokens[0][1] = 10; // second active token so single-die entry is allowed
+    room.tokens[0][1] = 10;
     room.dice = [3, 1];
     room.diceUsed = [false, false];
+    assert(
+        shouldPromptGulChoice(room.tokens, 0, 3, 0, room.dice) === false,
+        'shouldPromptGulChoice is false when 2+ tokens are on path on single-die Home',
+    );
+    const badPassRes = roomManager.movePawn(room.code, 'tok_test_gul_token_1234567890123', 0, 0, 'pass');
+    assert(!badPassRes.ok, 'Server rejects pass choice when 2+ tokens are active (direct Gul only)');
+    const directGulRes = roomManager.movePawn(room.code, 'tok_test_gul_token_1234567890123', 0, 0, 'gul');
+    assert(directGulRes.ok && room.tokens[0][0] === CENTER_HOME_POS, 'Multi-token single-die Home enters Centre directly');
 
-    const passRes = roomManager.movePawn(room.code, 'tok_test_gul_token_1234567890123', 0, 0, 'pass');
-    assert(passRes.ok, 'Server allows pass choice for move reaching centre (56)');
-    assert(room.tokens[0][0] === 53, 'Token remains at 53 on coloured path when passed');
-    assert(room.diceUsed[0] === true, 'Die 0 is consumed by pass');
+    // 7B: Lone token inside coloured stretch (51) reaching HOME via combined dice [3, 2] allows BOTH 'pass' and 'gul'
+    room.tokens = newTokens();
+    room.tokens[0][0] = COLORED_PATH_START_POS; // 51
+    room.dice = [3, 2];
+    room.diceUsed = [false, false];
+    assert(
+        shouldPromptGulChoice(room.tokens, 0, 5, 2, room.dice) === true,
+        'shouldPromptGulChoice is true for lone token reaching HOME with combined dice',
+    );
+    const passRes = roomManager.movePawn(room.code, 'tok_test_gul_token_1234567890123', 2, 0, 'pass');
+    assert(passRes.ok, 'Server allows pass choice for lone token combined move reaching centre (56)');
+    assert(room.tokens[0][0] === COLORED_PATH_START_POS, 'Token remains at 51 on coloured path when passed');
+    assert(room.diceUsed[0] && room.diceUsed[1], 'Both dice are consumed when combined Gul is passed');
 
-    room.diceUsed[0] = false;
-    const gulRes = roomManager.movePawn(room.code, 'tok_test_gul_token_1234567890123', 0, 0, 'gul');
-    assert(gulRes.ok, 'Server moves token into centre on gul');
-    assert(room.tokens[0][0] === HOME, 'Token reaches centre HOME (56)');
+    room.diceUsed = [false, false];
+    const gulRes = roomManager.movePawn(room.code, 'tok_test_gul_token_1234567890123', 2, 0, 'gul');
+    assert(gulRes.ok, 'Server moves lone token into centre on gul');
+    assert(room.tokens[0][0] === CENTER_HOME_POS, 'Token reaches centre HOME (56)');
 }
 
 // Test 8: Stack / Pair Protection (myCount >= otherCount)
@@ -675,10 +717,96 @@ console.log('--- RUNNING LUDO RULES & PENALTY & GUL TEST SUITE ---');
     }
 }
 
-// Test 22: Board Themes, Dice Styles, Bundled MP3 BGM Tracks & Audio Files
+// Test 22: 11 Board Themes (+ legacy resolution), 23 Token Styles, Dice Styles, Bundled MP3 BGM Tracks & Audio Files
 {
-    assert(BOARD_THEME_LIST.length === 6, `6 Board themes registered (got ${BOARD_THEME_LIST.length})`);
+    assert(BOARD_THEME_LIST.length === 11, `11 Board themes registered (classic + 10 themed boards, got ${BOARD_THEME_LIST.length})`);
+    for (const legacyId of ['mirror', 'neon', 'wood', 'led', 'gold', 'unknown_xyz'] as const) {
+        const resolved = resolveBoardTheme(legacyId);
+        assert(!!resolved && BOARD_THEME_LIST.some((t) => t.id === resolved.id), `resolveBoardTheme('${legacyId}') resolves cleanly to '${resolved.id}'`);
+    }
+    assert(HUMAN_KINDS.length === 10, `10 Human 3D action characters registered (got ${HUMAN_KINDS.length})`);
+    assert(ANIMAL_KINDS.length === 10, `10 Articulated 3D animal characters registered (got ${ANIMAL_KINDS.length})`);
+    assert(TOKEN_STYLE_LIST.length === 23, `23 Token styles registered (default + human_mix + 10 humans + animal_mix + 10 animals, got ${TOKEN_STYLE_LIST.length})`);
+    assert(normalizeTokenStyleId(undefined) === 'default' && normalizeTokenStyleId('invalid') === 'default', 'normalizeTokenStyleId falls back safely to default');
+
+    const mixHumans = [0, 1, 2, 3].map((s) => resolveSeatTokenKind('human_mix', s));
+    assert(new Set(mixHumans).size === 4 && mixHumans.every((k) => isHumanTokenKind(k)), '4-Player Mix Roster assigns 4 distinct human characters');
+    const mixAnimals = [0, 1, 2, 3].map((s) => resolveSeatTokenKind('animal_mix', s));
+    assert(new Set(mixAnimals).size === 4 && mixAnimals.every((k) => isAnimalTokenKind(k)), 'Wild Animal Mix assigns 4 distinct animal characters');
+
+    // Pass & Play with AI: AI seats get distinct tokens & rotate across matches
+    const ppAiFlags = [false, true, true, true];
+    const game1Animals = [0, 1, 2, 3].map((s) => resolveMatchSeatTokenKind('lion', s, ppAiFlags, 1));
+    const game2Animals = [0, 1, 2, 3].map((s) => resolveMatchSeatTokenKind('lion', s, ppAiFlags, 2));
+    assert(
+        game1Animals[0] === 'lion' && new Set(game1Animals).size === 4 && game1Animals.every((k) => isAnimalTokenKind(k)),
+        'Pass & Play with AI gives human their chosen animal and 3 distinct animals to AI seats',
+    );
+    assert(
+        game1Animals.slice(1).join(',') !== game2Animals.slice(1).join(',') && new Set(game2Animals).size === 4,
+        'AI seats rotate to different animal tokens on consecutive Pass & Play matches',
+    );
+    const game1Humans = [0, 1, 2, 3].map((s) => resolveMatchSeatTokenKind('human_mix', s, ppAiFlags, 1));
+    const game2Humans = [0, 1, 2, 3].map((s) => resolveMatchSeatTokenKind('human_mix', s, ppAiFlags, 2));
+    assert(
+        new Set(game1Humans).size === 4 && new Set(game2Humans).size === 4 && game1Humans.join(',') !== game2Humans.join(','),
+        '4-Player Mix Roster rotates distinct human characters across matches with AI',
+    );
+    assert(
+        [0, 1, 2, 3].every((s) => resolveMatchSeatTokenKind('default', s, ppAiFlags, 3) === 'default'),
+        'Default style stays classic pawns even in Pass & Play with AI',
+    );
+
+    // Species-natural locomotion verification (slither / fly / walk / hop)
+    const cobraLoco = getTokenLocomotion('cobra', false);
+    assert(cobraLoco.mode === 'slither' && cobraLoco.hop === 0 && cobraLoco.movableBounce === 0, 'King Cobra slithers grounded with zero vertical jump');
+    const cobraBaseLoco = getTokenLocomotion('cobra', true);
+    assert(cobraBaseLoco.mode === 'slither' && cobraBaseLoco.hop === 0, 'King Cobra exits base slithering without jumping');
+    const eagleLoco = getTokenLocomotion('eagle', false);
+    assert(eagleLoco.mode === 'fly' && eagleLoco.hop > 0.8, 'Golden Eagle uses continuous flying locomotion across tiles');
+    for (const walker of ['lion', 'elephant', 'horse', 'wolf', 'gorilla', 'rooster'] as const) {
+        const wLoco = getTokenLocomotion(walker, false);
+        assert(wLoco.mode === 'walk' && wLoco.hop === 0, `${walker} walks/struts on track with zero tile jump`);
+    }
+    for (const leaper of ['frog', 'kangaroo'] as const) {
+        const hLoco = getTokenLocomotion(leaper, false);
+        assert(hLoco.mode === 'hop' && hLoco.hop > 0.5, `${leaper} keeps parabolic hopping/bounding locomotion`);
+    }
+
     assert(DICE_STYLE_LIST.length === 10, `10 Dice styles registered (got ${DICE_STYLE_LIST.length})`);
+    // 3D Die side-face pip perspective projection test (no screen-axis oval distortion)
+    {
+        const hs = 0.55;
+        const sideBasis = computeDieFaceBasis3D(
+            hs,
+            [1, 0, 0],
+            [hs, -hs, hs],
+            [hs, -hs, -hs],
+            [hs, hs, hs],
+            0.25,
+            0.35,
+            0.4,
+        );
+        const dotUV = sideBasis.u[0] * sideBasis.v[0] + sideBasis.u[1] * sideBasis.v[1] + sideBasis.u[2] * sideBasis.v[2];
+        const lenU = Math.hypot(...sideBasis.u);
+        const lenV = Math.hypot(...sideBasis.v);
+        assert(Math.abs(dotUV) < 1e-6 && Math.abs(lenU - 1) < 1e-6 && Math.abs(lenV - 1) < 1e-6, '3D die side face basis (u, v) stays orthonormal after rotation');
+
+        const orthoProj = (x: number, y: number, z = 0) => ({
+            x: 200 + x * 40 - y * 12,
+            y: 200 + y * 24 - z * 34 + x * 8,
+            k: 1,
+            d: 100 + y - z * 0.5,
+        });
+        const pipPts = projectDieFacePipPoly(orthoProj, 0, 0, hs, sideBasis, hs, 0, 0, hs * 0.19);
+        assert(pipPts.length === 28, 'projectDieFacePipPoly outputs 14-vertex perspective polygon');
+        // Opposite vertices on the projected circle must be symmetric around the projected center
+        const cxPip = (pipPts[0] + pipPts[14]) / 2;
+        const cyPip = (pipPts[1] + pipPts[15]) / 2;
+        const dxOpp = (pipPts[4] + pipPts[18]) / 2 - cxPip;
+        const dyOpp = (pipPts[5] + pipPts[19]) / 2 - cyPip;
+        assert(Math.hypot(dxOpp, dyOpp) < 1e-6, 'Projected side-face pip stays centered and balanced in its 3D face plane');
+    }
     assert(BGM_TRACKS.length === 7, `7 Bundled MP3 BGM tracks registered (got ${BGM_TRACKS.length})`);
     assert(BGM_TRACKS.some((t) => t.id === DEFAULT_BGM_TRACK), 'DEFAULT_BGM_TRACK matches a valid bundled soundtrack');
     for (const track of BGM_TRACKS) {
@@ -892,6 +1020,268 @@ async function runAsyncRoomCodeTests() {
             'Server emits leader_hit and records private 6-turn grudge on victim',
         );
         roomManager.setBroadcastCallback(() => {});
+    }
+
+    // Test 26: Own-Arm Outer Corner Square, Lone Token Tap/Split ([5,2] & [3,2]), Auto-Pass ([3,5]), & Direct Multi-Token Gul
+    {
+        // 26A: All 4 seats traverse their own-arm middle outer turn square at LAST_TRACK (50) before COLORED_PATH_START_POS (51)
+        const expectedTurnSquares: [number, number][] = [
+            [0, 7],
+            [7, 0],
+            [14, 7],
+            [7, 14],
+        ];
+        for (let p = 0; p < 4; p++) {
+            const pawnPath = getPawnPath(p);
+            assert(
+                pawnPath.length - 1 === CENTER_HOME_POS,
+                `Seat ${p} path length - 1 (${pawnPath.length - 1}) equals CENTER_HOME_POS (${CENTER_HOME_POS})`,
+            );
+            const turnSq = pawnPath[LAST_TRACK];
+            const expSq = expectedTurnSquares[p];
+            assert(
+                turnSq[0] === expSq[0] && turnSq[1] === expSq[1],
+                `Seat ${p} visits own-arm outer corner turn square [${expSq[0]},${expSq[1]}] at index ${LAST_TRACK}`,
+            );
+            const firstHomeSq = pawnPath[COLORED_PATH_START_POS];
+            assert(
+                firstHomeSq[0] === HOME_COL[p][0][0] && firstHomeSq[1] === HOME_COL[p][0][1],
+                `Seat ${p} enters coloured home stretch [${HOME_COL[p][0][0]},${HOME_COL[p][0][1]}] right at COLORED_PATH_START_POS (${COLORED_PATH_START_POS})`,
+            );
+        }
+        const luckyTurnSqTokens = newTokens();
+        luckyTurnSqTokens[0] = [LAST_TRACK, IN_BASE, IN_BASE, IN_BASE];
+        assert(
+            !luckySevenAllowed(luckyTurnSqTokens, 0),
+            'Outer corner turn square (LAST_TRACK) counts as open track and disallows Lucky 7',
+        );
+
+        // 26B: Lone token before coloured stretch (47) rolling [5, 2] moves combined 7 on tap, AND splitting 2 first still allows 5 into coloured stretch
+        const splitRoomRes = roomManager.createRoom('tok_split_52_host_123456789012', 'SplitHost', '👑', 'sock_s52');
+        const splitRoom = roomManager.getRoom(splitRoomRes.roomCode!)!;
+        splitRoom.phase = 'playing';
+        splitRoom.currentTurn = 0;
+        splitRoom.tokens = newTokens();
+        splitRoom.tokens[0] = [47, IN_BASE, IN_BASE, IN_BASE];
+        splitRoom.dice = [5, 2];
+        splitRoom.diceUsed = [false, false];
+        const active4 = [true, true, true, true];
+        const opts52 = legalMovesForTurn(splitRoom.tokens, 0, splitRoom.dice, splitRoom.diceUsed, active4);
+        assert(isLoneTokenOnTrack(splitRoom.tokens, 0), 'isLoneTokenOnTrack is true for [47, -1, -1, -1]');
+        // Even if selDie defaulted to die 1 (the 2 die), unconfirmed pawn tap prioritizes combined 7 -> 54
+        const tapCombined = resolvePawnTapMove(splitRoom.tokens, 0, 0, opts52, 1, false, splitRoom.dice, splitRoom.diceUsed);
+        assert(
+            !!tapCombined && tapCombined.die === 2 && tapCombined.to === 54,
+            'Tapping lone token at 47 with [5,2] resolves to combined 7 (pos 54) instead of splitting into 2',
+        );
+        // Explicitly splitting die 1 (2) first -> 49; remaining die 0 (5) MUST NOT be stranded!
+        const splitFirst = roomManager.movePawn(splitRoom.code, 'tok_split_52_host_123456789012', 1, 0, 'gul', false);
+        assert(splitFirst.ok && splitRoom.tokens[0][0] === 49, 'Playing explicit 2 from [5,2] moves lone token 47 -> 49');
+        const remAfterSplit = legalMovesForTurn(splitRoom.tokens, 0, splitRoom.dice, splitRoom.diceUsed, active4);
+        assert(
+            remAfterSplit.length === 1 && remAfterSplit[0].die === 0 && remAfterSplit[0].to === 54,
+            'Remaining die 5 after playing 2 from [5,2] can legally enter coloured stretch (49 -> 54)',
+        );
+        const splitSecond = roomManager.movePawn(splitRoom.code, 'tok_split_52_host_123456789012', 0, 0, 'gul', false);
+        assert(splitSecond.ok && splitRoom.tokens[0][0] === 54, 'Server completes second die 5 cleanly into coloured stretch (54)');
+
+        // 26C: Lone token inside coloured stretch (51) rolling [3, 2] moves combined 5 into Gul and triggers Gul or Pass prompt
+        const stretchToks = newTokens();
+        stretchToks[0] = [COLORED_PATH_START_POS, IN_BASE, IN_BASE, IN_BASE];
+        const dice32: [number, number] = [3, 2];
+        const opts32 = legalMovesForTurn(stretchToks, 0, dice32, [false, false], active4);
+        const tapGul32 = resolvePawnTapMove(stretchToks, 0, 0, opts32, 0, false, dice32, [false, false]);
+        assert(
+            !!tapGul32 && tapGul32.die === 2 && tapGul32.to === CENTER_HOME_POS,
+            'Tapping lone token at 51 with [3,2] resolves to combined 5 (CENTER_HOME_POS 56)',
+        );
+        assert(
+            shouldPromptGulChoice(stretchToks, 0, tapGul32!.value, tapGul32!.die, dice32) === true,
+            'Lone token at 51 reaching Gul via combined [3,2] triggers Gul or Pass prompt',
+        );
+        // If user explicitly split 3 first (51 -> 54), remaining single die 2 -> 56 enters directly without prompt
+        stretchToks[0][0] = 54;
+        assert(
+            shouldPromptGulChoice(stretchToks, 0, 2, 1, dice32) === false,
+            'Remaining single die 2 finishing after split does NOT trigger Gul or Pass prompt',
+        );
+
+        // 26D: Lone token 3 steps from Gul (53) rolling [3, 5] has 0 legal moves and auto-passes without modal
+        const strandedToks = newTokens();
+        strandedToks[0] = [53, IN_BASE, IN_BASE, IN_BASE];
+        const opts35 = legalMovesForTurn(strandedToks, 0, [3, 5], [false, false], active4);
+        assert(opts35.length === 0, 'Lone token at 53 rolling [3,5] has 0 legal moves (auto-passes without modal)');
+        assert(
+            shouldPromptGulChoice(strandedToks, 0, 3, 0, [3, 5]) === false,
+            'Unplayable single-die 3 on lone token never triggers Gul or Pass prompt',
+        );
+
+        // 26E: 2+ tokens on path reaching Gul on a single die (with 1 outside or only 1 reaching Gul) enter directly without prompt
+        const multiToks = newTokens();
+        multiToks[0] = [53, 10, IN_BASE, IN_BASE];
+        assert(
+            !isLoneTokenOnTrack(multiToks, 0) &&
+                shouldPromptGulChoice(multiToks, 0, 3, 0, [3, 1]) === false,
+            '2+ tokens on path reaching Gul on single die skip Gul or Pass prompt when not both exact-Gul in coloured path',
+        );
+
+        // 26F: Multi-token direct entry (2+ active tokens on path enter Gul directly without prompt)
+        const twoColRes = roomManager.createRoom('tok_two_col_gul_12345678901234', 'TwoColHost', '👑', 'sock_tcg');
+        const twoColRoom = roomManager.getRoom(twoColRes.roomCode!)!;
+        twoColRoom.phase = 'playing';
+        twoColRoom.currentTurn = 0;
+        twoColRoom.tokens = newTokens();
+        twoColRoom.tokens[0] = [53, 54, IN_BASE, IN_BASE];
+        twoColRoom.initialTurnTokens = twoColRoom.tokens.map((r) => r.slice());
+        twoColRoom.dice = [3, 2];
+        twoColRoom.diceUsed = [false, false];
+
+        assert(
+            shouldPromptGulChoice(twoColRoom.tokens, 0, 3, 0, twoColRoom.dice, twoColRoom.initialTurnTokens, 0) === false,
+            '2+ active tokens on path (53 + 3 = 56) skip Gul or Pass prompt and enter Gul directly',
+        );
+        const rejectMultiPass = roomManager.movePawn(twoColRoom.code, 'tok_two_col_gul_12345678901234', 0, 0, 'pass');
+        assert(!rejectMultiPass.ok, 'Passing is rejected when 2+ active tokens are on track');
+        const directMultiGul = roomManager.movePawn(twoColRoom.code, 'tok_two_col_gul_12345678901234', 0, 0, 'gul');
+        assert(
+            directMultiGul.ok && twoColRoom.tokens[0][0] === CENTER_HOME_POS,
+            '2+ active tokens on path complete Centre Home (Gul) directly on single die',
+        );
+
+        // 26G: Local + Online Timeout & Temporary Takeover Auto-PASS (never Auto-Gul)
+        const loneGulToks = newTokens();
+        loneGulToks[0] = [51, IN_BASE, IN_BASE, IN_BASE];
+        const loneGulMove = { tok: 0, die: 2, value: 5, to: CENTER_HOME_POS, captures: [], reachesHome: true, combined: true };
+        assert(
+            resolveAutoPlayGulAction(loneGulToks, 0, loneGulMove, [3, 2], true) === 'pass',
+            'resolveAutoPlayGulAction forces PASS on timed-out / auto-played lone-token Gul',
+        );
+        assert(
+            resolveAutoPlayGulAction(loneGulToks, 0, loneGulMove, [3, 2], false) === 'gul',
+            'resolveAutoPlayGulAction keeps GUL for normal AI bot seats',
+        );
+
+        // Online room timeout on human lone-token Gul -> Auto-PASS (stays at 51, emits passed: true, rejects late manual gul)
+        const toEvents: { event: string; payload: any }[] = [];
+        roomManager.setBroadcastCallback((_c, ev, pl) => toEvents.push({ event: ev, payload: pl }));
+        const toRes = roomManager.createRoom('tok_timeout_gul_host_123456789', 'TimeoutHost', '👑', 'sock_tog');
+        const toRoom = roomManager.getRoom(toRes.roomCode!)!;
+        toRoom.phase = 'playing';
+        toRoom.currentTurn = 0;
+        toRoom.tokens = newTokens();
+        toRoom.tokens[0] = [51, IN_BASE, IN_BASE, IN_BASE];
+        toRoom.initialTurnTokens = toRoom.tokens.map((r) => r.slice());
+        toRoom.dice = [3, 2];
+        toRoom.diceUsed = [false, false];
+
+        roomManager.handleTurnTimeout(toRoom.code);
+        const passEvt = toEvents.find((e) => e.event === 'pawn_moved' && e.payload?.passed === true);
+        assert(
+            toRoom.turnAutoPlay === true &&
+                toRoom.tokens[0][0] === 51 &&
+                !!passEvt &&
+                passEvt.payload?.reachedHome === false,
+            'Server turn timeout on human lone-token Gul auto-PASSes safely on coloured path (never Auto-Gul)',
+        );
+        const lateManualGul = roomManager.movePawn(toRoom.code, 'tok_timeout_gul_host_123456789', 2, 0, 'gul');
+        assert(!lateManualGul.ok, 'Late manual Gul input is rejected once turnAutoPlay is active');
+
+        // Disconnected human seat under temporary bot takeover ALSO auto-PASSes lone-token Gul
+        const dcRes = roomManager.createRoom('tok_dc_takeover_12345678901234', 'DcHost', '👑', 'sock_dc', 90, 4, '10.20.0.1');
+        const dcRoom = roomManager.getRoom(dcRes.roomCode!)!;
+        dcRoom.phase = 'playing';
+        dcRoom.currentTurn = 0;
+        dcRoom.players[0]!.isAI = true;
+        dcRoom.players[0]!.tempBotTakeover = true;
+        dcRoom.players[0]!.connected = false;
+        dcRoom.tokens = newTokens();
+        dcRoom.tokens[0] = [51, IN_BASE, IN_BASE, IN_BASE];
+        dcRoom.initialTurnTokens = dcRoom.tokens.map((r) => r.slice());
+        dcRoom.dice = [3, 2];
+        dcRoom.diceUsed = [false, false];
+        (roomManager as any).executeBotMoves(dcRoom);
+        assert(
+            dcRoom.tokens[0][0] === 51 && dcRoom.diceUsed[0] && dcRoom.diceUsed[1],
+            'Disconnected human seat under temporary bot takeover auto-PASSes lone-token Gul',
+        );
+
+        // Normal AI bot seat (tempBotTakeover false) still finishes Gul normally
+        const aiRes = roomManager.createRoom('tok_ai_normal_gul_123456789012', 'HumanP', '👑', 'sock_ai_h', 90, 4, '10.20.0.2');
+        const aiRoom = roomManager.getRoom(aiRes.roomCode!)!;
+        aiRoom.phase = 'playing';
+        aiRoom.players[1] = {
+            id: 'bot_1',
+            publicPlayerId: 'bot_1',
+            tokenHash: 'bot_1',
+            name: 'Atlas Bot',
+            avatar: '🤖',
+            socketId: '',
+            ready: true,
+            connected: true,
+            isAI: true,
+            capturesMade: 0,
+            timesCaptured: 0,
+            penalties: 0,
+        };
+        aiRoom.currentTurn = 1;
+        aiRoom.tokens = newTokens();
+        aiRoom.tokens[1] = [51, IN_BASE, IN_BASE, IN_BASE];
+        aiRoom.initialTurnTokens = aiRoom.tokens.map((r) => r.slice());
+        aiRoom.dice = [3, 2];
+        aiRoom.diceUsed = [false, false];
+        (roomManager as any).executeBotMoves(aiRoom);
+        assert(
+            aiRoom.tokens[1][0] === CENTER_HOME_POS,
+            'Normal AI bot seat still completes Centre Home (Gul) normally',
+        );
+        roomManager.setBroadcastCallback(() => {});
+
+        // 26H: How To Play Guide reflects finalized Gul or Pass & Auto-Pass rules
+        const w3Card = HOW_TO_PLAY_CARDS.find((c) => c.stepNumber === 3);
+        const g9Card = HOW_TO_PLAY_CARDS.find((c) => c.guideNumber === 9);
+        assert(
+            !!w3Card &&
+                w3Card.bullets?.some((b) => b.includes('1 active runner') && b.includes('auto-PASS')) === true,
+            'HOW_TO_PLAY_CARDS Step 3 (Turn Sequence) accurately explains 1 active runner Gul or Pass & timeout auto-PASS',
+        );
+        assert(
+            !!g9Card &&
+                g9Card.content.includes('1 active runner') &&
+                g9Card.content.includes('Bonus Turn') &&
+                g9Card.content.includes('2+ active tokens') &&
+                g9Card.content.includes('PASS'),
+            'HOW_TO_PLAY_CARDS Guide 9 accurately documents Gul vs Pass, 2+ multi-token direct entry, and timeout Auto-Pass',
+        );
+        // 27: Token path facing direction (base yard, track, turns, coloured stretch & Centre Home)
+        const expectedInwardDirs: [number, number][] = [
+            [1, 0],  // Seat 0 Red -> faces Right
+            [0, 1],  // Seat 1 Green -> faces Down
+            [-1, 0], // Seat 2 Yellow -> faces Left
+            [0, -1], // Seat 3 Blue -> faces Up
+        ];
+        for (let p = 0; p < 4; p++) {
+            const [expX, expY] = expectedInwardDirs[p];
+            const baseDir = getTokenPathWorldDir(p, IN_BASE, 0);
+            const startDir = getTokenPathWorldDir(p, 0, 0);
+            const turnToHomeDir = getTokenPathWorldDir(p, LAST_TRACK, 0);
+            const homeDir = getTokenPathWorldDir(p, CENTER_HOME_POS, 0);
+            assert(
+                Math.abs(baseDir[0] - expX) < 1e-4 && Math.abs(baseDir[1] - expY) < 1e-4,
+                `Seat ${p} standing in base faces exact start path direction (${expX},${expY})`,
+            );
+            assert(
+                Math.abs(startDir[0] - expX) < 1e-4 && Math.abs(startDir[1] - expY) < 1e-4,
+                `Seat ${p} at track pos 0 faces exact path direction (${expX},${expY})`,
+            );
+            assert(
+                Math.abs(turnToHomeDir[0] - expX) < 1e-4 && Math.abs(turnToHomeDir[1] - expY) < 1e-4,
+                `Seat ${p} at LAST_TRACK turns to face inward into coloured home lane (${expX},${expY})`,
+            );
+            assert(
+                Math.abs(homeDir[0] - expX) < 1e-4 && Math.abs(homeDir[1] - expY) < 1e-4,
+                `Seat ${p} finished in Centre Home faces inward (${expX},${expY})`,
+            );
+        }
     }
 
     console.log('🎉 ALL LUDO RULES & PENALTY & GUL TESTS PASSED SUCCESSFULLY!');

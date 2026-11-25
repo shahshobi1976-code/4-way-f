@@ -65,7 +65,7 @@ export function buildHowToPlayCards(lang = 'en'): GuideCard[] {
                 '1. Roll both dice on your turn.',
                 '2. Check for captures first—capturing on non-safe open squares is compulsory.',
                 '3. Split dice across two tokens, or move a lone active token by the combined sum of both dice.',
-                '4. Landing on Centre (56) prompts "Gul or Pass?" to enter for an extra turn or pass.',
+                '4. Reaching Centre Home (56) opens "Gul or Pass?" only when you have 1 active runner reaching 56 on the full roll (2+ active tokens enter Gul directly). Choose GUL to finish the token for a Bonus Turn, or PASS to stay safely on the coloured path and pass the turn (timing out also auto-PASSes).',
                 '5. Earn an extra turn on unlimited 6+6, capture, entering Gul, or Lucky 7.',
                 '6. Otherwise, play passes clockwise to the next player.',
             ],
@@ -193,7 +193,7 @@ export function buildHowToPlayCards(lang = 'en'): GuideCard[] {
             badge: 'GUIDE 9 OF 13 • GUL OR PASS?',
             title: 'GUIDE 9 — Centre Home (Gul or Pass?)',
             content:
-                'Reaching the centre home (Gul) requires an exact roll (or the full combined total for a lone active token). When your move reaches the centre, a "Gul or Pass?" prompt lets you enter for an extra turn or pass to stay on the path.',
+                'Reaching Centre Home (56) requires an exact roll. The "Gul or Pass?" popup opens only when 1 active runner reaches 56 on the full roll. GUL finishes the token in Centre Home and awards a Bonus Turn. PASS keeps the token safely on its coloured home path, spends the dice, and passes the turn without a bonus turn. Auto-Pass & Multi-Token: Unplayable single-die Gul rolls auto-pass, 2+ active tokens on track enter Gul directly without a prompt, and if the Turn Timer expires on the prompt, it automatically resolves as PASS instead of entering Gul.',
             accentColor: '#ec4899',
         }),
         applyLoc('g10', {

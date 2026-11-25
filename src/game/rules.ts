@@ -10,6 +10,8 @@ export const IN_BASE = -1;
 export const LAST_TRACK = 50;
 export const PATH_START = 51;
 export const HOME = 56;
+export const COLORED_PATH_START_POS = PATH_START;
+export const CENTER_HOME_POS = HOME;
 
 // 52 main-track squares (col,row), clockwise, starting on Red's start square.
 function buildTrack(): [number, number][] {
@@ -58,13 +60,58 @@ export function boardPos(color: number, r: number, tok: number): [number, number
         const [c, row] = TRACK[(START_IDX[color] + r) % 52];
         return [c + 0.5, row + 0.5];
     }
-    if (r < HOME) {
-        const [c, row] = HOME_COL[color][r - PATH_START];
+    if (r < CENTER_HOME_POS) {
+        const [c, row] = HOME_COL[color][r - COLORED_PATH_START_POS];
         return [c + 0.5, row + 0.5];
     }
     const [hx, hy] = HOME_SPOT[color];
     const [ox, oy] = HOME_OFF[(tok + color) % 4];
     return [hx + ox * 0.6, hy + oy * 0.6];
+}
+
+/**
+ * Normalized board-plane forward unit vector [dx, dy] along player `color`'s path
+ * at relative position `r` (works whether in base yard, on track, turning a corner,
+ * on the coloured home path, or finished inside Centre Home).
+ */
+export function getTokenPathWorldDir(color: number, r: number, tok = 0): [number, number] {
+    let from: [number, number];
+    let to: [number, number];
+    if (r < 0) {
+        from = boardPos(color, 0, tok);
+        to = boardPos(color, 1, tok);
+    } else if (r >= CENTER_HOME_POS - 1) {
+        from = boardPos(color, CENTER_HOME_POS - 1, tok);
+        to = HOME_SPOT[color] ?? [7.5, 7.5];
+    } else {
+        from = boardPos(color, r, tok);
+        to = boardPos(color, r + 1, tok);
+    }
+    const dx = to[0] - from[0];
+    const dy = to[1] - from[1];
+    const len = Math.hypot(dx, dy);
+    if (len < 1e-6) return [1, 0];
+    return [dx / len, dy / len];
+}
+
+/**
+ * Full 57-cell board path for player `color`:
+ * 51 outer-track squares (indices 0..50, ending on own-arm outer middle turn square)
+ * + 5 coloured home-stretch squares (indices 51..55)
+ * + 1 Centre Home (Gul) at index CENTER_HOME_POS (56 = path.length - 1).
+ */
+export function getPawnPath(color: number): [number, number][] {
+    const path: [number, number][] = [];
+    const start = START_IDX[color] ?? 0;
+    for (let r = 0; r <= LAST_TRACK; r++) {
+        path.push(TRACK[(start + r) % 52]);
+    }
+    const homeStretch = HOME_COL[color] ?? HOME_COL[0];
+    for (let i = 0; i < homeStretch.length; i++) {
+        path.push(homeStretch[i]);
+    }
+    path.push([7, 7]);
+    return path;
 }
 
 export const globalIdx = (color: number, r: number) => (START_IDX[color] + r) % 52;
@@ -149,15 +196,170 @@ export function legalMoves(tokens: Tokens, p: number, value: number, die: number
     return out;
 }
 
+/** True when player `p` has exactly 1 active token out on the path (0 <= r < CENTER_HOME_POS). */
+export function isLoneTokenOnTrack(tokens: Tokens, p: number): boolean {
+    const list = tokens[p];
+    if (!list) return false;
+    let onTrack = 0;
+    for (let t = 0; t < list.length; t++) {
+        if (list[t] >= 0 && list[t] < CENTER_HOME_POS) onTrack++;
+    }
+    return onTrack === 1;
+}
+
+/**
+ * Resolves a player's tap on a pawn across local and online play:
+ * - If the player explicitly clicked a die (`dieConfirmed`), honor that die first.
+ * - Otherwise under the Lone Token rule when combined (`die === 2`) is legal and
+ *   either `pos + total >= COLORED_PATH_START_POS` or no base-deploy 6 is available
+ *   (or the combined move captures), prioritize `'combined'` before single-die fallback.
+ */
+export function resolvePawnTapMove(
+    tokens: Tokens,
+    p: number,
+    tok: number,
+    optionsNow: Move[],
+    selDie: number,
+    dieConfirmed: boolean,
+    dice: [number, number],
+    diceUsed: [boolean, boolean],
+): Move | undefined {
+    const forTok = optionsNow.filter((o) => o.tok === tok);
+    if (forTok.length === 0) return undefined;
+
+    if (dieConfirmed) {
+        const confirmedMatch = forTok.find((o) => o.die === selDie);
+        if (confirmedMatch) return confirmedMatch;
+    }
+
+    const bothUnused = !diceUsed[0] && !diceUsed[1];
+    const combinedMove = bothUnused ? forTok.find((o) => o.die === 2 || o.combined) : undefined;
+    if (!dieConfirmed && combinedMove && isLoneTokenOnTrack(tokens, p)) {
+        const pos = tokens[p][tok];
+        const total = dice[0] + dice[1];
+        const hasBaseDeploy6 =
+            tokens[p].some((r) => r === IN_BASE) && (dice[0] === 6 || dice[1] === 6);
+        if (
+            pos + total >= COLORED_PATH_START_POS ||
+            !hasBaseDeploy6 ||
+            combinedMove.captures.length > 0
+        ) {
+            return combinedMove;
+        }
+    }
+
+    if (!dieConfirmed && combinedMove && combinedMove.captures.length > 0) {
+        return combinedMove;
+    }
+
+    const selectedMatch = forTok.find((o) => o.die === selDie);
+    if (selectedMatch) return selectedMatch;
+
+    if (combinedMove) return combinedMove;
+    return forTok[0];
+}
+
+/**
+ * Returns true when player `pIdx` has:
+ * - Exactly 2 active tokens out on the path (`0 <= r < CENTER_HOME_POS`), with no other active tokens
+ * - BOTH of those 2 tokens inside the coloured home path (`COLORED_PATH_START_POS <= r < CENTER_HOME_POS`)
+ * - BOTH tokens able to reach `CENTER_HOME_POS` (56) using one die each (`dice[0]` and `dice[1]`).
+ */
+export function isTwoColoredTokensExactGulTurn(
+    tokens: Tokens,
+    pIdx: number,
+    dice: number[],
+): boolean {
+    if (!dice || dice.length < 2 || (dice[0] ?? 0) <= 0 || (dice[1] ?? 0) <= 0) return false;
+    const list = tokens[pIdx];
+    if (!list) return false;
+    const activeIndices: number[] = [];
+    for (let t = 0; t < list.length; t++) {
+        if (list[t] >= 0 && list[t] < CENTER_HOME_POS) activeIndices.push(t);
+    }
+    if (activeIndices.length !== 2) return false;
+    const posA = list[activeIndices[0]];
+    const posB = list[activeIndices[1]];
+    if (posA < COLORED_PATH_START_POS || posB < COLORED_PATH_START_POS) return false;
+    const [d0, d1] = dice;
+    return (
+        (posA + d0 === CENTER_HOME_POS && posB + d1 === CENTER_HOME_POS) ||
+        (posA + d1 === CENTER_HOME_POS && posB + d0 === CENTER_HOME_POS)
+    );
+}
+
+/**
+ * Strict "Gul or Pass?" gate used by both local execution and authoritative server:
+ * Opens/allows the Gul or Pass choice ONLY when:
+ * 1) `isLoneTokenOnTrack(tokens, pIdx)` is true (all other 3 tokens are in base or finished), AND
+ * 2) That lone runner reaches `CENTER_HOME_POS` using the full combined/remaining dice roll.
+ *
+ * When 2 or more active tokens are `'on-path'`, entering Centre Home skips the prompt
+ * and completes Gul directly.
+ */
+export function shouldPromptGulChoice(
+    tokens: Tokens,
+    pIdx: number,
+    steps: number,
+    dieIdx: number | 'combined',
+    dice: number[],
+    _initialTurnTokens?: Tokens | null,
+    tokenIdx?: number,
+): boolean {
+    if (!isLoneTokenOnTrack(tokens, pIdx)) return false;
+    const list = tokens[pIdx];
+    const loneTok = list.findIndex((r) => r >= 0 && r < CENTER_HOME_POS);
+    if (loneTok < 0 || (tokenIdx !== undefined && tokenIdx !== loneTok)) return false;
+    const pos = list[loneTok];
+    if (pos + steps !== CENTER_HOME_POS) return false;
+
+    const diceSum = (dice?.[0] ?? 0) + (dice?.[1] ?? 0);
+    const isCombined =
+        dieIdx === 2 ||
+        dieIdx === 'combined' ||
+        (dice.length >= 2 && (dice[0] ?? 0) > 0 && (dice[1] ?? 0) > 0 && steps === diceSum);
+    return isCombined;
+}
+
+/**
+ * Resolves Centre Home entry choice for timeout auto-play or temporary bot takeover:
+ * - Human timeout (`turnAutoPlay`) or disconnected human seat takeover ALWAYS resolves a
+ *   `shouldPromptGulChoice` move as `'pass'` instead of auto-entering Gul.
+ * - Normal AI bot seats resolve as `'gul'` so bots finish matches normally.
+ */
+export function resolveAutoPlayGulAction(
+    tokens: Tokens,
+    pIdx: number,
+    move: Pick<Move, 'tok' | 'die' | 'value'>,
+    dice: number[],
+    isAutoPlayOrTakeover: boolean,
+    initialTurnTokens?: Tokens | null,
+): 'gul' | 'pass' {
+    if (!isAutoPlayOrTakeover) return 'gul';
+    return shouldPromptGulChoice(
+        tokens,
+        pIdx,
+        move.value,
+        move.die,
+        dice,
+        initialTurnTokens,
+        move.tok,
+    )
+        ? 'pass'
+        : 'gul';
+}
+
 /**
  * All legal moves for player `p` given the current `[d0, d1]` and `diceUsed` state.
  * Enforces the Lone Token Full-Total Rule:
- * - When player `p` has only 1 active token out on the board (`0 <= r < HOME`)
- *   and both dice remain unused:
- *   - Partial entry of that lone token into its coloured home path (`>= PATH_START`)
- *     or centre home (`HOME`) with a single die is blocked.
- *   - That lone token may move by the full combined total (`dice[0] + dice[1]`,
- *     with `die: 2, combined: true`) whenever legal (`to <= HOME`).
+ * - When player `p` has only 1 active token out on the board (`0 <= r < CENTER_HOME_POS`)
+ *   and both unspent dice remain (`availableTotal > numSteps`):
+ *   - Partial entry of that lone token into its coloured home path (`>= COLORED_PATH_START_POS`)
+ *     or centre home (`CENTER_HOME_POS`) with a single die is blocked.
+ *   - After one die has been legally played (leaving only 1 unspent die), that remaining die
+ *     is allowed to enter `COLORED_PATH_START_POS..CENTER_HOME_POS`.
+ *   - When both dice remain unused, that lone token may move by the full combined total
+ *     (`dice[0] + dice[1]`, with `die: 2, combined: true`) whenever legal (`to <= CENTER_HOME_POS`).
  */
 export function legalMovesForTurn(
     tokens: Tokens,
@@ -170,7 +372,7 @@ export function legalMovesForTurn(
     const outIndices: number[] = [];
     for (let t = 0; t < 4; t++) {
         const r = tokens[p][t];
-        if (r >= 0 && r < HOME) outIndices.push(t);
+        if (r >= 0 && r < CENTER_HOME_POS) outIndices.push(t);
     }
     const isLoneToken = outIndices.length === 1;
     const loneTok = isLoneToken ? outIndices[0] : -1;
@@ -182,7 +384,10 @@ export function legalMovesForTurn(
         for (const m of single) {
             if (bothRemaining && isLoneToken && m.tok === loneTok) {
                 const r = tokens[p][loneTok];
-                if ((r <= LAST_TRACK && m.to >= PATH_START) || (r >= PATH_START && m.to === HOME)) {
+                if (
+                    (r <= LAST_TRACK && m.to >= COLORED_PATH_START_POS) ||
+                    (r >= COLORED_PATH_START_POS && m.to === CENTER_HOME_POS)
+                ) {
                     continue;
                 }
             }
@@ -194,7 +399,7 @@ export function legalMovesForTurn(
         const r = tokens[p][loneTok];
         const total = dice[0] + dice[1];
         const to = r + total;
-        if (to <= HOME) {
+        if (to <= CENTER_HOME_POS) {
             const captures = capturesOnSquare(tokens, p, loneTok, to, active);
             out.push({
                 tok: loneTok,
@@ -203,7 +408,7 @@ export function legalMovesForTurn(
                 value: total,
                 captures,
                 fromBase: false,
-                reachesHome: to === HOME,
+                reachesHome: to === CENTER_HOME_POS,
                 combined: true,
             });
         }
@@ -241,7 +446,7 @@ export function fineProgress(tokens: Tokens, p: number): number {
 }
 /**
  * Coloured Path Win: returns true as soon as all 4 tokens of player `p` have reached
- * their coloured home stretch (pos >= coloredPathStartIndex) or centre home (HOME).
+ * their coloured home stretch (pos >= coloredPathStartIndex) or centre home (CENTER_HOME_POS).
  */
 export function hasWon(tokens: Tokens, p: number): boolean {
     const list = tokens[p];
@@ -253,10 +458,11 @@ export const checkForWin = hasWon;
 /**
  * Lucky Seven: active only when zero tokens are on the open track AND
  * at least 1 token is still in base (1-4 in base, others on coloured path or centre home).
+ * Note: the outer turn square (LAST_TRACK = 50) is still part of the open track.
  */
 export function luckySevenAllowed(tokens: Tokens, p: number): boolean {
     const hasBaseToken = tokens[p].some((r) => r === IN_BASE);
-    const noneOnOpenTrack = tokens[p].every((r) => r === IN_BASE || r >= PATH_START);
+    const noneOnOpenTrack = tokens[p].every((r) => r === IN_BASE || r >= COLORED_PATH_START_POS);
     return hasBaseToken && noneOnOpenTrack && !hasWon(tokens, p);
 }
 export function isLuckySum(a: number, b: number): boolean {

@@ -233,43 +233,15 @@ function LuckyWishButton({ compact = false }: { compact?: boolean }) {
 }
 
 /** Landscape / Web Top Bar:
- * - Royal Watch (Turn Timer) in the TOP-LEFT corner
- * - Joint Progress Bar (all players combined together) in the TOP-RIGHT corner with Settings button
+ * - Royal Watch (Turn Timer) centered above the board
+ * - Joint Progress Bar (all players combined together) in the TOP-RIGHT corner
  */
 function LandscapeTopHud() {
-    const aiMute = useStore((s) => s.settings.aiMute);
-    const toggleAiMute = () => {
-        const next = !aiMute;
-        store.patchSettings({ aiMute: next });
-        if (next) sfx.stopSpeech();
-    };
-
     return (
         <>
-            {/* Top-Left: Royal Watch (Turn Timer) + AI Voice Mute Quick Button */}
-            <div className="absolute top-2.5 left-4 z-20 pointer-events-auto flex items-center gap-2">
+            {/* Top-Center Above Board: Royal Watch (Turn Timer) */}
+            <div className="absolute top-2.5 left-[30%] -translate-x-1/2 z-20 pointer-events-auto flex items-center">
                 <TurnTimer compact />
-                <button
-                    type="button"
-                    onClick={toggleAiMute}
-                    aria-label={aiMute ? 'Unmute AI Voice' : 'Mute AI Voice'}
-                    title={aiMute ? 'AI Voice is MUTED (Click to Unmute AI Talk)' : 'AI Voice is ACTIVE (Click to Mute AI Talk Only)'}
-                    className={`flex items-center gap-1.5 rounded-full border shadow-lg backdrop-blur-md transition-all active:scale-95 cursor-pointer select-none font-black ${
-                        aiMute
-                            ? 'bg-red-950/85 border-amber-400 text-amber-200 shadow-red-500/30 ring-1 ring-amber-400/50'
-                            : 'bg-[#0a0d26]/85 border-cyan-400/50 text-cyan-200 hover:bg-[#12193b]/90 shadow-cyan-500/20'
-                    }`}
-                    style={{
-                        height: U(20),
-                        padding: `0 ${U(10)}`,
-                        fontSize: U(11),
-                    }}
-                >
-                    <span style={{ fontSize: U(12) }}>{aiMute ? '🔇' : '🎙️'}</span>
-                    <span className="leading-none tracking-wide">
-                        {aiMute ? 'AI Muted' : 'AI Voice'}
-                    </span>
-                </button>
             </div>
 
             {/* Top-Right: Combined Joint Progress Bar */}
@@ -828,47 +800,19 @@ export function Hud() {
         setCustomChat('');
     };
 
-    const aiMute = useStore((s) => s.settings.aiMute);
-    const toggleAiMute = () => {
-        const next = !aiMute;
-        store.patchSettings({ aiMute: next });
-        if (next) sfx.stopSpeech();
-    };
-
     return (
         <>
             {/* Top HUD */}
             {landscape ? (
                 <LandscapeTopHud />
             ) : (
-                /* Vertical Top: Progress bar + Left-aligned Timer & Right-aligned AI Voice button */
+                /* Vertical Top: Progress bar + Centered Timer above the board */
                 <div className="absolute top-2.5 inset-x-3 z-20 pointer-events-auto flex flex-col items-stretch gap-1">
                     <div className="w-full">
                         <JointPercentageBar />
                     </div>
-                    <div className="w-full flex items-center justify-between">
+                    <div className="w-full flex items-center justify-center">
                         <TurnTimer compact />
-                        <button
-                            type="button"
-                            onClick={toggleAiMute}
-                            aria-label={aiMute ? 'Unmute AI Voice' : 'Mute AI Voice'}
-                            title={aiMute ? 'AI Voice is MUTED (Click to Unmute AI Talk)' : 'AI Voice is ACTIVE (Click to Mute AI Talk Only)'}
-                            className={`flex items-center gap-1.5 rounded-full border shadow-lg backdrop-blur-md transition-all active:scale-95 cursor-pointer select-none font-black ${
-                                aiMute
-                                    ? 'bg-red-950/85 border-amber-400 text-amber-200 shadow-red-500/30 ring-1 ring-amber-400/50'
-                                    : 'bg-[#0a0d26]/85 border-cyan-400/50 text-cyan-200 hover:bg-[#12193b]/90 shadow-cyan-500/20'
-                            }`}
-                            style={{
-                                height: U(20),
-                                padding: `0 ${U(9)}`,
-                                fontSize: U(11),
-                            }}
-                        >
-                            <span style={{ fontSize: U(12) }}>{aiMute ? '🔇' : '🎙️'}</span>
-                            <span className="leading-none tracking-wide">
-                                {aiMute ? 'AI Muted' : 'AI Voice'}
-                            </span>
-                        </button>
                     </div>
                 </div>
             )}
@@ -1319,7 +1263,7 @@ export function Hud() {
                                     <span>🛑</span> PASS
                                 </span>
                                 <span className="text-xs font-semibold text-slate-300 tracking-normal opacity-80">
-                                    Keep pawn on path
+                                    Pass turn (stay on path)
                                 </span>
                             </button>
                         </div>

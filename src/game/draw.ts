@@ -62,7 +62,7 @@ const PIPS: Record<number, [number, number][]> = {
     6: [[-1, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [1, 1]],
 };
 
-/** Rounded-corner die, centred on the origin. */
+/** Rounded-corner die with 3D extruded bevel & recessed pips, centred on the origin. */
 export function drawDie(
     g: Graphics,
     size: number,
@@ -73,7 +73,7 @@ export function drawDie(
 ) {
     g.clear();
     const h = size / 2;
-    const r = size * 0.22;
+    const r = size * 0.27;
     const a = opts.dim ? 0.45 : 1;
     const style = opts.styleId && opts.styleId !== 'classic' ? DICE_STYLES[opts.styleId] : null;
     const faceColor = style ? style.face : color;
@@ -82,10 +82,13 @@ export function drawDie(
     const glowColor = opts.glow ? (style?.glow ?? 0xffffff) : (style?.glow ?? null);
 
     if (glowColor !== null && (opts.glow || style?.glow)) {
-        g.roundRect(-h - size * 0.07, -h - size * 0.07, size * 1.14, size * 1.14, r * 1.2)
-            .fill({ color: glowColor, alpha: (opts.glow ? 0.36 : 0.16) * a });
+        g.roundRect(-h - size * 0.08, -h - size * 0.08, size * 1.16, size * 1.16, r * 1.25)
+            .fill({ color: glowColor, alpha: (opts.glow ? 0.38 : 0.16) * a });
     }
-    g.roundRect(-h, -h + size * 0.07, size, size, r).fill({ color: shade(faceColor, 0.52), alpha: a });
+    // Soft ground shadow + extruded 3D cube bottom edge
+    g.ellipse(0, h + size * 0.07, size * 0.44, size * 0.12).fill({ color: 0x000000, alpha: 0.34 * a });
+    g.roundRect(-h, -h + size * 0.11, size, size, r).fill({ color: shade(faceColor, 0.46), alpha: a });
+    g.roundRect(-h, -h + size * 0.05, size, size, r).fill({ color: shade(faceColor, 0.68), alpha: a });
     g.roundRect(-h, -h, size, size, r)
         .fill({ color: faceColor, alpha: a })
         .stroke({ width: size * (style ? 0.05 : 0.035), color: style ? mix(borderColor, color, 0.25) : borderColor, alpha: (style ? 0.9 : 0.55) * a });
@@ -110,9 +113,360 @@ export function drawDie(
             .fill({ color: 0xf0abfc, alpha: 0.3 * a });
     }
 
-    g.roundRect(-h + size * 0.08, -h + size * 0.06, size * 0.5, size * 0.16, r * 0.5).fill({ color: 0xffffff, alpha: 0.22 * a });
+    g.roundRect(-h + size * 0.08, -h + size * 0.06, size * 0.55, size * 0.16, r * 0.5).fill({ color: 0xffffff, alpha: 0.28 * a });
     for (const [gx, gy] of PIPS[Math.max(1, Math.min(6, value))]) {
-        g.circle(gx * size * 0.26, gy * size * 0.26, size * 0.085).fill({ color: pipColor, alpha: a });
+        const px = gx * size * 0.26;
+        const py = gy * size * 0.26;
+        const pr = size * 0.088;
+        g.circle(px, py + pr * 0.18, pr * 1.04).fill({ color: 0xffffff, alpha: 0.18 * a });
+        g.circle(px, py, pr).fill({ color: pipColor, alpha: a });
+    }
+}
+
+export interface BoardProjResult {
+    x: number;
+    y: number;
+    k: number;
+    d: number;
+}
+
+const ADJACENT_DIE_FACES: Record<number, [number, number, number, number]> = {
+    1: [2, 3, 5, 4],
+    2: [6, 3, 1, 4],
+    3: [1, 2, 6, 5],
+    4: [1, 5, 6, 2],
+    5: [1, 4, 6, 3],
+    6: [5, 3, 2, 4],
+};
+
+function rotVec3(x: number, y: number, z: number, rx: number, ry: number, rz: number): [number, number, number] {
+    // Rotate around X
+    const cx = Math.cos(rx), sx = Math.sin(rx);
+    const y1 = y * cx - z * sx;
+    const z1 = y * sx + z * cx;
+    // Rotate around Y
+    const cy = Math.cos(ry), sy = Math.sin(ry);
+    const x2 = x * cy + z1 * sy;
+    const z2 = -x * sy + z1 * cy;
+    // Rotate around Z
+    const cz = Math.cos(rz), sz = Math.sin(rz);
+    const x3 = x2 * cz - y1 * sz;
+    const y3 = x2 * sz + y1 * cz;
+    return [x3, y3, z2];
+}
+
+function bilerpPt(
+    p0: { x: number; y: number },
+    p1: { x: number; y: number },
+    p2: { x: number; y: number },
+    p3: { x: number; y: number },
+    u: number,
+    v: number,
+): { x: number; y: number } {
+    const x0 = p0.x + (p1.x - p0.x) * u;
+    const y0 = p0.y + (p1.y - p0.y) * u;
+    const x1 = p3.x + (p2.x - p3.x) * u;
+    const y1 = p3.y + (p2.y - p3.y) * u;
+    return { x: x0 + (x1 - x0) * v, y: y0 + (y1 - y0) * v };
+}
+
+function traceRoundedQuad(
+    g: Graphics,
+    pts: readonly { x: number; y: number }[],
+    cornerFrac = 0.25,
+) {
+    const n = pts.length;
+    const c = Math.max(0.05, Math.min(0.45, cornerFrac));
+    const lerp = (a: { x: number; y: number }, b: { x: number; y: number }, t: number) => ({
+        x: a.x + (b.x - a.x) * t,
+        y: a.y + (b.y - a.y) * t,
+    });
+    const firstOut = lerp(pts[0], pts[1], c);
+    g.moveTo(firstOut.x, firstOut.y);
+    for (let i = 1; i <= n; i++) {
+        const curr = pts[i % n];
+        const prev = pts[(i - 1) % n];
+        const next = pts[(i + 1) % n];
+        const enter = lerp(curr, prev, c);
+        const exit = lerp(curr, next, c);
+        g.lineTo(enter.x, enter.y);
+        g.quadraticCurveTo(curr.x, curr.y, exit.x, exit.y);
+    }
+    g.closePath();
+}
+
+const PIP_CIRCLE_TRIG: readonly [number, number][] = Array.from({ length: 14 }, (_, i) => {
+    const a = (i / 14) * Math.PI * 2;
+    return [Math.cos(a), Math.sin(a)];
+});
+
+export interface DieFaceBasis3D {
+    center: [number, number, number];
+    u: [number, number, number];
+    v: [number, number, number];
+}
+
+export function computeDieFaceBasis3D(
+    hs: number,
+    normal: readonly [number, number, number],
+    c0: readonly [number, number, number],
+    c1: readonly [number, number, number],
+    c3: readonly [number, number, number],
+    rx: number,
+    ry: number,
+    rz: number,
+): DieFaceBasis3D {
+    const invSpan = hs > 0 ? 1 / (2 * hs) : 1;
+    const uLocal: [number, number, number] = [
+        (c1[0] - c0[0]) * invSpan,
+        (c1[1] - c0[1]) * invSpan,
+        (c1[2] - c0[2]) * invSpan,
+    ];
+    const vLocal: [number, number, number] = [
+        (c3[0] - c0[0]) * invSpan,
+        (c3[1] - c0[1]) * invSpan,
+        (c3[2] - c0[2]) * invSpan,
+    ];
+    return {
+        center: rotVec3(normal[0] * hs, normal[1] * hs, normal[2] * hs, rx, ry, rz),
+        u: rotVec3(uLocal[0], uLocal[1], uLocal[2], rx, ry, rz),
+        v: rotVec3(vLocal[0], vLocal[1], vLocal[2], rx, ry, rz),
+    };
+}
+
+export function projectDieFacePipPoly(
+    proj: (x: number, y: number, z?: number) => BoardProjResult,
+    cx: number,
+    cy: number,
+    centerZ: number,
+    basis: DieFaceBasis3D,
+    hs: number,
+    gx: number,
+    gy: number,
+    pipRadius3D: number,
+    vOffset3D = 0,
+): number[] {
+    const offU = gx * 0.5 * hs;
+    const offV = gy * 0.5 * hs + vOffset3D;
+    const pcx = cx + basis.center[0] + basis.u[0] * offU + basis.v[0] * offV;
+    const pcy = cy + basis.center[1] + basis.u[1] * offU + basis.v[1] * offV;
+    const pcz = centerZ + basis.center[2] + basis.u[2] * offU + basis.v[2] * offV;
+
+    const pts: number[] = [];
+    for (let i = 0; i < PIP_CIRCLE_TRIG.length; i++) {
+        const [ca, sa] = PIP_CIRCLE_TRIG[i];
+        const rxOff = (basis.u[0] * ca + basis.v[0] * sa) * pipRadius3D;
+        const ryOff = (basis.u[1] * ca + basis.v[1] * sa) * pipRadius3D;
+        const rzOff = (basis.u[2] * ca + basis.v[2] * sa) * pipRadius3D;
+        const p = proj(pcx + rxOff, pcy + ryOff, pcz + rzOff);
+        pts.push(p.x, p.y);
+    }
+    return pts;
+}
+
+/**
+ * Draws a physical 3D cube die with curved corners directly onto the tilted/rotating board projection `proj`,
+ * complete with perspective-projected rounded faces, side pips, theme finishes, glow ring, and contact shadow.
+ */
+export function drawBoardDie3D(
+    g: Graphics,
+    sh: Graphics,
+    proj: (x: number, y: number, z?: number) => BoardProjResult,
+    cx: number,
+    cy: number,
+    cz: number,
+    halfSize: number,
+    value: number,
+    color: number,
+    pip: number,
+    opts: {
+        dim?: boolean;
+        glow?: boolean;
+        rotX?: number;
+        rotY?: number;
+        rotZ?: number;
+        styleId?: DiceStyleId;
+    } = {},
+) {
+    g.clear();
+    sh.clear();
+
+    const style = opts.styleId && opts.styleId !== 'classic' ? DICE_STYLES[opts.styleId] : null;
+    const faceColor = style ? style.face : color;
+    const pipColor = style ? style.pip : pip;
+    const borderColor = style ? style.border : 0xffffff;
+    const a = opts.dim ? 0.42 : 1;
+    const rx = opts.rotX ?? 0;
+    const ry = opts.rotY ?? 0;
+    const rz = opts.rotZ ?? 0;
+    const hs = halfSize;
+
+    // 1. Ground contact shadow on the board plane (z = 0.015)
+    const shScale = hs * (1.14 + Math.min(0.65, cz * 0.14));
+    const shAlpha = (opts.dim ? 0.16 : 0.38) * Math.max(0.28, 1 - cz * 0.16);
+    const shOffX = 0.12 + cz * 0.08;
+    const shOffY = 0.16 + cz * 0.1;
+    const shPts: number[] = [];
+    for (let i = 0; i < 14; i++) {
+        const ang = (i / 14) * Math.PI * 2;
+        const p = proj(cx + shOffX + Math.cos(ang) * shScale, cy + shOffY + Math.sin(ang) * shScale, 0.015);
+        shPts.push(p.x, p.y);
+    }
+    sh.poly(shPts).fill({ color: 0x000000, alpha: shAlpha });
+
+    // Optional selection halo directly on the board surface under the die
+    if (opts.glow && !opts.dim) {
+        const glowColor = style?.glow ?? 0xfacc15;
+        const haloPts: number[] = [];
+        for (let i = 0; i < 18; i++) {
+            const ang = (i / 18) * Math.PI * 2;
+            const p = proj(cx + Math.cos(ang) * (hs * 1.48), cy + Math.sin(ang) * (hs * 1.48), 0.02);
+            haloPts.push(p.x, p.y);
+        }
+        sh.poly(haloPts).fill({ color: glowColor, alpha: 0.28 }).stroke({ width: 2.2, color: glowColor, alpha: 0.9 });
+    }
+
+    // 2. 8 cube vertices centered at (0, 0, hs) so resting cube sits flush at z = 0..2*hs
+    const localCorners: [number, number, number][] = [
+        [-hs, -hs, -hs], // 0: bottom-back-left
+        [hs, -hs, -hs],  // 1: bottom-back-right
+        [hs, hs, -hs],   // 2: bottom-front-right
+        [-hs, hs, -hs],  // 3: bottom-front-left
+        [-hs, -hs, hs],  // 4: top-back-left
+        [hs, -hs, hs],   // 5: top-back-right
+        [hs, hs, hs],    // 6: top-front-right
+        [-hs, hs, hs],   // 7: top-front-left
+    ];
+    const centerZ = cz + hs;
+    const cubeCenterProj = proj(cx, cy, centerZ);
+    const projected = localCorners.map(([lx, ly, lz]) => {
+        const [wx, wy, wz] = rotVec3(lx, ly, lz, rx, ry, rz);
+        return proj(cx + wx, cy + wy, centerZ + wz);
+    });
+
+    const v = Math.max(1, Math.min(6, Math.round(value)));
+    const adj = ADJACENT_DIE_FACES[v] || [2, 3, 5, 4];
+    const faces: {
+        idx: [number, number, number, number];
+        normal: [number, number, number];
+        val: number;
+        isTop: boolean;
+    }[] = [
+        { idx: [4, 5, 6, 7], normal: [0, 0, 1], val: v, isTop: true },
+        { idx: [3, 2, 1, 0], normal: [0, 0, -1], val: 7 - v, isTop: false },
+        { idx: [7, 6, 2, 3], normal: [0, 1, 0], val: adj[0], isTop: false },
+        { idx: [5, 1, 2, 6], normal: [1, 0, 0], val: adj[1], isTop: false },
+        { idx: [4, 0, 1, 5], normal: [0, -1, 0], val: adj[2], isTop: false },
+        { idx: [4, 7, 3, 0], normal: [-1, 0, 0], val: adj[3], isTop: false },
+    ];
+
+    // Inner bevel core (0.81 * hs) seals curved 3-face corner valleys cleanly without sharpening outer corners
+    const innerHs = hs * 0.81;
+    const innerProjected = localCorners.map(([lx, ly, lz]) => {
+        const s = innerHs / hs;
+        const [wx, wy, wz] = rotVec3(lx * s, ly * s, lz * s, rx, ry, rz);
+        return proj(cx + wx, cy + wy, centerZ + wz);
+    });
+
+    // Sort back-to-front by average camera depth D (descending)
+    const sorted = faces
+        .map((f) => {
+            const pts = f.idx.map((k) => projected[k]);
+            const innerPts = f.idx.map((k) => innerProjected[k]);
+            const avgD = (pts[0].d + pts[1].d + pts[2].d + pts[3].d) / 4;
+            const [nx, ny, nz] = rotVec3(f.normal[0], f.normal[1], f.normal[2], rx, ry, rz);
+            const shadeFactor = Math.max(0.46, Math.min(1.06, 0.72 + nz * 0.30 - nx * 0.14 - ny * 0.14));
+            return { ...f, pts, innerPts, avgD, shadeFactor };
+        })
+        .sort((aF, bF) => bF.avgD - aF.avgD);
+
+    const bevelColor = shade(faceColor, 0.54);
+    for (const f of sorted) {
+        traceRoundedQuad(g, f.innerPts, 0.2);
+        g.fill({ color: bevelColor, alpha: a });
+    }
+
+    // Draw only the 3-4 faces on the front hemisphere cleanly with curved corners
+    for (const f of sorted) {
+        const [p0, p1, p2, p3] = f.pts;
+        const fill = f.shadeFactor >= 1 ? mix(faceColor, 0xffffff, 0.08) : shade(faceColor, f.shadeFactor);
+        const edge = style ? mix(borderColor, faceColor, 0.3) : shade(faceColor, Math.max(0.32, f.shadeFactor * 0.58));
+
+        traceRoundedQuad(g, f.pts, 0.25);
+        g.fill({ color: fill, alpha: a })
+            .stroke({ width: 1.5, color: edge, alpha: 0.85 * a });
+
+        if (f.isTop) {
+            // Subtle glossy rim highlight along top-left edge
+            const h0 = bilerpPt(p0, p1, p2, p3, 0.12, 0.10);
+            const h1 = bilerpPt(p0, p1, p2, p3, 0.72, 0.10);
+            const h2 = bilerpPt(p0, p1, p2, p3, 0.62, 0.24);
+            const h3 = bilerpPt(p0, p1, p2, p3, 0.12, 0.24);
+            traceRoundedQuad(g, [h0, h1, h2, h3], 0.28);
+            g.fill({ color: 0xffffff, alpha: 0.22 * a });
+
+            if (style?.pattern === 'marble') {
+                const m0 = bilerpPt(p0, p1, p2, p3, 0.15, 0.2);
+                const m1 = bilerpPt(p0, p1, p2, p3, 0.55, 0.58);
+                const m2 = bilerpPt(p0, p1, p2, p3, 0.82, 0.78);
+                g.moveTo(m0.x, m0.y).lineTo(m1.x, m1.y).lineTo(m2.x, m2.y)
+                    .stroke({ width: 1.5, color: 0x9ca3af, alpha: 0.45 * a });
+            } else if (style?.pattern === 'galaxy') {
+                for (const [su, sv] of [[0.24, 0.25], [0.76, 0.28], [0.28, 0.74], [0.74, 0.70]] as const) {
+                    const sp = bilerpPt(p0, p1, p2, p3, su, sv);
+                    g.circle(sp.x, sp.y, Math.max(1.2, 2.2 * p0.k)).fill({ color: 0xc4b5fd, alpha: 0.75 * a });
+                }
+            } else if (style?.pattern === 'fire') {
+                const f0 = bilerpPt(p0, p1, p2, p3, 0.14, 0.5);
+                const f1 = bilerpPt(p0, p1, p2, p3, 0.86, 0.5);
+                const f2 = bilerpPt(p0, p1, p2, p3, 0.86, 0.88);
+                const f3 = bilerpPt(p0, p1, p2, p3, 0.14, 0.88);
+                g.poly([f0.x, f0.y, f1.x, f1.y, f2.x, f2.y, f3.x, f3.y]).fill({ color: 0xf97316, alpha: 0.24 * a });
+            } else if (style?.pattern === 'ice') {
+                const i0 = bilerpPt(p0, p1, p2, p3, 0.2, 0.2);
+                const i1 = bilerpPt(p0, p1, p2, p3, 0.8, 0.8);
+                g.moveTo(i0.x, i0.y).lineTo(i1.x, i1.y).stroke({ width: 1.3, color: 0xffffff, alpha: 0.5 * a });
+            }
+        }
+
+        // Draw each pip as a true 3D circle in the face's own plane (u, v) so side-face pips stay properly perspective-foreshortened
+        const edgeLen = Math.hypot(p1.x - p0.x, p1.y - p0.y);
+        const sideLen = Math.hypot(p3.x - p0.x, p3.y - p0.y);
+        const minSpan = Math.min(edgeLen, sideLen);
+        const isFrontFacing = f.avgD <= cubeCenterProj.d + hs * 0.05;
+        if (isFrontFacing && minSpan > 6) {
+            const basis = computeDieFaceBasis3D(
+                hs,
+                f.normal,
+                localCorners[f.idx[0]],
+                localCorners[f.idx[1]],
+                localCorners[f.idx[3]],
+                rx,
+                ry,
+                rz,
+            );
+            const pipR3D = hs * 0.19;
+            const pipAlpha = a * (f.isTop ? 0.98 : 0.78);
+            for (const [gx, gy] of PIPS[f.val]) {
+                if (f.isTop) {
+                    const hlPts = projectDieFacePipPoly(
+                        proj,
+                        cx,
+                        cy,
+                        centerZ,
+                        basis,
+                        hs,
+                        gx,
+                        gy,
+                        pipR3D * 1.05,
+                        pipR3D * 0.18,
+                    );
+                    g.poly(hlPts).fill({ color: 0xffffff, alpha: 0.18 * pipAlpha });
+                }
+                const pipPts = projectDieFacePipPoly(proj, cx, cy, centerZ, basis, hs, gx, gy, pipR3D);
+                g.poly(pipPts).fill({ color: pipColor, alpha: pipAlpha });
+            }
+        }
     }
 }
 
