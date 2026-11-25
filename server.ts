@@ -304,7 +304,7 @@ io.on('connection', (socket) => {
         if (typeof callback === 'function') callback(res);
     });
 
-    socket.on('move_pawn', (data: { roomCode: string; sessionToken: string; dieIndex: number; tokenIndex: number; action?: 'gul' | 'pass' }, callback) => {
+    socket.on('move_pawn', (data: { roomCode: string; sessionToken: string; dieIndex: number | 'combined'; tokenIndex: number; action?: 'gul' | 'pass' }, callback) => {
         const { roomCode, sessionToken, dieIndex, tokenIndex, action } = data || {};
         const res = roomManager.movePawn(roomCode, sessionToken, dieIndex, tokenIndex, action);
         if (typeof callback === 'function') callback(res);

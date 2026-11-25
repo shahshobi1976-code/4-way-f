@@ -208,7 +208,7 @@ export interface TokenRenderOpts {
     celebratePhase: number; // 0..1
 }
 
-export type LocomotionMode = 'slither' | 'fly' | 'hop' | 'walk';
+export type LocomotionMode = 'slither' | 'fly' | 'hop' | 'walk' | 'skid';
 
 export interface LocomotionProfile {
     mode: LocomotionMode;
@@ -236,7 +236,8 @@ export function getTokenLocomotion(kind: ResolvedTokenKind, fromBase = false): L
         return { mode: 'hop', hop: 0.58, stepMs: 275, movableBounce: 0.24 };
     }
     if (kind === 'default') {
-        return { mode: 'hop', hop: 0.55, stepMs: 280, movableBounce: 0.32 };
+        // Classic tokens stay grounded on the track and skid smoothly between squares
+        return { mode: 'skid', hop: 0, stepMs: 210, movableBounce: 0 };
     }
     // Walking quadrupeds (lion, elephant, horse, wolf, gorilla), strutting rooster, & grounded humans
     const stepMs =

@@ -9,7 +9,7 @@ import { bus, type NameplateBound } from './bus';
 import { tr, colorName } from '../i18n';
 import {
     BASE_CENTER, BASE_SPOTS, CENTER_HOME_POS, COLORED_PATH_START_POS, COLORS, HOME, HOME_COL, IN_BASE, LAST_TRACK, PATH_START, SAFE, STAR_IDX, START_IDX, TRACK,
-    boardPos, createEmptyGrudges, decrementSeatGrudge, evaluateCaptureObligation, evaluateRivalryState, fineProgress, getTokenPathWorldDir,
+    boardPos, createEmptyGrudges, decrementSeatGrudge, evaluateCaptureObligation, evaluateRivalryState, findCombinedSprintMove, fineProgress, getTokenPathWorldDir,
     globalIdx, hasWon, isLoneTokenOnTrack, isLuckySum, legalMovesForTurn, luckySevenAllowed, newTokens, offendingTokensForPenalty, percent,
     pickBestAIMove, randDie, recordCaptureGrudge, resolveAutoPlayGulAction, resolvePawnTapMove, shouldPromptGulChoice, type CaptureObligation, type Move, type Tokens,
 } from './rules';
@@ -62,8 +62,24 @@ interface Tween {
     stepMs: number;
     hop: number;
     mode: LocomotionMode;
+    isBurnoutSprint?: boolean;
     lastSfxSeg: number;
     done: () => void;
+}
+interface BurnoutParticle {
+    x: number;
+    y: number;
+    z: number;
+    vx: number;
+    vy: number;
+    vz: number;
+    r: number;
+    grow: number;
+    life: number;
+    maxLife: number;
+    color: number;
+    alpha: number;
+    kind: 'smoke' | 'spark' | 'dust';
 }
 interface TokView {
     p: number;
@@ -83,6 +99,15 @@ interface TokView {
     travelPhase: number;
     speedNorm: number;
     facingRad: number;
+    dirX: number;
+    dirY: number;
+    worldDirX: number;
+    worldDirY: number;
+    burnoutPhase: 'none' | 'rev' | 'sprint';
+    burnoutStartedAt: number;
+    burnoutRevDurationMs: number;
+    burnoutEmitAccumMs: number;
+    skidLean: number;
     celebrateUntil: number;
     tween: Tween | null;
     movable: boolean;
@@ -108,6 +133,8 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     const boardFxG = new Graphics();
     boardFxG.eventMode = 'none';
     const shadowLayer = new Container();
+    const burnoutLayer = new Graphics();
+    burnoutLayer.eventMode = 'none';
     const tokenLayer = new Container();
     tokenLayer.sortableChildren = true;
     const plateLayer = new Container();
@@ -116,7 +143,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     flyLayer.interactiveChildren = false;
     const uiLayer = new Container();
     const handLayer = new Container();
-    root.addChild(bgFill, bgG, boardG, boardFxG, shadowLayer, tokenLayer, plateLayer, flyLayer, uiLayer, handLayer);
+    root.addChild(bgFill, bgG, boardG, boardFxG, shadowLayer, burnoutLayer, tokenLayer, plateLayer, flyLayer, uiLayer, handLayer);
 
     const isOnline = () => {
         return Boolean(
@@ -227,8 +254,16 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     // ---------------------------------------------------------------- timers / tweens (ticker clock + abort-safe)
     let clock = 0;
     const timers: { t: number; cb: () => void }[] = [];
+    let pendingTapState: { tok: number; timer: ReturnType<typeof setTimeout>; epoch: number } | null = null;
+    function clearPendingTap() {
+        if (pendingTapState) {
+            clearTimeout(pendingTapState.timer);
+            pendingTapState = null;
+        }
+    }
     const turnAbortCallbacks = new Set<() => void>();
     const bumpTurnEpoch = () => {
+        clearPendingTap();
         turnEpoch++;
         const cbs = Array.from(turnAbortCallbacks);
         turnAbortCallbacks.clear();
@@ -464,6 +499,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                 const sdy = wx * saYaw + wy * caYaw;
                 return Math.atan2(sdy, sdx);
             };
+            const [initWx, initWy] = getTokenPathWorldDir(p, tokens[p][t], t);
             const v: TokView = {
                 p,
                 t,
@@ -481,6 +517,15 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                 travelPhase: Math.random() * 6,
                 speedNorm: 0,
                 facingRad: pathScreenFacingRad(p, tokens[p][t], t, null),
+                dirX: 1,
+                dirY: 0,
+                worldDirX: initWx,
+                worldDirY: initWy,
+                burnoutPhase: 'none',
+                burnoutStartedAt: 0,
+                burnoutRevDurationMs: 450,
+                burnoutEmitAccumMs: 0,
+                skidLean: 0,
                 celebrateUntil: 0,
                 tween: null,
                 movable: false,
@@ -533,6 +578,230 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         }
     }
 
+    const MAX_BURNOUT_PARTICLES = 90;
+    const burnoutParticles: BurnoutParticle[] = [];
+    const SMOKE_COLORS = [0xe5e7eb, 0xd1d5db, 0x9ca3af, 0xf3f4f6];
+    const SPARK_COLORS = [0xff8c00, 0xfacc15, 0xff4500, 0xfdba74];
+    const DUST_COLORS = [0xf1f5f9, 0xe2e8f0, 0xcbd5e1];
+
+    function spawnBurnoutParticle(pt: BurnoutParticle) {
+        while (burnoutParticles.length >= MAX_BURNOUT_PARTICLES) {
+            burnoutParticles.shift();
+        }
+        burnoutParticles.push(pt);
+    }
+
+    function emitRevBurnoutPuff(v: TokView, revProg: number) {
+        const bx = -v.worldDirX;
+        const by = -v.worldDirY;
+        const px = -by;
+        const py = bx;
+        const smokeCount = revProg > 0.45 ? 3 : 2;
+        for (let k = 0; k < smokeCount; k++) {
+            const spread = (Math.random() - 0.5) * 0.48;
+            const speed = 1.4 + revProg * 1.9 + Math.random() * 0.9;
+            spawnBurnoutParticle({
+                x: v.renderX + bx * (0.22 + Math.random() * 0.14) + px * spread * 0.45,
+                y: v.renderY + by * (0.22 + Math.random() * 0.14) + py * spread * 0.45,
+                z: 0.06 + Math.random() * 0.08,
+                vx: bx * speed + px * spread * 1.4,
+                vy: by * speed + py * spread * 1.4,
+                vz: 0.45 + Math.random() * 0.65,
+                r: 0.14 + revProg * 0.09 + Math.random() * 0.07,
+                grow: 0.42 + revProg * 0.35,
+                life: 0,
+                maxLife: 420 + Math.random() * 240,
+                color: SMOKE_COLORS[Math.floor(Math.random() * SMOKE_COLORS.length)],
+                alpha: 0.52 + revProg * 0.24,
+                kind: 'smoke',
+            });
+        }
+        if (Math.random() < 0.55 + revProg * 0.35) {
+            const spSpread = (Math.random() - 0.5) * 0.7;
+            const spSpeed = 2.6 + Math.random() * 2.2;
+            spawnBurnoutParticle({
+                x: v.renderX + bx * 0.2 + px * spSpread * 0.3,
+                y: v.renderY + by * 0.2 + py * spSpread * 0.3,
+                z: 0.05 + Math.random() * 0.06,
+                vx: bx * spSpeed + px * spSpread * 1.6,
+                vy: by * spSpeed + py * spSpread * 1.6,
+                vz: 0.7 + Math.random() * 0.9,
+                r: 0.055 + Math.random() * 0.035,
+                grow: -0.05,
+                life: 0,
+                maxLife: 180 + Math.random() * 140,
+                color: SPARK_COLORS[Math.floor(Math.random() * SPARK_COLORS.length)],
+                alpha: 0.95,
+                kind: 'spark',
+            });
+        }
+    }
+
+    function emitSkidTrail(v: TokView, heavy: boolean) {
+        const bx = -v.worldDirX;
+        const by = -v.worldDirY;
+        const px = -by;
+        const py = bx;
+        const spread = (Math.random() - 0.5) * (heavy ? 0.34 : 0.24);
+        if (heavy) {
+            spawnBurnoutParticle({
+                x: v.renderX + bx * 0.2 + px * spread * 0.4,
+                y: v.renderY + by * 0.2 + py * spread * 0.4,
+                z: 0.05 + Math.random() * 0.05,
+                vx: bx * (1.1 + Math.random() * 0.8) + px * spread,
+                vy: by * (1.1 + Math.random() * 0.8) + py * spread,
+                vz: 0.35 + Math.random() * 0.45,
+                r: 0.14 + Math.random() * 0.08,
+                grow: 0.36,
+                life: 0,
+                maxLife: 340 + Math.random() * 180,
+                color: SMOKE_COLORS[Math.floor(Math.random() * SMOKE_COLORS.length)],
+                alpha: 0.52,
+                kind: 'smoke',
+            });
+            if (Math.random() < 0.35) {
+                spawnBurnoutParticle({
+                    x: v.renderX + bx * 0.18,
+                    y: v.renderY + by * 0.18,
+                    z: 0.04,
+                    vx: bx * 2.2 + px * spread * 1.8,
+                    vy: by * 2.2 + py * spread * 1.8,
+                    vz: 0.55,
+                    r: 0.045,
+                    grow: -0.04,
+                    life: 0,
+                    maxLife: 160,
+                    color: SPARK_COLORS[Math.floor(Math.random() * SPARK_COLORS.length)],
+                    alpha: 0.9,
+                    kind: 'spark',
+                });
+            }
+        } else {
+            spawnBurnoutParticle({
+                x: v.renderX + bx * 0.18 + px * spread * 0.35,
+                y: v.renderY + by * 0.18 + py * spread * 0.35,
+                z: 0.03,
+                vx: bx * (0.45 + Math.random() * 0.35) + px * spread * 0.8,
+                vy: by * (0.45 + Math.random() * 0.35) + py * spread * 0.8,
+                vz: 0.18 + Math.random() * 0.2,
+                r: 0.085 + Math.random() * 0.045,
+                grow: 0.18,
+                life: 0,
+                maxLife: 240 + Math.random() * 120,
+                color: DUST_COLORS[Math.floor(Math.random() * DUST_COLORS.length)],
+                alpha: 0.34,
+                kind: 'dust',
+            });
+        }
+    }
+
+    function emitBrakeBurst(v: TokView) {
+        const count = 11;
+        for (let i = 0; i < count; i++) {
+            const ang = (i / count) * Math.PI * 2 + (Math.random() - 0.5) * 0.35;
+            const spd = 1.0 + Math.random() * 1.25;
+            spawnBurnoutParticle({
+                x: v.renderX + Math.cos(ang) * 0.14 + v.worldDirX * 0.16,
+                y: v.renderY + Math.sin(ang) * 0.14 + v.worldDirY * 0.16,
+                z: 0.05 + Math.random() * 0.05,
+                vx: Math.cos(ang) * spd + v.worldDirX * 0.55,
+                vy: Math.sin(ang) * spd + v.worldDirY * 0.55,
+                vz: 0.38 + Math.random() * 0.42,
+                r: 0.12 + Math.random() * 0.07,
+                grow: 0.34,
+                life: 0,
+                maxLife: 320 + Math.random() * 160,
+                color: SMOKE_COLORS[Math.floor(Math.random() * SMOKE_COLORS.length)],
+                alpha: 0.54,
+                kind: 'smoke',
+            });
+        }
+    }
+
+    function clearBurnoutEffects() {
+        burnoutParticles.length = 0;
+        if (burnoutLayer && !burnoutLayer.destroyed) {
+            burnoutLayer.clear();
+        }
+        for (const row of views) {
+            for (const v of row) {
+                v.burnoutPhase = 'none';
+                v.burnoutEmitAccumMs = 0;
+                v.skidLean = 0;
+                if (v.c && !v.c.destroyed) {
+                    v.c.rotation = 0;
+                    if (v.c.skew) v.c.skew.set(0, 0);
+                }
+            }
+        }
+    }
+
+    function updateBurnoutParticles(dt: number, nowMs: number) {
+        if (!burnoutLayer || burnoutLayer.destroyed) return;
+        burnoutLayer.clear();
+        const dtSec = Math.max(0.001, dt / 1000);
+
+        for (let p = 0; p < 4; p++) {
+            if (!active[p]) continue;
+            if (seatTokenKind(p) !== 'default') continue;
+            for (const v of views[p]) {
+                if (v.burnoutPhase === 'rev') {
+                    const revProg = Math.min(1, Math.max(0, (nowMs - v.burnoutStartedAt) / Math.max(1, v.burnoutRevDurationMs)));
+                    const pulse = 0.5 + 0.5 * Math.sin(nowMs * 0.048);
+                    const ringR = 0.52 + 0.13 * revProg + 0.07 * pulse;
+                    const ringPts: number[] = [];
+                    for (let k = 0; k < 14; k++) {
+                        const a = (k / 14) * Math.PI * 2;
+                        const gp = P(v.renderX + Math.cos(a) * ringR, v.renderY + Math.sin(a) * ringR, 0.015);
+                        ringPts.push(gp.x, gp.y);
+                    }
+                    burnoutLayer
+                        .poly(ringPts)
+                        .fill({ color: 0xff7a00, alpha: 0.16 + 0.20 * revProg })
+                        .stroke({ width: Math.max(2, S * 0.095), color: pulse > 0.45 ? 0xfbbf24 : 0xff6b00, alpha: 0.62 + 0.34 * revProg });
+
+                    v.burnoutEmitAccumMs += dt;
+                    if (v.burnoutEmitAccumMs >= 32) {
+                        v.burnoutEmitAccumMs = 0;
+                        emitRevBurnoutPuff(v, revProg);
+                    }
+                } else if (v.tween && v.tween.mode === 'skid') {
+                    const heavy = !!v.tween.isBurnoutSprint;
+                    v.burnoutEmitAccumMs += dt;
+                    const interval = heavy ? 22 : 52;
+                    if (v.burnoutEmitAccumMs >= interval) {
+                        v.burnoutEmitAccumMs = 0;
+                        emitSkidTrail(v, heavy);
+                    }
+                }
+            }
+        }
+
+        for (let i = burnoutParticles.length - 1; i >= 0; i--) {
+            const pt = burnoutParticles[i];
+            pt.life += dt;
+            if (pt.life >= pt.maxLife) {
+                burnoutParticles.splice(i, 1);
+                continue;
+            }
+            const drag = pt.kind === 'spark' ? 0.90 : 0.94;
+            const dragPow = Math.pow(drag, dt / 16.67);
+            pt.vx *= dragPow;
+            pt.vy *= dragPow;
+            if (pt.kind === 'spark') pt.vz -= 2.4 * dtSec;
+            pt.x += pt.vx * dtSec;
+            pt.y += pt.vy * dtSec;
+            pt.z = Math.max(0.01, pt.z + pt.vz * dtSec);
+
+            const age = pt.life / pt.maxLife;
+            const curR = Math.max(0.015, pt.r + pt.grow * age);
+            const fade = pt.kind === 'spark' ? (1 - age) : Math.pow(1 - age, 1.25);
+            const pr = P(pt.x, pt.y, pt.z);
+            const screenR = Math.max(1.2, curR * S * pr.k);
+            burnoutLayer.circle(pr.x, pr.y, screenR).fill({ color: pt.color, alpha: pt.alpha * fade });
+        }
+    }
+
     function tween(
         tok: TokView,
         pts: [number, number][],
@@ -540,6 +809,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         hop: number,
         expectedEpoch?: number,
         mode: LocomotionMode = 'hop',
+        isBurnoutSprint = false,
     ): Promise<void> {
         return new Promise<void>((res) => {
             if (dead || pts.length < 2 || (typeof document !== 'undefined' && document.hidden) || (expectedEpoch !== undefined && isOnline() && turnEpoch !== expectedEpoch)) {
@@ -577,7 +847,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                 tok.vz = 0;
                 finishTween();
             };
-            const tw: Tween = { tok, pts, seg: 0, u: 0, stepMs, hop, mode, lastSfxSeg: -1, done: finishTween };
+            const tw: Tween = { tok, pts, seg: 0, u: 0, stepMs, hop, mode, isBurnoutSprint, lastSfxSeg: -1, done: finishTween };
             tok.tween = tw;
             tweens.push(tw);
             if (isOnline()) {
@@ -592,12 +862,16 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     function updateTweens(dt: number) {
         for (let i = tweens.length - 1; i >= 0; i--) {
             const tw = tweens[i];
-            tw.u += dt / tw.stepMs;
+            const totalSegs = Math.max(1, tw.pts.length - 1);
+            const approxU = Math.min(1, (tw.seg + Math.min(1, tw.u)) / totalSegs);
+            const sprintMult = tw.isBurnoutSprint
+                ? (approxU > 0.85 ? 0.78 + (1 - approxU) * 3.0 : 0.95 + Math.sin(approxU * Math.PI) * 0.55)
+                : 1.0;
+            tw.u += (dt * sprintMult) / tw.stepMs;
             while (tw.u >= 1 && tw.seg < tw.pts.length - 2) {
                 tw.u -= 1;
                 tw.seg++;
             }
-            const totalSegs = Math.max(1, tw.pts.length - 1);
             const kind = seatTokenKind(tw.tok.p);
             if (kind !== 'default' && tw.seg !== tw.lastSfxSeg) {
                 tw.lastSfxSeg = tw.seg;
@@ -610,7 +884,12 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             const baseY = a[1] + (b[1] - a[1]) * u;
             const totalU = Math.min(1, (tw.seg + u) / totalSegs);
 
-            if (tw.mode === 'slither') {
+            if (tw.mode === 'skid') {
+                // Grounded smooth glide from square to square along the 4-way path with zero vertical jump
+                tw.tok.vx = baseX;
+                tw.tok.vy = baseY;
+                tw.tok.vz = 0;
+            } else if (tw.mode === 'slither') {
                 // Grounded sinusoidal S-wave path glide along the board surface with zero vertical jump
                 const sdx = b[0] - a[0];
                 const sdy = b[1] - a[1];
@@ -636,7 +915,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                 tw.tok.vy = baseY;
                 tw.tok.vz = Math.sin(Math.PI * u) * tw.hop;
             } else {
-                // True jumping/hopping arc per step (frog, kangaroo, climber, gymnast, default pawn)
+                // True jumping/hopping arc per step (frog, kangaroo, climber, gymnast)
                 tw.tok.vx = baseX;
                 tw.tok.vy = baseY;
                 tw.tok.vz = Math.sin(Math.PI * u) * tw.hop;
@@ -716,7 +995,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                     v.travelPhase += dtSec * (7.5 + v.speedNorm * 8.5);
                 }
 
-                // Always keep human & animal tokens facing the exact path direction (standing OR moving, across camera rotation)
+                // Always compute projected screen-space travel direction (dirX, dirY) & world path vector
                 let wx = 1, wy = 0;
                 if (v.tween && v.tween.pts.length > v.tween.seg + 1) {
                     const aPt = v.tween.pts[v.tween.seg], bPt = v.tween.pts[v.tween.seg + 1];
@@ -731,6 +1010,16 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                 } else {
                     [wx, wy] = getTokenPathWorldDir(p, tokens[p][v.t], v.t);
                 }
+                v.worldDirX = wx;
+                v.worldDirY = wy;
+                const pDir0 = P(v.renderX, v.renderY, 0);
+                const pDir1 = P(v.renderX + wx * 0.25, v.renderY + wy * 0.25, 0);
+                const scrDx = pDir1.x - pDir0.x;
+                const scrDy = pDir1.y - pDir0.y;
+                const scrLen = Math.hypot(scrDx, scrDy) || 1;
+                v.dirX = scrDx / scrLen;
+                v.dirY = scrDy / scrLen;
+
                 const aYaw = rad(yaw), caYaw = Math.cos(aYaw), saYaw = Math.sin(aYaw);
                 const targetFacingRad = Math.atan2(wx * saYaw + wy * caYaw, wx * caYaw - wy * saYaw);
                 const angDiff = Math.atan2(Math.sin(targetFacingRad - v.facingRad), Math.cos(targetFacingRad - v.facingRad));
@@ -782,14 +1071,50 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                 const bounce = v.movable && loco.movableBounce > 0
                     ? Math.abs(Math.sin(timeSec * 6 + v.phase)) * loco.movableBounce
                     : 0;
-                if (v.c?.position) v.c.position.set(pr.x, pr.y - bounce * S * pr.k);
-                if (v.c?.scale) v.c.scale.set(S * pr.k * crowd * TOKEN_SIZE_SCALE);
-                if (v.c) v.c.zIndex = -gr.d * 100 + (v.tween ? 500 : 0);
-                if (v.shadow?.position) v.shadow.position.set(gr.x, gr.y);
+                const baseScale = S * pr.k * crowd * TOKEN_SIZE_SCALE;
+                let offX = 0;
+                let offY = 0;
+                let sxMult = 1;
+                let syMult = 1;
+                let targetSkidLean = 0;
+
+                if (seatKind === 'default') {
+                    if (v.burnoutPhase === 'rev') {
+                        const revProg = Math.min(1, Math.max(0, (now - v.burnoutStartedAt) / Math.max(1, v.burnoutRevDurationMs)));
+                        const vibAmp = (0.03 + 0.035 * revProg) * S * pr.k;
+                        const creep = (0.035 + 0.065 * revProg) * S * pr.k;
+                        offX = v.dirX * creep + Math.sin(now * 0.21 + v.phase) * vibAmp;
+                        offY = v.dirY * creep + Math.cos(now * 0.27 + v.phase) * vibAmp * 0.55;
+                        sxMult = 1.13 + 0.03 * Math.sin(now * 0.14);
+                        syMult = 0.84 - 0.04 * Math.sin(now * 0.14);
+                        const leanDir = Math.abs(v.dirX) > 0.18 ? Math.sign(v.dirX) : 1;
+                        targetSkidLean = -leanDir * (0.14 + 0.06 * revProg);
+                    } else if (v.tween && loco.mode === 'skid') {
+                        const heavy = !!v.tween.isBurnoutSprint;
+                        const leanDir = Math.abs(v.dirX) > 0.12 ? v.dirX : (v.dirY < 0 ? 0.28 : -0.28);
+                        targetSkidLean = leanDir * (heavy ? 0.28 : 0.17);
+                        sxMult = heavy ? 1.04 : 1.01;
+                        syMult = heavy ? 0.94 : 0.98;
+                    }
+                    v.skidLean += (targetSkidLean - v.skidLean) * Math.min(1, dtSec * 18);
+                } else {
+                    v.skidLean = 0;
+                }
+
+                if (v.c?.position) v.c.position.set(pr.x + offX, pr.y - bounce * S * pr.k + offY);
+                if (v.c?.scale) v.c.scale.set(baseScale * sxMult, baseScale * syMult);
+                if (v.c) {
+                    v.c.rotation = seatKind === 'default' ? v.skidLean : 0;
+                    if (v.c.skew) {
+                        v.c.skew.set(seatKind === 'default' ? v.skidLean * 0.35 : 0, 0);
+                    }
+                    v.c.zIndex = -gr.d * 100 + (v.tween ? 500 : 0);
+                }
+                if (v.shadow?.position) v.shadow.position.set(gr.x + offX * 0.5, gr.y + offY * 0.5);
                 const shAirScale = isAnimalTokenKind(seatKind)
                     ? Math.max(0.68, 1 - Math.min(0.32, v.vz * 0.22))
                     : (1 - Math.min(0.5, v.vz * 0.25));
-                if (v.shadow?.scale) v.shadow.scale.set(S * gr.k * crowd * TOKEN_SIZE_SCALE * shAirScale);
+                if (v.shadow?.scale) v.shadow.scale.set(S * gr.k * crowd * TOKEN_SIZE_SCALE * shAirScale * sxMult, S * gr.k * crowd * TOKEN_SIZE_SCALE * shAirScale);
                 if (v.ring?.position) v.ring.position.set(gr.x, gr.y);
                 if (v.ring?.scale) v.ring.scale.set(S * gr.k * crowd * TOKEN_SIZE_SCALE);
                 v.ring.visible = v.movable || v.flash > 0;
@@ -1651,6 +1976,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         }
         return optionsNow.find((o) => o.die === dieIndex && o.tok === tokenIndex)
             || legalMovesForTurn(tokens, rp, dice, diceUsed, active).find((o) => o.die === dieIndex && o.tok === tokenIndex)
+            || (dieIndex === 2 ? findCombinedSprintMove(tokens, rp, tokenIndex, dice, diceUsed, active) : undefined)
             || {
                 tok: tokenIndex,
                 to,
@@ -1881,6 +2207,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     // Humans can tap either a die first OR tap a movable token directly.
     // If a token is tapped directly, the game smart-matches the appropriate die instantly!
     function onDieTap(i: number) {
+        clearPendingTap();
         if (!isOnline() && localTurnAutoPlay) return;
         if (isOnline()) {
             const myIdx = multiplayerClient.myPlayerIndex;
@@ -1988,6 +2315,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     }
 
     function executePlayerMove(m: Move) {
+        clearPendingTap();
         if (!waitChoice) return;
         dieConfirmed = true;
         sfx.tap();
@@ -2125,9 +2453,27 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         proceedWithMove();
     }
 
+    const DOUBLE_TAP_WINDOW_MS = 250;
+
+    function handleLocalCombinedMove(tokIdx: number): boolean {
+        if (!waitChoice) return false;
+        if (!isOnline() && (localTurnAutoPlay || isAI(current))) return false;
+        if (isOnline() && multiplayerClient.myPlayerIndex !== current) return false;
+        const stSnap = store.get();
+        if (stSnap.gulPrompt || stSnap.skipCapturePrompt) return false;
+
+        const combinedMove = findCombinedSprintMove(tokens, current, tokIdx, dice, diceUsed, active);
+        if (!combinedMove) return false;
+        selDie = 2;
+        executePlayerMove(combinedMove);
+        return true;
+    }
+
     function onTokenTap(v: TokView) {
         if (!isOnline() && localTurnAutoPlay) return;
         if (!waitChoice) return;
+        const stSnap = store.get();
+        if (stSnap.gulPrompt || stSnap.skipCapturePrompt) return;
         if (isOnline()) {
             const myIdx = multiplayerClient.myPlayerIndex;
             const serverTurn = multiplayerClient.roomState?.currentTurn;
@@ -2144,7 +2490,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         if (!isOnline() && isAI(current)) return;
         if (v.p !== current) return;
 
-        const m = resolvePawnTapMove(
+        const singleMove = resolvePawnTapMove(
             tokens,
             current,
             v.t,
@@ -2155,14 +2501,55 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             diceUsed,
         );
 
-        if (!m) {
-            setStatus(tr(lang, 'pieceNeedsOtherDie'));
-            flashDies();
+        const combinedCandidate = !dieConfirmed
+            ? findCombinedSprintMove(tokens, current, v.t, dice, diceUsed, active)
+            : undefined;
+        const singleAlreadyCombined = !!singleMove && (singleMove.die === 2 || !!singleMove.combined);
+        const eligibleForDoubleTap = !!combinedCandidate && !singleAlreadyCombined;
+
+        if (!eligibleForDoubleTap) {
+            clearPendingTap();
+            if (!singleMove) {
+                setStatus(tr(lang, 'pieceNeedsOtherDie'));
+                flashDies();
+                return;
+            }
+            selDie = singleMove.die;
+            executePlayerMove(singleMove);
             return;
         }
 
-        selDie = m.die;
-        executePlayerMove(m);
+        // Second quick tap on the same eligible on-path pawn fires a combined sprint!
+        if (pendingTapState && pendingTapState.tok === v.t) {
+            clearPendingTap();
+            if (!handleLocalCombinedMove(v.t) && singleMove) {
+                selDie = singleMove.die;
+                executePlayerMove(singleMove);
+            }
+            return;
+        }
+
+        // First tap on an eligible double-tap pawn: wait 250ms only for this case so
+        // non-eligible single taps keep 0ms latency.
+        clearPendingTap();
+        const savedEpoch = turnEpoch;
+        const savedTok = v.t;
+        const timer = setTimeout(() => {
+            if (pendingTapState && pendingTapState.timer === timer) {
+                pendingTapState = null;
+            }
+            if (dead || !waitChoice || turnEpoch !== savedEpoch) return;
+            if (!isOnline() && (localTurnAutoPlay || isAI(current))) return;
+            if (isOnline() && multiplayerClient.myPlayerIndex !== current) return;
+            if (!singleMove) {
+                setStatus(tr(lang, 'pieceNeedsOtherDie'));
+                flashDies();
+                return;
+            }
+            selDie = singleMove.die;
+            executePlayerMove(singleMove);
+        }, DOUBLE_TAP_WINDOW_MS);
+        pendingTapState = { tok: savedTok, timer, epoch: savedEpoch };
     }
     function flashDies() {
         dieFlash = 900;
@@ -2258,6 +2645,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
 
     // ---------------------------------------------------------------- the game flow
     async function rollDice(p: number, forced?: [number, number], expectedEpoch?: number): Promise<{ a: number; b: number; lucky: boolean }> {
+        clearPendingTap();
         let a = forced ? forced[0] : randDie();
         let b = forced ? forced[1] : randDie();
         const lucky = luckySevenAllowed(tokens, p) && isLuckySum(a, b) && !(a === 6 && b === 6);
@@ -2301,11 +2689,35 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         else for (let r = from + 1; r <= m.to; r++) pts.push(boardPos(p, r, m.tok));
         const kind = seatTokenKind(p);
         const loco = getTokenLocomotion(kind, from === IN_BASE);
-        if (kind === 'default') {
-            sfx.carMove(Math.min(2600, (pts.length - 1) * loco.stepMs));
+        const steps = Math.max(0, pts.length - 1);
+        const isBurnoutSprint = kind === 'default' && from >= 0 && !m.fromBase && steps >= 9;
+
+        if (isBurnoutSprint) {
+            const revMs = 450;
+            v.burnoutPhase = 'rev';
+            v.burnoutStartedAt = now;
+            v.burnoutRevDurationMs = revMs;
+            v.burnoutEmitAccumMs = 0;
+            sfx.playBurnoutLaunch(revMs);
+            await delay(revMs, expectedEpoch !== undefined);
+            if (dead || (expectedEpoch !== undefined && isOnline() && turnEpoch !== expectedEpoch)) {
+                v.burnoutPhase = 'none';
+                return;
+            }
+            v.burnoutPhase = 'sprint';
+            v.burnoutEmitAccumMs = 0;
+            await tween(v, pts, 125, 0, expectedEpoch, 'skid', true);
+            v.burnoutPhase = 'none';
+            if (!dead && (expectedEpoch === undefined || !isOnline() || turnEpoch === expectedEpoch)) {
+                emitBrakeBurst(v);
+            }
+        } else {
+            if (kind === 'default') {
+                sfx.carMove(Math.min(2600, steps * loco.stepMs));
+            }
+            // the token keeps its old logical position until the move ends
+            await tween(v, pts, loco.stepMs, loco.hop, expectedEpoch, loco.mode, false);
         }
-        // the token keeps its old logical position until the move ends
-        await tween(v, pts, loco.stepMs, loco.hop, expectedEpoch, loco.mode);
         // Never overwrite authoritative synced state if turn already changed mid-animation
         if (expectedEpoch === undefined || !isOnline() || turnEpoch === expectedEpoch) {
             tokens[p][m.tok] = m.to;
@@ -2318,13 +2730,15 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         const to = boardPos(p, IN_BASE, t);
         const kind = seatTokenKind(p);
         const loco = getTokenLocomotion(kind, false);
+        const grounded = loco.mode === 'slither' || loco.mode === 'skid';
         await tween(
             v,
             [from, to],
             ms,
-            loco.mode === 'slither' ? 0 : 1.8,
+            grounded ? 0 : 1.8,
             undefined,
-            loco.mode === 'slither' ? 'slither' : 'hop',
+            grounded ? loco.mode : 'hop',
+            false,
         );
         tokens[p][t] = IN_BASE;
     }
@@ -2496,6 +2910,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                     sfx.tick();
                 }
                 if (left <= 0) {
+                    clearPendingTap();
                     localTurnAutoPlay = true;
                     if (turnTimerInterval) {
                         clearInterval(turnTimerInterval);
@@ -2883,6 +3298,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             clearHighlights();
             return extra;
         } finally {
+            clearPendingTap();
             sfx.stopHeartbeat();
             if (turnTimerInterval) {
                 clearInterval(turnTimerInterval);
@@ -2898,6 +3314,8 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     }
 
     function finish() {
+        clearPendingTap();
+        clearBurnoutEffects();
         sfx.stopHeartbeat();
         const rows = [0, 1, 2, 3]
             .filter((p) => active[p])
@@ -3012,6 +3430,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         drawThemedBoardFX(boardFxG, (x, y, z = 0) => P(x, y, z), resolveBoardTheme(st.boardTheme), now, S);
         bgFill.tint = 0xffffff;
         updateTokens(now, dt);
+        updateBurnoutParticles(dt, now);
         updatePlates(dt);
         if (homeCenterTxt?.position && homeCenterTxt?.scale && !homeCenterTxt.destroyed) {
             const midP = P(7.5, 7.5, 0.05);
@@ -3050,6 +3469,8 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
     return {
         destroy() {
             dead = true;
+            clearPendingTap();
+            clearBurnoutEffects();
             if (typeof document !== 'undefined') {
                 document.removeEventListener('visibilitychange', onVisibilityChange);
             }

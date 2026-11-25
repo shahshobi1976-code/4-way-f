@@ -313,6 +313,116 @@ export function carMove(ms: number) {
     o2.stop(t0 + dur + 0.05);
 }
 
+/**
+ * Rising turbo engine rev-up (~450ms) + tire burnout hiss + launch whoosh
+ * for Classic token 9+ step sprints.
+ */
+export function playBurnoutLaunch(revMs = 450) {
+    if (!soundOn()) return;
+    const a = audio();
+    if (!a) return;
+    try {
+        const { c, out } = a;
+        const t0 = c.currentTime;
+        const revDur = Math.max(0.25, Math.min(0.65, revMs / 1000));
+
+        // 1. Rising twin-oscillator turbo engine rev-up
+        const eng1 = c.createOscillator();
+        const eng2 = c.createOscillator();
+        const engLp = c.createBiquadFilter();
+        const engGain = c.createGain();
+        eng1.type = 'sawtooth';
+        eng2.type = 'triangle';
+        eng1.frequency.setValueAtTime(68, t0);
+        eng1.frequency.exponentialRampToValueAtTime(245, t0 + revDur);
+        eng1.frequency.exponentialRampToValueAtTime(310, t0 + revDur + 0.22);
+        eng1.frequency.exponentialRampToValueAtTime(165, t0 + revDur + 0.55);
+
+        eng2.frequency.setValueAtTime(136, t0);
+        eng2.frequency.exponentialRampToValueAtTime(490, t0 + revDur);
+        eng2.frequency.exponentialRampToValueAtTime(620, t0 + revDur + 0.22);
+        eng2.frequency.exponentialRampToValueAtTime(320, t0 + revDur + 0.55);
+
+        engLp.type = 'lowpass';
+        engLp.frequency.setValueAtTime(360, t0);
+        engLp.frequency.exponentialRampToValueAtTime(2400, t0 + revDur);
+        engLp.frequency.exponentialRampToValueAtTime(1100, t0 + revDur + 0.55);
+
+        engGain.gain.setValueAtTime(0.0001, t0);
+        engGain.gain.linearRampToValueAtTime(0.24, t0 + 0.06);
+        engGain.gain.setValueAtTime(0.26, t0 + revDur);
+        engGain.gain.exponentialRampToValueAtTime(0.001, t0 + revDur + 0.58);
+
+        eng1.connect(engLp);
+        eng2.connect(engLp);
+        engLp.connect(engGain).connect(out);
+        eng1.start(t0);
+        eng2.start(t0);
+        eng1.stop(t0 + revDur + 0.6);
+        eng2.stop(t0 + revDur + 0.6);
+
+        // Subtle high-pitched turbo spool whistle during rev-up
+        const turbo = c.createOscillator();
+        const turboGain = c.createGain();
+        turbo.type = 'sine';
+        turbo.frequency.setValueAtTime(1350, t0 + 0.04);
+        turbo.frequency.exponentialRampToValueAtTime(3350, t0 + revDur);
+        turboGain.gain.setValueAtTime(0.0001, t0 + 0.04);
+        turboGain.gain.linearRampToValueAtTime(0.055, t0 + revDur * 0.7);
+        turboGain.gain.exponentialRampToValueAtTime(0.001, t0 + revDur + 0.14);
+        turbo.connect(turboGain).connect(out);
+        turbo.start(t0 + 0.04);
+        turbo.stop(t0 + revDur + 0.16);
+
+        // 2. Tire burnout hiss (bandpass noise over the rev-up phase)
+        const hissSrc = c.createBufferSource();
+        hissSrc.buffer = noiseBuffer(c, revDur + 0.12);
+        const hissBp = c.createBiquadFilter();
+        hissBp.type = 'bandpass';
+        hissBp.frequency.setValueAtTime(1600, t0);
+        hissBp.frequency.exponentialRampToValueAtTime(2750, t0 + revDur);
+        hissBp.Q.value = 1.9;
+        const hissGain = c.createGain();
+        hissGain.gain.setValueAtTime(0.0001, t0 + 0.03);
+        hissGain.gain.linearRampToValueAtTime(0.21, t0 + 0.11);
+        hissGain.gain.setValueAtTime(0.19, t0 + revDur * 0.88);
+        hissGain.gain.exponentialRampToValueAtTime(0.001, t0 + revDur + 0.08);
+        hissSrc.connect(hissBp).connect(hissGain).connect(out);
+        hissSrc.start(t0);
+        hissSrc.stop(t0 + revDur + 0.1);
+
+        // 3. Launch whoosh + punchy take-off thump right as rev-up releases
+        const launchT = t0 + revDur - 0.02;
+        const whooshSrc = c.createBufferSource();
+        whooshSrc.buffer = noiseBuffer(c, 0.45);
+        const whooshBp = c.createBiquadFilter();
+        whooshBp.type = 'bandpass';
+        whooshBp.frequency.setValueAtTime(2600, launchT);
+        whooshBp.frequency.exponentialRampToValueAtTime(480, launchT + 0.38);
+        whooshBp.Q.value = 1.3;
+        const whooshGain = c.createGain();
+        whooshGain.gain.setValueAtTime(0.0001, launchT);
+        whooshGain.gain.linearRampToValueAtTime(0.32, launchT + 0.04);
+        whooshGain.gain.exponentialRampToValueAtTime(0.001, launchT + 0.42);
+        whooshSrc.connect(whooshBp).connect(whooshGain).connect(out);
+        whooshSrc.start(launchT);
+        whooshSrc.stop(launchT + 0.44);
+
+        const thump = c.createOscillator();
+        const thumpGain = c.createGain();
+        thump.type = 'triangle';
+        thump.frequency.setValueAtTime(148, launchT);
+        thump.frequency.exponentialRampToValueAtTime(46, launchT + 0.22);
+        thumpGain.gain.setValueAtTime(0.32, launchT);
+        thumpGain.gain.exponentialRampToValueAtTime(0.001, launchT + 0.24);
+        thump.connect(thumpGain).connect(out);
+        thump.start(launchT);
+        thump.stop(launchT + 0.26);
+    } catch {
+        // Ignore audio errors when Web Audio is restricted
+    }
+}
+
 export function fanfare() {
     if (!soundOn()) return;
     const a = audio();

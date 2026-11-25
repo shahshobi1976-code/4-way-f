@@ -336,7 +336,8 @@ class MultiplayerClient {
             }
         });
 
-        this.socket.on('pawn_moved', (data: { p: number; dieIndex: number; tokenIndex: number; to: number; captures: { p: number; t: number }[]; reachedHome: boolean; diceUsed: [boolean, boolean]; passed?: boolean }) => {
+        this.socket.on('pawn_moved', (data: { p: number; dieIndex: number | 'combined'; tokenIndex: number; to: number; captures: { p: number; t: number }[]; reachedHome: boolean; diceUsed: [boolean, boolean]; passed?: boolean }) => {
+            const normDie = data.dieIndex === 'combined' ? 2 : data.dieIndex;
             if (this.roomState) {
                 this.roomState.tokens[data.p][data.tokenIndex] = data.to;
                 this.roomState.diceUsed = data.diceUsed;
@@ -348,7 +349,7 @@ class MultiplayerClient {
 
             // Trigger local Pixi pawn move hop or pass
             if (bus.onRemotePawnMoved) {
-                bus.onRemotePawnMoved(data.p, data.dieIndex, data.tokenIndex, data.to, data.captures, data.reachedHome, data.passed);
+                bus.onRemotePawnMoved(data.p, normDie, data.tokenIndex, data.to, data.captures, data.reachedHome, data.passed);
             }
         });
 
@@ -924,14 +925,15 @@ class MultiplayerClient {
         });
     }
 
-    public movePawn(dieIndex: number, tokenIndex: number, action: 'gul' | 'pass' = 'gul'): Promise<{ ok: boolean; error?: string }> {
+    public movePawn(dieIndex: number | 'combined', tokenIndex: number, action: 'gul' | 'pass' = 'gul'): Promise<{ ok: boolean; error?: string }> {
         return new Promise((resolve) => {
             if (!this.socket || !this.roomCode) return resolve({ ok: false, error: 'No room' });
             let timer: any = setTimeout(() => {
                 timer = null;
                 resolve({ ok: false, error: 'Network timeout' });
             }, 3500);
-            this.socket.emit('move_pawn', { roomCode: this.roomCode, sessionToken: this.sessionToken, dieIndex, tokenIndex, action }, (res: any) => {
+            const wireDie: number | 'combined' = dieIndex === 2 ? 'combined' : dieIndex;
+            this.socket.emit('move_pawn', { roomCode: this.roomCode, sessionToken: this.sessionToken, dieIndex: wireDie, tokenIndex, action }, (res: any) => {
                 if (timer) {
                     clearTimeout(timer);
                     timer = null;

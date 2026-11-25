@@ -18,6 +18,8 @@ import {
     newTokens,
     legalMoves,
     legalMovesForTurn,
+    findCombinedSprintMove,
+    legalCombinedSprintMoves,
     maxCaptures,
     findOffendingToken,
     evaluateCaptureObligation,
@@ -807,7 +809,7 @@ console.log('--- RUNNING LUDO RULES & PENALTY & GUL TEST SUITE ---');
         const dyOpp = (pipPts[5] + pipPts[19]) / 2 - cyPip;
         assert(Math.hypot(dxOpp, dyOpp) < 1e-6, 'Projected side-face pip stays centered and balanced in its 3D face plane');
     }
-    assert(BGM_TRACKS.length === 7, `7 Bundled MP3 BGM tracks registered (got ${BGM_TRACKS.length})`);
+    assert(BGM_TRACKS.length === 10, `10 Bundled MP3 BGM tracks registered (got ${BGM_TRACKS.length})`);
     assert(BGM_TRACKS.some((t) => t.id === DEFAULT_BGM_TRACK), 'DEFAULT_BGM_TRACK matches a valid bundled soundtrack');
     for (const track of BGM_TRACKS) {
         const audioPath = path.resolve(process.cwd(), 'public', track.url.replace(/^\//, ''));
@@ -1281,6 +1283,119 @@ async function runAsyncRoomCodeTests() {
                 Math.abs(homeDir[0] - expX) < 1e-4 && Math.abs(homeDir[1] - expY) < 1e-4,
                 `Seat ${p} finished in Centre Home faces inward (${expX},${expY})`,
             );
+        }
+        // 28: Classic 'skid' locomotion, Multi-Token Combined Sprints (9-12 steps), & Server 'combined' handler
+        {
+            const classicLoco = getTokenLocomotion('default', false);
+            const classicBaseLoco = getTokenLocomotion('default', true);
+            assert(
+                classicLoco.mode === 'skid' && classicLoco.hop === 0 && classicLoco.movableBounce === 0,
+                "Classic 'default' token uses grounded 'skid' locomotion with zero hop and zero idle bounce",
+            );
+            assert(
+                classicBaseLoco.mode === 'skid' && classicBaseLoco.hop === 0,
+                "Classic 'default' token exits base using grounded 'skid' locomotion",
+            );
+
+            // Multi-token combined sprint legality across 9-12 steps
+            const sprintToks = newTokens();
+            sprintToks[0] = [5, 18, IN_BASE, HOME]; // 2 on track (0,1), 1 in base (2), 1 finished (3)
+            sprintToks[1] = [(15 - 13 + 52) % 52, IN_BASE, IN_BASE, IN_BASE]; // seat 1 at global 15 (seat 0 rel 15 = 5 + 10)
+            const active4 = [true, true, true, true];
+
+            for (const pair of [
+                [5, 4],
+                [6, 3],
+                [5, 5],
+                [6, 4],
+                [6, 5],
+                [6, 6],
+            ] as [number, number][]) {
+                const mv0 = findCombinedSprintMove(sprintToks, 0, 0, pair, [false, false], active4);
+                const sum = pair[0] + pair[1];
+                assert(
+                    !!mv0 && mv0.die === 2 && mv0.combined === true && mv0.value === sum && mv0.to === 5 + sum,
+                    `findCombinedSprintMove supports ${sum}-step sprint ([${pair[0]},${pair[1]}]) even with multiple active tokens`,
+                );
+            }
+
+            // Base pawn & finished pawn rejected; partial remaining die rejected; overshoot > 56 rejected
+            assert(
+                findCombinedSprintMove(sprintToks, 0, 2, [6, 4], [false, false], active4) === undefined,
+                'IN_BASE pawn cannot use combined double-tap sprint even with a 6',
+            );
+            assert(
+                findCombinedSprintMove(sprintToks, 0, 3, [6, 4], [false, false], active4) === undefined,
+                'Finished HOME pawn cannot use combined double-tap sprint',
+            );
+            assert(
+                findCombinedSprintMove(sprintToks, 0, 0, [6, 4], [true, false], active4) === undefined,
+                'Combined double-tap sprint requires both dice unused',
+            );
+            const nearHomeToks = newTokens();
+            nearHomeToks[0] = [48, 10, IN_BASE, IN_BASE];
+            assert(
+                findCombinedSprintMove(nearHomeToks, 0, 0, [5, 4], [false, false], active4) === undefined,
+                'Combined sprint exceeding CENTER_HOME_POS (48 + 9 = 57) is rejected',
+            );
+            const allMultiSprints = legalCombinedSprintMoves(sprintToks, 0, [6, 4], [false, false], active4);
+            assert(
+                allMultiSprints.length === 2 && allMultiSprints.every((m) => m.die === 2 && m.value === 10),
+                'legalCombinedSprintMoves finds combined sprint options for all eligible on-path tokens',
+            );
+
+            // Authoritative server movePawn accepts dieIndex === 'combined' on multi-token boards (capture & 10-step sprint)
+            const spEvents: { event: string; payload: any }[] = [];
+            roomManager.setBroadcastCallback((_c, ev, pl) => spEvents.push({ event: ev, payload: pl }));
+            const spRes = roomManager.createRoom('tok_comb_sprint_host_123456789', 'SprintHost', '👑', 'sock_sp_h', 90, 4, '10.20.0.55');
+            assert(spRes.ok && !!spRes.roomCode, `Created room for multi-token combined sprint test (${spRes.error || 'ok'})`);
+            roomManager.startGame(spRes.roomCode!, 'tok_comb_sprint_host_123456789');
+            const spRoom = roomManager.getRoom(spRes.roomCode!)!;
+            spRoom.phase = 'playing';
+            spRoom.currentTurn = 0;
+            spRoom.tokens = sprintToks.map((r) => r.slice());
+            spRoom.initialTurnTokens = spRoom.tokens.map((r) => r.slice());
+            spRoom.dice = [6, 4]; // 10 steps: tok 0 from 5 -> 15 capturing seat 1!
+            spRoom.diceUsed = [false, false];
+
+            // IN_BASE pawn rejected on 'combined'
+            const baseReject = roomManager.movePawn(spRoom.code, 'tok_comb_sprint_host_123456789', 'combined', 2, 'gul');
+            assert(!baseReject.ok, "Server rejects 'combined' move on IN_BASE token");
+
+            // Active pawn 0 executes 10-step combined sprint via 'combined' and captures opponent
+            const combExec = roomManager.movePawn(spRoom.code, 'tok_comb_sprint_host_123456789', 'combined', 0, 'gul');
+            const combEvt = spEvents.find((e) => e.event === 'pawn_moved' && e.payload?.tokenIndex === 0);
+            assert(
+                combExec.ok &&
+                    spRoom.tokens[0][0] === 15 &&
+                    spRoom.tokens[1][0] === IN_BASE &&
+                    spRoom.diceUsed[0] &&
+                    spRoom.diceUsed[1] &&
+                    combEvt?.payload?.dieIndex === 2 &&
+                    combEvt?.payload?.to === 15,
+                "Server executes multi-token 10-step 'combined' sprint, captures opponent, and consumes both dice",
+            );
+
+            // Multi-token combined sprint directly into CENTER_HOME_POS (47 + [5,4] = 56) skips manual Gul modal
+            spEvents.length = 0;
+            spRoom.currentTurn = 0;
+            spRoom.tokens = newTokens();
+            spRoom.tokens[0] = [47, 12, IN_BASE, IN_BASE]; // 2 active tokens on board
+            spRoom.initialTurnTokens = spRoom.tokens.map((r) => r.slice());
+            spRoom.dice = [5, 4];
+            spRoom.diceUsed = [false, false];
+            assert(
+                shouldPromptGulChoice(spRoom.tokens, 0, 9, 'combined', spRoom.dice, spRoom.initialTurnTokens, 0) === false,
+                "2+ active tokens reaching Gul on 9-step 'combined' sprint skip Gul or Pass modal",
+            );
+            const passRej = roomManager.movePawn(spRoom.code, 'tok_comb_sprint_host_123456789', 'combined', 0, 'pass');
+            assert(!passRej.ok, "Server rejects 'pass' on multi-token combined Gul sprint");
+            const multiHomeExec = roomManager.movePawn(spRoom.code, 'tok_comb_sprint_host_123456789', 'combined', 0, 'gul');
+            assert(
+                multiHomeExec.ok && spRoom.tokens[0][0] === CENTER_HOME_POS,
+                "Multi-token 9-step 'combined' sprint completes Centre Home directly on server",
+            );
+            roomManager.setBroadcastCallback(() => {});
         }
     }
 

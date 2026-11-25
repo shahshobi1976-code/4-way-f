@@ -417,6 +417,61 @@ export function legalMovesForTurn(
     return out;
 }
 
+/**
+ * Resolves a combined double-die sprint (`die: 2, combined: true`) for any active
+ * `'on-path'` token (`0 <= r < CENTER_HOME_POS`) when both dice remain unspent.
+ * - Pawns still in base (`IN_BASE`) are never eligible for combined moves (must exit on 6).
+ * - Preserves exact `<= CENTER_HOME_POS` target bounds, safe-square checks, and captures.
+ */
+export function findCombinedSprintMove(
+    tokens: Tokens,
+    p: number,
+    tok: number,
+    dice: number[],
+    diceUsed: [boolean, boolean],
+    active: boolean[],
+): Move | undefined {
+    if (!dice || dice.length < 2 || diceUsed[0] || diceUsed[1]) return undefined;
+    const d0 = dice[0] ?? 0;
+    const d1 = dice[1] ?? 0;
+    if (d0 <= 0 || d1 <= 0) return undefined;
+    if (tok < 0 || tok >= 4) return undefined;
+    const r = tokens[p]?.[tok];
+    if (r === undefined || r === IN_BASE || r < 0 || r >= CENTER_HOME_POS) return undefined;
+
+    const total = d0 + d1;
+    const to = r + total;
+    if (to > CENTER_HOME_POS) return undefined;
+
+    const captures = capturesOnSquare(tokens, p, tok, to, active);
+    return {
+        tok,
+        to,
+        die: 2,
+        value: total,
+        captures,
+        fromBase: false,
+        reachesHome: to === CENTER_HOME_POS,
+        combined: true,
+    };
+}
+
+/** All legal combined-sprint moves across all `'on-path'` tokens of player `p`. */
+export function legalCombinedSprintMoves(
+    tokens: Tokens,
+    p: number,
+    dice: number[],
+    diceUsed: [boolean, boolean],
+    active: boolean[],
+): Move[] {
+    const res: Move[] = [];
+    for (let t = 0; t < 4; t++) {
+        const mv = findCombinedSprintMove(tokens, p, t, dice, diceUsed, active);
+        if (mv) res.push(mv);
+    }
+    return res;
+}
+
 /** Full path length for a player's colour: open track (51) + coloured home stretch (5) + centre home (1) = 57. */
 export function getPathLength(color = 0): number {
     return (LAST_TRACK + 1) + (HOME_COL[color]?.length ?? 5) + 1;

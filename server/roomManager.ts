@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+    findCombinedSprintMove,
     legalMovesForTurn,
     newTokens,
     randDie,
@@ -1210,7 +1211,7 @@ class RoomManager {
     public movePawn(
         code: string,
         sessionToken: string,
-        dieIndex: number,
+        dieIndex: number | 'combined',
         tokenIndex: number,
         action: 'gul' | 'pass' = 'gul',
         forced = false,
@@ -1227,17 +1228,21 @@ class RoomManager {
             }
         }
         if (!room.dice) return { ok: false, error: 'Dice not rolled' };
-        if (dieIndex === 2) {
+        const normDieIndex = dieIndex === 'combined' ? 2 : dieIndex;
+        if (normDieIndex === 2) {
             if (room.diceUsed[0] || room.diceUsed[1]) return { ok: false, error: 'Die already used' };
-        } else if (dieIndex === 0 || dieIndex === 1) {
-            if (room.diceUsed[dieIndex]) return { ok: false, error: 'Die already used' };
+        } else if (normDieIndex === 0 || normDieIndex === 1) {
+            if (room.diceUsed[normDieIndex]) return { ok: false, error: 'Die already used' };
         } else {
             return { ok: false, error: 'Invalid die index' };
         }
 
         const activeBools = room.players.map((p) => p !== null);
         const legal = legalMovesForTurn(room.tokens, room.currentTurn, room.dice, room.diceUsed, activeBools);
-        const move = legal.find((m) => m.die === dieIndex && m.tok === tokenIndex);
+        const move = normDieIndex === 2
+            ? legal.find((m) => m.die === 2 && m.tok === tokenIndex) ||
+              findCombinedSprintMove(room.tokens, room.currentTurn, tokenIndex, room.dice, room.diceUsed, activeBools)
+            : legal.find((m) => m.die === normDieIndex && m.tok === tokenIndex);
         if (!move) return { ok: false, error: 'Illegal move' };
 
         if (action === 'pass') {
@@ -1246,7 +1251,7 @@ class RoomManager {
                     room.tokens,
                     room.currentTurn,
                     move.value,
-                    dieIndex,
+                    normDieIndex,
                     room.dice,
                     room.initialTurnTokens,
                     tokenIndex,
@@ -1262,7 +1267,7 @@ class RoomManager {
 
             this.broadcast(room.code, 'pawn_moved', {
                 p: room.currentTurn,
-                dieIndex,
+                dieIndex: normDieIndex,
                 tokenIndex,
                 to: room.tokens[room.currentTurn][tokenIndex],
                 captures: [],
@@ -1286,8 +1291,8 @@ class RoomManager {
         const preRivalry = evaluateRivalryState(room.tokens, -1, activeBools);
         const prevTokenPos = room.tokens[room.currentTurn][tokenIndex];
         room.tokens[room.currentTurn][tokenIndex] = move.to;
-        if (dieIndex === 2) room.diceUsed = [true, true];
-        else room.diceUsed[dieIndex] = true;
+        if (normDieIndex === 2) room.diceUsed = [true, true];
+        else room.diceUsed[normDieIndex] = true;
 
         if (!room.turnMovedToSquare) room.turnMovedToSquare = {};
         const destKey =
@@ -1367,7 +1372,7 @@ class RoomManager {
 
         this.broadcast(room.code, 'pawn_moved', {
             p: room.currentTurn,
-            dieIndex,
+            dieIndex: normDieIndex,
             tokenIndex,
             to: move.to,
             captures: move.captures,

@@ -1,4 +1,4 @@
-// Background music using the 7 bundled MP3 soundtracks, plus optional user-chosen device song.
+// Background music using the 10 bundled MP3 soundtracks, plus optional user-chosen device song.
 import { audio } from './sfx';
 import { store } from '../state/store';
 
@@ -16,6 +16,9 @@ export const BGM_TRACKS: BgmTrack[] = [
     { id: 'latin', label: 'Latin Groove', url: '/audio/bgm-latin.mp3' },
     { id: 'nature', label: 'Nature Ambient', url: '/audio/bgm-nature.mp3' },
     { id: 'rap', label: 'Urban Beat', url: '/audio/bgm-rap.mp3' },
+    { id: 'classic-ludo', label: 'Classic Ludo', url: '/audio/bgm-classic-ludo.mp3' },
+    { id: 'royal-ambience', label: 'Royal Ambience', url: '/audio/bgm-royal-ambience.mp3' },
+    { id: 'modern-beats', label: 'Modern Chill', url: '/audio/bgm-modern-beats.mp3' },
 ];
 
 export const DEFAULT_BGM_TRACK = BGM_TRACKS[0].id;
