@@ -46,7 +46,7 @@ export function App() {
             frame.classList.toggle('land', land);
 
             // Compute frame width for accurate design-unit (--u) scaling in portrait vs landscape
-            const frameW = land ? vw : Math.min(vw, (vh * 9) / 16);
+            const frameW = vw;
             const u = land
                 ? Math.min(vh / 680, vw / 960)
                 : Math.min(frameW / 420, vh / 740);

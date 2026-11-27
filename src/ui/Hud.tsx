@@ -92,7 +92,7 @@ function TurnTimer({ compact = false }: { compact?: boolean }) {
     );
 }
 
-/** Joint percentage bar where players are joined into a continuous bar and higher percentage shows bigger segment */
+/** Joint percentage bar where all 4 players are displayed cleanly, sorted by progress % and non-clickable */
 function JointPercentageBar({ compact = false }: { compact?: boolean }) {
     const progress = useStore((s) => s.progress);
     const active = useStore((s) => s.active);
@@ -100,47 +100,56 @@ function JointPercentageBar({ compact = false }: { compact?: boolean }) {
     const lang = useStore((s) => s.settings.lang);
     const current = useStore((s) => s.current);
     const rivalry = useStore((s) => s.rivalry);
-    const idxs = [0, 1, 2, 3].filter((i) => active[i]);
+
+    // Show all 4 players sorted by active status first, then descending progress %
+    const idxs = [0, 1, 2, 3].sort((a, b) => {
+        const activeDiff = (active[b] ? 1 : 0) - (active[a] ? 1 : 0);
+        if (activeDiff !== 0) return activeDiff;
+        const pctDiff = (progress[b] || 0) - (progress[a] || 0);
+        if (pctDiff !== 0) return pctDiff;
+        return a - b;
+    });
 
     const nm = (i: number) => {
         const n = (players[i]?.name || '').trim();
         return !n || ['red', 'green', 'yellow', 'cyan', 'blue'].includes(n.toLowerCase()) ? colorName(lang, i) : n;
     };
 
-    // Calculate dynamic proportional widths:
-    // The player with more percentage shows big, while the player with less shows less color.
-    // We guarantee a minimum visible slice (minShare) so names/colors are always readable.
-    const minShare = 10;
-    const totalProgress = idxs.reduce((sum, i) => sum + (progress[i] || 0), 0);
+    // Guarantee balanced minimum segment width so all 4 players and percentages never truncate
+    const minShare = 18;
+    const totalProgress = idxs.reduce((sum, i) => sum + (active[i] ? (progress[i] || 0) : 0), 0);
     const pool = Math.max(0, 100 - idxs.length * minShare);
 
     const widths = idxs.map((i) => {
         if (totalProgress === 0) {
             return 100 / idxs.length;
         }
-        const proportionalShare = ((progress[i] || 0) / totalProgress) * pool;
+        const val = active[i] ? (progress[i] || 0) : 0;
+        const proportionalShare = (val / totalProgress) * pool;
         return minShare + proportionalShare;
     });
 
     return (
         <div
-            className={`relative flex items-stretch rounded-xl overflow-hidden border-2 border-white/40 shadow-xl backdrop-blur-md bg-black/60 select-none ${
-                compact ? 'max-w-[420px]' : 'w-full'
-            }`}
+            id="ai-judge-bar"
+            className="pointer-events-none relative flex items-stretch rounded-xl overflow-hidden border-2 border-white/40 shadow-xl backdrop-blur-md bg-black/60 select-none w-full"
             style={{
                 height: U(30),
             }}
         >
             {idxs.map((i, index) => {
-                const isTurn = current === i;
+                const isActive = !!active[i];
+                const isTurn = isActive && current === i;
                 const widthPct = widths[index];
-                const pct = progress[i] || 0;
-                const isDethroneTarget = rivalry?.tier === 'dethrone' && rivalry.leaderIdx === i;
+                const pct = isActive ? (progress[i] || 0) : 0;
+                const isDethroneTarget = isActive && rivalry?.tier === 'dethrone' && rivalry.leaderIdx === i;
                 return (
                     <div
                         key={i}
-                        className={`relative flex items-center justify-center font-black text-white text-center transition-[width] duration-500 ease-out overflow-hidden ${
-                            isDethroneTarget
+                        className={`pointer-events-none relative flex items-center justify-center font-black text-white text-center transition-[width] duration-500 ease-out overflow-hidden ${
+                            !isActive
+                                ? 'opacity-45 grayscale-[35%]'
+                                : isDethroneTarget
                                 ? 'brightness-110 z-20'
                                 : isTurn
                                 ? 'brightness-110 drop-shadow-[0_0_8px_rgba(255,255,255,0.8)] z-10'
@@ -157,7 +166,6 @@ function JointPercentageBar({ compact = false }: { compact?: boolean }) {
                                 ? 'inset 0 0 0 2px #ff4757, 0 0 12px rgba(255,71,87,0.85)'
                                 : undefined,
                         }}
-                        title={isDethroneTarget ? `🎯 Target: ${nm(i)} (${pct}%)` : `${nm(i)}: ${pct}%`}
                     >
                         {/* Glowing active turn indicator atop the segment */}
                         {isTurn && (
@@ -171,27 +179,25 @@ function JointPercentageBar({ compact = false }: { compact?: boolean }) {
                             />
                         )}
 
-                        {/* Responsive label adapting to dynamic segment width */}
+                        {/* Balanced label with non-truncating percentage */}
                         <div
-                            className="px-1.5 flex items-center justify-center gap-1 truncate font-black tracking-wide"
-                            style={{ fontSize: U(13) }}
+                            className="px-1 flex items-center justify-center gap-1 min-w-0 font-black tracking-tight"
+                            style={{ fontSize: compact ? '12px' : U(12) }}
                         >
                             {isDethroneTarget && (
                                 <span className="shrink-0 leading-none" aria-label="Dethrone Target">
                                     🎯
                                 </span>
                             )}
-                            {widthPct > 24 ? (
-                                <span className="truncate">
-                                    {nm(i)}: {pct}%
+                            {widthPct > 23 && (
+                                <span className="truncate min-w-0">
+                                    {nm(i)}
                                 </span>
-                            ) : widthPct > 15 ? (
-                                <span className="truncate">
-                                    {players[i]?.avatar || ''} {pct}%
-                                </span>
-                            ) : (
-                                <span>{pct}%</span>
                             )}
+                            {widthPct <= 23 && players[i]?.avatar && (
+                                <span className="shrink-0 leading-none text-[11px]">{players[i].avatar}</span>
+                            )}
+                            <span className="shrink-0 whitespace-nowrap font-mono">{pct}%</span>
                         </div>
                     </div>
                 );
@@ -233,22 +239,27 @@ function LuckyWishButton({ compact = false }: { compact?: boolean }) {
 }
 
 /** Landscape / Web Top Bar:
- * - Royal Watch (Turn Timer) centered above the board
- * - Joint Progress Bar (all players combined together) in the TOP-RIGHT corner
+ * - Royal Watch (Turn Timer) centered above the board (#turn-timer-container)
+ * - Non-clickable Joint Progress Bar (all 4 players) widened at top: 20px; right: 20px (#ai-judge-bar)
  */
 function LandscapeTopHud() {
     return (
         <>
             {/* Top-Center Above Board: Royal Watch (Turn Timer) */}
-            <div className="absolute top-2.5 left-[30%] -translate-x-1/2 z-20 pointer-events-auto flex items-center">
+            <div
+                id="turn-timer-container"
+                className="pointer-events-none absolute top-2.5 -translate-x-1/2 z-20 flex items-center"
+                style={{ left: 'var(--board-cx, 30%)' }}
+            >
                 <TurnTimer compact />
             </div>
 
-            {/* Top-Right: Combined Joint Progress Bar */}
-            <div className="absolute top-2.5 right-4 z-20 flex items-center gap-2.5 pointer-events-auto">
-                <div style={{ width: U(340), maxWidth: '42vw' }}>
-                    <JointPercentageBar compact />
-                </div>
+            {/* Top-Right: Widened Non-Clickable All-4-Players Joint Progress Bar */}
+            <div
+                className="pointer-events-none absolute z-20 flex items-center"
+                style={{ top: '20px', right: '20px', width: 'min(477px, 44vw)' }}
+            >
+                <JointPercentageBar compact />
             </div>
         </>
     );
@@ -715,6 +726,7 @@ export function Hud() {
     const captureNotice = useStore((s) => s.captureNotice);
     const skipCapturePrompt = useStore((s) => s.skipCapturePrompt);
     const rivalryBanner = useStore((s) => s.rivalryBanner);
+    const adBannerBound = useStore((s) => s.adBannerBound);
 
     const [, setNetTick] = useState(0);
     const chatOpen = useStore((s) => s.chatOpen);
@@ -747,6 +759,7 @@ export function Hud() {
     const offlineNotice = multiplayerClient.offlineNotice;
     const toastNotice = multiplayerClient.toastNotice;
     const blockedAutoplayClip = multiplayerClient.blockedAutoplayClip;
+    const activeVoiceSeat = multiplayerClient.activeVoiceSeat;
     const chatLog = multiplayerClient.chatLog;
 
     const cleanPlayerName = (raw: string): string => {
@@ -802,27 +815,112 @@ export function Hud() {
 
     return (
         <>
-            {/* Top HUD */}
+            {/* Top HUD (non-clickable #ai-judge-bar + #turn-timer-container) */}
             {landscape ? (
                 <LandscapeTopHud />
             ) : (
-                /* Vertical Top: Progress bar + Centered Timer above the board */
-                <div className="absolute top-2.5 inset-x-3 z-20 pointer-events-auto flex flex-col items-stretch gap-1">
+                /* Vertical Top: Non-clickable 4-Player Progress bar + Centered Timer above the board */
+                <div className="pointer-events-none absolute top-2.5 inset-x-3 z-20 flex flex-col items-stretch gap-1">
                     <div className="w-full">
                         <JointPercentageBar />
                     </div>
-                    <div className="w-full flex items-center justify-center">
+                    <div id="turn-timer-container" className="w-full flex items-center justify-center">
                         <TurnTimer compact />
                     </div>
                 </div>
             )}
 
-            {/* Projected 4-Corner Nameplate Hit Overlays, Reactions & Voice/Whisper Badges */}
+            {/* Policy-Compliant Ad Banner (#ad-banner) with >=150px separation and non-clickable buffer */}
+            {adBannerBound && adBannerBound.visible && !modal && (
+                <div
+                    id="ad-banner"
+                    role="region"
+                    aria-label="Sponsored advertisement"
+                    className={`pointer-events-none absolute z-20 flex flex-col items-center justify-center border-cyan-400/35 bg-[#090f24]/85 backdrop-blur-sm shadow-[0_0_24px_rgba(0,0,0,0.45)] overflow-hidden select-none ${
+                        adBannerBound.w > adBannerBound.h ? 'border-y rounded-none' : 'border rounded-xl'
+                    }`}
+                    style={{
+                        left: adBannerBound.w > adBannerBound.h ? 0 : `${adBannerBound.x}px`,
+                        right: adBannerBound.w > adBannerBound.h ? 0 : undefined,
+                        top: `${adBannerBound.y}px`,
+                        width: adBannerBound.w > adBannerBound.h ? '100%' : `${adBannerBound.w}px`,
+                        height: `${adBannerBound.h}px`,
+                        padding: adBannerBound.w > adBannerBound.h ? '6px 0' : '4px',
+                    }}
+                >
+                    <div
+                        className={`w-full h-full border-cyan-400/20 bg-slate-950/65 flex items-center justify-between overflow-hidden ${
+                            adBannerBound.w > adBannerBound.h ? 'border-y px-4 py-2 rounded-none' : 'rounded-lg border px-2.5 py-1.5'
+                        }`}
+                    >
+                        {adBannerBound.w > adBannerBound.h ? (
+                            <div className="flex items-center justify-between w-full gap-3">
+                                <span className="px-2 py-0.5 rounded bg-amber-400 text-slate-950 text-[10px] font-black tracking-wider uppercase shrink-0">
+                                    SPONSORED
+                                </span>
+                                <div className="flex flex-col items-center text-center min-w-0">
+                                    <span className="text-xs sm:text-sm font-extrabold text-slate-200/90 tracking-wide truncate">
+                                        Partner Placement
+                                    </span>
+                                    <span className="text-[10px] text-slate-400/80 leading-tight truncate">
+                                        Safe Display Zone
+                                    </span>
+                                </div>
+                                <span className="text-[10px] font-semibold text-cyan-300/60 uppercase tracking-widest shrink-0">
+                                    AD
+                                </span>
+                            </div>
+                        ) : (
+                            <div className="flex flex-col items-center justify-between w-full h-full py-1.5 text-center">
+                                <span className="px-2 py-0.5 rounded bg-amber-400 text-slate-950 text-[9px] font-black tracking-wider uppercase">
+                                    SPONSORED
+                                </span>
+                                <div className="flex flex-col items-center gap-1 px-2">
+                                    <span className="text-xs font-extrabold text-slate-200/85 tracking-wide">
+                                        Sponsored Space
+                                    </span>
+                                    <span className="text-[10px] text-slate-400/80 leading-tight">
+                                        Safe Display Zone
+                                    </span>
+                                </div>
+                                <span className="text-[9px] font-semibold text-cyan-300/60 uppercase tracking-widest">
+                                    AD
+                                </span>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            )}
+
+            {/* Projected 4-Corner Nameplate Hit Overlays, Profile/Mute/Whisper Interactions, Reactions & Voice Badges */}
             <NameplateOverlays />
+
+            {/* Live Voice HUD: shifted left of #ai-judge-bar in Landscape so zero overlap with bar or timer */}
+            {isMultiplayer && activeVoiceSeat !== null && (
+                <div
+                    id="live-voice-hud"
+                    className="pointer-events-none absolute z-30 flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-950/90 border border-emerald-400/70 text-emerald-200 text-xs font-black shadow-lg"
+                    style={
+                        landscape
+                            ? { top: '20px', right: 'min(508px, 47vw)' }
+                            : { top: '72px', left: '50%', transform: 'translateX(-50%)' }
+                    }
+                >
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+                    <span>🔊 {nm(activeVoiceSeat)}</span>
+                </div>
+            )}
 
             {/* Autoplay Blocked Tap-to-Hear Voice Banner */}
             {isMultiplayer && blockedAutoplayClip && (
-                <div className="absolute top-20 left-1/2 -translate-x-1/2 z-40 pointer-events-auto">
+                <div
+                    className="absolute z-40 pointer-events-auto"
+                    style={
+                        landscape
+                            ? { top: '20px', right: 'min(508px, 47vw)' }
+                            : { top: '80px', left: '50%', transform: 'translateX(-50%)' }
+                    }
+                >
                     <button
                         type="button"
                         onClick={() => multiplayerClient.playClipById(blockedAutoplayClip.id)}
@@ -1018,12 +1116,10 @@ export function Hud() {
                 popup.kind === 'penalty' ? (
                     /* Dramatic Penalty alert placed directly ON the board as a translucent glass window (.40x size) */
                     <div
-                        className={`pointer-events-none absolute z-35 flex items-center justify-center animate-bounce duration-700 ${
-                            landscape
-                                ? 'top-[36%] left-[30%]'
-                                : 'top-[26%] left-1/2'
-                        }`}
+                        className="pointer-events-none absolute z-35 flex items-center justify-center animate-bounce duration-700"
                         style={{
+                            top: landscape ? '36%' : '26%',
+                            left: landscape ? 'var(--board-cx, 45%)' : '50%',
                             transform: landscape ? 'translate(-50%, -50%) scale(0.40)' : 'translateX(-50%) scale(0.40)',
                             transformOrigin: 'center center',
                             width: 'max-content',
@@ -1064,12 +1160,10 @@ export function Hud() {
                 ) : (
                     /* Lucky 7 / Info popup centered on board as a translucent glass window (.40x size) */
                     <div
-                        className={`pointer-events-none absolute z-35 flex items-center justify-center ${
-                            landscape
-                                ? 'top-[36%] left-[30%]'
-                                : 'top-[30%] left-1/2'
-                        }`}
+                        className="pointer-events-none absolute z-35 flex items-center justify-center"
                         style={{
+                            top: landscape ? '36%' : '30%',
+                            left: landscape ? 'var(--board-cx, 45%)' : '50%',
                             transform: landscape ? 'translate(-50%, -50%) scale(0.40)' : 'translateX(-50%) scale(0.40)',
                             transformOrigin: 'center center',
                             width: 'max-content',

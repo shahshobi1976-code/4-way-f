@@ -9,6 +9,14 @@ export interface NameplateBound {
     angleDeg: number;
 }
 
+export interface AdBannerBound {
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    visible: boolean;
+}
+
 // Channel between React UI, Multiplayer Client, and running Pixi scene
 export const bus: {
     /** Post a chat line as a player (typed message, reaction, quick phrase). */

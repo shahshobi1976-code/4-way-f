@@ -87,6 +87,7 @@ export function Chip({ active, children, onClick, style }: { active?: boolean; c
 }
 
 export function RoundBtn({
+    id,
     children,
     onClick,
     onPointerDown,
@@ -98,6 +99,7 @@ export function RoundBtn({
     style,
     title,
 }: {
+    id?: string;
     children: ReactNode;
     onClick?: () => void;
     onPointerDown?: PointerEventHandler<HTMLButtonElement>;
@@ -111,6 +113,7 @@ export function RoundBtn({
 }) {
     return (
         <button
+            id={id}
             type="button"
             aria-label={label}
             title={title || label}

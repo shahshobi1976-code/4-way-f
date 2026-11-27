@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import { readDevice, readLocal, write } from './persist';
-import type { NameplateBound } from '../game/bus';
+import type { AdBannerBound, NameplateBound } from '../game/bus';
 import type { AIPersonality, RivalryCalloutKind } from '../game/banter';
 import { createEmptyGrudges, type GrudgeEntry, type RivalryState } from '../game/rules';
 import { resolveBoardTheme, type BoardThemeId, type DiceStyleId } from '../game/themes';
@@ -30,7 +30,7 @@ export interface Settings {
     music: boolean;
     aiMute: boolean; // Mute AI talking/speech only
     bgmTrack: string; // bundled MP3 soundtrack id
-    bg: number; // 0..9 background arena
+    bg: number; // 0..16 background arena
     boardTheme: BoardThemeId;
     diceStyle: DiceStyleId;
     tokenStyle: TokenStyleId;
@@ -115,6 +115,7 @@ export interface AppState {
     localReactions: Record<number, { seatIndex: number; emoji: string; until: number; key: number }>;
     chatOpen: boolean;
     nameplateBounds: NameplateBound[];
+    adBannerBound: AdBannerBound | null;
     micPermission: MicPermissionState;
     micDeviceLabel: string | null;
     micError: string | null;
@@ -211,6 +212,7 @@ let state: AppState = {
     localReactions: {},
     chatOpen: false,
     nameplateBounds: [],
+    adBannerBound: null,
     micPermission: 'unknown',
     micDeviceLabel: null,
     micError: null,

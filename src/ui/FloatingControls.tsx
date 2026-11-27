@@ -123,7 +123,6 @@ export function ScreenButtons({ gap = 6 }: { gap?: number }) {
     const wishNums = useStore((s) => s.wishNums);
     const wishUsable = useStore((s) => s.wishUsable);
     const phase = useStore((s) => s.phase);
-    const landscape = useStore((s) => s.landscape);
     const chatOpen = useStore((s) => s.chatOpen);
     const isMultiplayer = !!multiplayerClient.roomCode;
 
@@ -138,8 +137,9 @@ export function ScreenButtons({ gap = 6 }: { gap?: number }) {
     };
 
     return (
-        <div className="flex items-center" style={{ gap: U(gap) }}>
+        <div id="bottom-left-actions" className="flex items-center" style={{ gap: U(gap) }}>
             <RoundBtn
+                id="ratio-toggle-btn"
                 label="Fullscreen"
                 size={24}
                 onClick={toggleFullscreen}
@@ -148,9 +148,9 @@ export function ScreenButtons({ gap = 6 }: { gap?: number }) {
                 {fs ? '⤡' : '⛶'}
             </RoundBtn>
 
-            {/* In vertical mobile screen only (!landscape): Chat & Emoji Reaction icon is placed on the RIGHT SIDE of Fullscreen icon */}
-            {!landscape && showChat && (
+            {showChat && (
                 <RoundBtn
+                    id="quick-msg-btn"
                     label="Chat & Emoji Reactions"
                     size={24}
                     onClick={toggleChat}
@@ -161,9 +161,9 @@ export function ScreenButtons({ gap = 6 }: { gap?: number }) {
                 </RoundBtn>
             )}
 
-            {/* When a wish exists, display it right next to the previous icons */}
             {hasWish && (
                 <button
+                    id="wish-btn"
                     type="button"
                     onClick={() => bus.wish?.()}
                     disabled={!wishUsable}
@@ -175,13 +175,13 @@ export function ScreenButtons({ gap = 6 }: { gap?: number }) {
                             : 'border-white/30 bg-slate-900/80 text-white/50 cursor-not-allowed opacity-80'
                     }`}
                     style={{
-                        height: U(48),
-                        padding: `0 ${U(14)}`,
-                        gap: U(6),
-                        fontSize: U(15),
+                        height: U(24),
+                        padding: `0 ${U(9)}`,
+                        gap: U(4),
+                        fontSize: U(11),
                     }}
                 >
-                    <span style={{ fontSize: U(17) }}>✨</span>
+                    <span style={{ fontSize: U(12) }}>✨</span>
                     <span>{wishNums[0]},{wishNums[1]}</span>
                 </button>
             )}
@@ -372,12 +372,9 @@ export function FloatingControls() {
     const phase = useStore((s) => s.phase);
     const aiMute = useStore((s) => s.settings.aiMute);
     const landscape = useStore((s) => s.landscape);
-    const chatOpen = useStore((s) => s.chatOpen);
     const [, setNetTick] = useState(0);
     useEffect(() => multiplayerClient.subscribe(() => setNetTick((t) => t + 1)), []);
 
-    const isMultiplayer = !!multiplayerClient.roomCode;
-    const showChat = phase === 'playing' || isMultiplayer;
     const showVoiceMic = phase === 'playing';
 
     const toggleAiMute = () => {
@@ -386,10 +383,6 @@ export function FloatingControls() {
         if (next) {
             sfx.stopSpeech();
         }
-    };
-
-    const toggleChat = () => {
-        store.patch({ chatOpen: !chatOpen });
     };
 
     return (
@@ -441,22 +434,7 @@ export function FloatingControls() {
                 )}
             </div>
 
-            {/* In landscape mode: Chat button is stacked above fullscreen in bottom-left */}
-            {landscape && showChat && (
-                <div className="absolute z-30" style={{ left: U(12), bottom: U(44) }}>
-                    <RoundBtn
-                        label="Chat & Emoji Reactions"
-                        size={24}
-                        onClick={toggleChat}
-                        title="Chat & Emoji Reactions"
-                        className={chatOpen ? "!border-cyan-400 !bg-cyan-500/30 text-cyan-200 ring-2 ring-cyan-400/50" : ""}
-                    >
-                        💬
-                    </RoundBtn>
-                </div>
-            )}
-
-            {/* Bottom-Left Controls: Fullscreen + [Chat & Emoji (vertical mobile only)] + Wish */}
+            {/* Bottom-Left Controls: #ratio-toggle-btn + #quick-msg-btn + #wish-btn */}
             <div className="absolute z-30" style={{ left: U(12), bottom: U(14) }}>
                 <ScreenButtons gap={6} />
             </div>

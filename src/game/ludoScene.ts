@@ -319,12 +319,30 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         return { x: OX + rx * k * S, y: OY + Y * k * S, k, d: D };
     };
 
+    const invP = (sx: number, sy: number) => {
+        const safeS = Math.max(1e-3, S);
+        const nx = (sx - OX) / safeS;
+        const ny = (sy - OY) / safeS;
+        const el = rad(pitch), se = Math.sin(el), ce = Math.cos(el);
+        const denom = se * F + ny * ce;
+        if (denom <= 1.2) return { x: 7.5, y: 7.5, ok: false };
+        const ry = (ny * F) / denom;
+        const fPlusD = F - ry * ce;
+        if (fPlusD <= 1.2) return { x: 7.5, y: 7.5, ok: false };
+        const rx = (nx * fPlusD) / F;
+        const a = rad(yaw), ca = Math.cos(a), sa = Math.sin(a);
+        const bx = rx * ca + ry * sa;
+        const by = -rx * sa + ry * ca;
+        return { x: 7.5 + bx, y: 7.5 + by, ok: true };
+    };
+
     // layout rectangles (design units)
     let boardRect = { x: 10, y: 196, w: 700, h: 420 };
-    let diceCY = 890, diceSize = 64;
+    let diceCY = 890, diceSize = 54;
     let diceCX = [260, 460];
     let turnY = 960, chatY = 1000;
     let colX = 20, colW = 680;
+    let portraitCenterMaxW = 260;
     let adRect = { x: 20, y: 700, w: 680, h: 160 };
 
     function fitBoard(scaleMultiplier = 1.0) {
@@ -346,7 +364,14 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
 
     function layout() {
         const W = stage.designWidth(), H = stage.designHeight();
-        bgFill.clear().rect(-60, -60, W + 120, H + 120).fill(BG_BASE[store.get().settings.bg]);
+        const sw = Math.max(1, app.screen.width);
+        const sh = Math.max(1, app.screen.height);
+        const u = Math.max(0.01, stage.unit());
+        bgFill.clear().rect(-80, -80, W + 160, H + 160).fill(BG_BASE[store.get().settings.bg]);
+        let adVisible = false;
+
+        const minGap150 = Math.ceil(150 / u);
+
         if (stage.landscape()) {
             const bw = Math.min(W * 0.56, 800);
             // Board pushed down generously so top color name plates and HUD bars have clear spacing
@@ -356,50 +381,113 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
 
             fitBoard(1.0);
 
-            // 1. Ad banner in landscape / web with DOUBLED height (220 units)
-            const bannerTop = 82;
-            const bannerH = 220; // Doubled height in landscape/web
-            adRect = { x: colX, y: bannerTop, w: colW, h: bannerH };
+            // 1. Right-side FloatingControls footprint mapped into design units; anchor 0.75x dice cleanly to its LEFT
+            const cssU = Math.max(0.65, Math.min(sh / 680, sw / 960));
+            const cssToDesign = cssU / u;
+            const rightIconsLeftX = W - 66 * cssToDesign;
+            const trayGapFromIcons = 14;
+            const trayRightEdge = rightIconsLeftX - trayGapFromIcons;
+            const availW = Math.max(150, trayRightEdge - colX);
 
-            // 2. Clickable dice positioned DOWN below the doubled banner (1.2x larger)
-            diceSize = Math.min(82, colW * 0.26);
-            diceCY = adRect.y + adRect.h + 36 + diceSize / 2;
-            diceCX = [colX + colW / 2 - diceSize * 1.22, colX + colW / 2 + diceSize * 1.22];
+            const baseDiceSize = Math.round(Math.min(82, colW * 0.26) * 0.75);
+            diceSize = Math.max(38, Math.min(baseDiceSize, Math.floor(availW / 4.65)));
+            const trayW = diceSize * 4.64;
+            const trayCenterX = Math.round(trayRightEdge - trayW / 2);
 
-            // 3. Turn message and AI chatter text positioned DOWN below the dice
-            turnY = diceCY + diceSize * 0.5 + 32;
-            chatY = turnY + 36;
+            diceCY = Math.round(H - 14 * cssToDesign - Math.max(diceSize * 0.9, 27 * cssToDesign));
+            diceCX = [trayCenterX - diceSize * 1.22, trayCenterX + diceSize * 1.22];
+
+            // 2. Roll hint / turn text positioned cleanly above the bottom-right dice
+            turnY = Math.round(diceCY - diceSize * 0.9 - 14);
+            chatY = turnY - 26;
+
+            // 3. Policy-compliant Ad Banner on upper-right beneath non-clickable #ai-judge-bar (>=150px clearance from board, nameplates, dice, roll hint, and music/settings buttons)
+            const isCompactLand = sh <= 540;
+            const targetAdW = isCompactLand ? 176 : 184;
+            const targetAdH = isCompactLand ? 328 : 358;
+            const topBarBottomDesign = Math.ceil((20 + 30 * cssU + 4) / u);
+            const adTop = Math.max(56, topBarBottomDesign);
+            const maxAdBottom = Math.round(turnY - 12 - minGap150);
+            const adH = Math.max(0, Math.min(targetAdH, maxAdBottom - adTop));
+            const boardSafeRight = boardRect.x + boardRect.w + 26 + minGap150;
+            const availAdW = Math.floor(W - 20 - boardSafeRight);
+            const adW = Math.min(targetAdW, Math.max(0, availAdW));
+            const adX = W - 20 - adW;
+            adRect = { x: adX, y: adTop, w: adW, h: adH };
+            adVisible = adW >= 120 && adH >= 120;
         } else {
-            // Vertical mobile: increase board size by 0.2x (1.20x scale) cleanly positioned with 3x banner height
-            const boardTop = 150;
-            const boardW = Math.min(W - 20, 740);
-            const maxBoardH = Math.min(boardW * 0.86, Math.round((H - boardTop) * 0.44));
+            // Vertical mobile & tablet: full playable board + 0.75x dice & click zone at bottom center in icon line + 90px full-width ad banner (>=150px clear)
+            const frameW = sw;
+            const cssU = Math.max(0.65, Math.min(frameW / 420, sh / 740));
+            const cssToDesign = cssU / u;
+            const centerFreeW = Math.max(150, W - 264 * cssToDesign);
+            portraitCenterMaxW = Math.max(140, centerFreeW - 8);
+
+            // 1. 0.75x dice in the bottom-center icon row
+            diceSize = Math.max(40, Math.min(Math.round(72 * 0.75), Math.round(36 * cssToDesign), Math.floor(centerFreeW / 4.2)));
+            const diceSep = Math.round(diceSize * 1.32);
+            diceCY = Math.round(H - 26 * cssToDesign);
+            diceCX = [Math.round(W / 2 - diceSep), Math.round(W / 2 + diceSep)];
+
+            // 2. Clickable roll hint / turn text positioned cleanly right above the bottom-center dice
+            turnY = Math.round(diceCY - diceSize * 0.5 - 15);
+            chatY = Math.round(turnY - 24);
+
+            // 3. Size board robustly up to full width (never crush the playable board on shorter portrait viewports)
+            const bottomCtrlTop = H - 38 * cssToDesign;
+            const bottomClickableTop = Math.min(bottomCtrlTop, diceCY - Math.round(diceSize * 0.75), turnY - 12);
+            const adH = Math.round(80 / u);
+            const topHudBotDesign = Math.ceil((10 + 30 * cssU + 4 + 20 * cssU) / u);
+            const boardTop = Math.max(topHudBotDesign + 42, Math.min(150, Math.round(H * 0.12)));
+
+            const isTabletPortrait = sw >= 760 && sh >= 950;
+            const mobileScale = isTabletPortrait ? 1.0 : 0.8;
+            const boardW = Math.round(Math.min(W - 20, 740) * mobileScale);
+            const rawMaxH = Math.min(boardW * 0.86, Math.round((H - boardTop) * 0.56 * mobileScale));
+            const availWithAd = Math.floor(bottomClickableTop - 2 * minGap150 - adH - 46 - boardTop);
+            const minPlayableH = isTabletPortrait
+                ? Math.round(boardW * 0.48)
+                : Math.round(boardW * 0.56);
+            const maxBoardH = availWithAd >= minPlayableH ? Math.min(rawMaxH, availWithAd) : rawMaxH;
             boardRect = { x: Math.round((W - boardW) / 2), y: boardTop, w: boardW, h: maxBoardH };
             colX = 16;
-            colW = boardW;
+            colW = W - 32;
 
-            fitBoard(1.20);
+            fitBoard(1.0);
 
-            // Calculate exact bottom coordinate of board and bottom plates (Yellow & Blue)
+            // Calculate exact bottom coordinate of rendered board & bottom nameplates
             const c0 = P(0, 0), c1 = P(15, 0), c2 = P(15, 15), c3 = P(0, 15);
             const actualBottom = Math.max(P(0, 15, -0.7).y, P(15, 15, -0.7).y, c0.y, c1.y, c2.y, c3.y);
 
-            // 1. Clickable dice placed cleanly below the board & bottom nameplates (1.2x larger)
-            diceSize = 72;
-            diceCY = Math.round(actualBottom + 50 + diceSize / 2);
-            diceCX = [W / 2 - diceSize * 1.22, W / 2 + diceSize * 1.22];
-
-            // 2. Turn message and chatter ("message place") positioned comfortably below the dice
-            turnY = Math.round(diceCY + diceSize * 0.5 + 22);
-            chatY = Math.round(turnY + 24);
-
-            // 3. Advertisement banner placed cleanly UNDER the message place with 3x height
-            const bannerTop = Math.round(chatY + 46);
-            const bannerH = Math.min(210, Math.max(130, Math.round(H - bannerTop - 50)));
-            adRect = { x: 24, y: bannerTop, w: W - 48, h: bannerH };
+            // 4. Policy-compliant 90px edge-to-edge Portrait Ad Banner (stick to left and right, >=150px clear above and below)
+            const safeAboveBottom = actualBottom + 46;
+            const adW = W;
+            const minSafeY = Math.round(safeAboveBottom + minGap150);
+            const maxSafeY = Math.round(bottomClickableTop - minGap150 - adH);
+            const preferredY = Math.round((minSafeY + maxSafeY) / 2);
+            if (minSafeY <= maxSafeY) {
+                const adY = Math.max(minSafeY, Math.min(maxSafeY, preferredY));
+                adRect = { x: 0, y: adY, w: adW, h: adH };
+                adVisible = true;
+            } else {
+                const fallbackY = Math.round((safeAboveBottom + (bottomClickableTop - adH)) / 2);
+                adRect = { x: 0, y: fallbackY, w: adW, h: adH };
+                adVisible = false;
+            }
         }
-        document.getElementById('app-frame')?.style.setProperty('--colx', String(colX));
-        document.getElementById('app-frame')?.style.setProperty('--colw', String(colW));
+        const frameEl = document.getElementById('app-frame');
+        frameEl?.style.setProperty('--colx', String(colX));
+        frameEl?.style.setProperty('--colw', String(colW));
+        frameEl?.style.setProperty('--board-cx', `${Math.round((boardRect.x + boardRect.w / 2) * u)}px`);
+        store.patch({
+            adBannerBound: {
+                x: Math.round(adRect.x * u),
+                y: Math.round(adRect.y * u),
+                w: Math.round(adRect.w * u),
+                h: Math.round(adRect.h * u),
+                visible: adVisible,
+            },
+        });
         buildUi();
         lastSig = '';
     }
@@ -420,7 +508,11 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         const st = store.get().settings;
         const bt = resolveBoardTheme(st.boardTheme);
         bgG.clear();
-        drawBackground(bgG, (x, y, z) => P(x, y, z ?? 0), st.bg, S);
+        drawBackground(bgG, (x, y, z) => P(x, y, z ?? 0), st.bg, S, {
+            w: stage.designWidth(),
+            h: stage.designHeight(),
+            invP,
+        });
         drawThemedBoardSurface(boardG, (x, y, z = 0) => P(x, y, z), bt, active, S, outline);
         if (homeCenterTxt && !homeCenterTxt.destroyed) {
             homeCenterTxt.style.fill = bt.homeTextFill;
@@ -1296,8 +1388,8 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             homeCenterTxt.eventMode = 'none';
             uiLayer.addChild(homeCenterTxt);
 
-            // half-size text for the turn line and the AI chatter
-            turnTxt = new Text({ text: '', style: { fontFamily: 'Arial, sans-serif', fontSize: 16, fontWeight: '800', fill: 0xffffff, stroke: { color: 0x000000, width: 3 } } });
+            // 0.75x roll hint text
+            turnTxt = new Text({ text: '', style: { fontFamily: 'Arial, sans-serif', fontSize: 13, fontWeight: '800', fill: 0xffffff, stroke: { color: 0x000000, width: 2.5 } } });
             turnTxt.anchor.set(0.5);
             turnTxt.eventMode = 'static';
             turnTxt.cursor = 'pointer';
@@ -1306,38 +1398,35 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             uiLayer.addChild(turnTxt);
             chatTxt.length = 0;
             // AI banter text lines removed from board per user instruction
-            // Advertisement banner slot
+            // Legacy Pixi ad banner slot disabled (policy-compliant #ad-banner is rendered in DOM Hud)
             adC = new Container();
             adG = new Graphics();
-            const adTag = new Text({
-                text: 'AD',
-                style: { fontFamily: 'Arial, sans-serif', fontSize: 13, fontWeight: '900', fill: 0x111827 },
-            });
-            adTag.anchor.set(0.5);
-            adTag.eventMode = 'none';
-            adTag.position.set(40, 28);
-            adC.addChild(adG, adTag);
-            adC.eventMode = 'static';
-            adC.cursor = 'pointer';
-            adC.on('pointertap', () => { /* banner slot: hook an ad SDK here */ });
+            adC.visible = false;
+            adC.eventMode = 'none';
             uiLayer.addChild(adC);
         }
 
         // On every layout, seamlessly reposition and redraw without destroying Text textures
+        const isLand = stage.landscape();
         if (diceTrayC) {
-            const trayW = Math.abs(diceCX[1] - diceCX[0]) + diceSize * 2.8;
-            const trayH = diceSize * 1.8;
+            const rawTrayW = Math.abs(diceCX[1] - diceCX[0]) + diceSize * (isLand ? 2.2 : 1.55);
+            const trayW = isLand ? rawTrayW : Math.min(portraitCenterMaxW, rawTrayW);
+            const trayH = diceSize * (isLand ? 1.78 : 1.5);
             diceTrayC.position.set((diceCX[0] + diceCX[1]) / 2, diceCY);
             diceTrayC.hitArea = new Rectangle(-trayW / 2, -trayH / 2, trayW, trayH);
         }
         for (let i = 0; i < 2; i++) {
             if (dieC[i]) {
                 dieC[i].position.set(diceCX[i], diceCY);
-                dieC[i].hitArea = new Circle(0, 0, diceSize * 1.35);
+                dieC[i].hitArea = new Circle(0, 0, diceSize * (isLand ? 1.35 : 0.88));
             }
         }
         if (sumC) {
-            sumC.position.set((diceCX[0] + diceCX[1]) / 2, diceCY + diceSize * 0.75);
+            sumC.scale.set(0.75);
+            sumC.position.set(
+                (diceCX[0] + diceCX[1]) / 2,
+                isLand ? diceCY + diceSize * 0.72 : diceCY,
+            );
             sumC.hitArea = new Rectangle(-44, -16, 88, 32);
         }
         if (turnTxt && !turnTxt.destroyed) {
@@ -1351,18 +1440,10 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
             }
         }
         if (adC) {
-            adC.position.set(adRect.x, adRect.y);
+            adC.visible = false;
         }
         if (adG) {
-            adG.clear()
-                .roundRect(0, 0, adRect.w, adRect.h, 16)
-                .fill({ color: 0x0b132e, alpha: 0.65 })
-                .stroke({ width: 2, color: 0x00f0ff, alpha: 0.85 })
-                .roundRect(10, 10, adRect.w - 20, adRect.h - 20, 12)
-                .fill({ color: 0x141f48, alpha: 0.28 })
-                .stroke({ width: 1, color: 0x00f0ff, alpha: 0.2 })
-                .roundRect(16, 16, 48, 24, 6)
-                .fill(0xffc107);
+            adG.clear();
         }
     }
 
@@ -1371,15 +1452,9 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         const isMyTurn = isOnline() ? multiplayerClient.myPlayerIndex === current : !isAI(current);
         const rollingIdle = !!waitRoll && isMyTurn;
 
+        // Keep surrounding dice box completely transparent while preserving diceTrayC tap hitArea
         if (diceTrayG) {
-            const trayW = Math.abs(diceCX[1] - diceCX[0]) + diceSize * 2.8;
-            const trayH = diceSize * 1.8;
-            const trayBorder = rollingIdle ? COLORS[current] : 0x1e293b;
-            const trayAlpha = rollingIdle ? 0.75 + 0.25 * Math.sin(now / 180) : 0.25;
-            diceTrayG.clear()
-                .roundRect(-trayW / 2, -trayH / 2, trayW, trayH, 20)
-                .fill({ color: 0x070b1e, alpha: rollingIdle ? 0.75 : 0.45 })
-                .stroke({ width: rollingIdle ? 2.5 : 1, color: trayBorder, alpha: trayAlpha });
+            diceTrayG.clear();
         }
 
         for (let i = 0; i < 2; i++) {
@@ -3422,7 +3497,19 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
         outline = mix(outline, tc, Math.min(1, dt / 350));
 
         fitBoard();
-        const sig = [yaw.toFixed(1), pitch.toFixed(1), S.toFixed(1), OX.toFixed(0), OY.toFixed(0), outline, st.bg, st.boardTheme || 'classic', st.diceStyle || 'classic'].join('|');
+        const sig = [
+            yaw.toFixed(1),
+            pitch.toFixed(1),
+            S.toFixed(1),
+            OX.toFixed(0),
+            OY.toFixed(0),
+            stage.designWidth().toFixed(0),
+            stage.designHeight().toFixed(0),
+            outline,
+            st.bg,
+            st.boardTheme || 'classic',
+            st.diceStyle || 'classic',
+        ].join('|');
         if (sig !== lastSig) {
             lastSig = sig;
             drawBoard();
@@ -3447,10 +3534,10 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
 
     layout();
     const offResize = stage.onResize(layout);
-    bgFill.clear().rect(-60, -60, stage.designWidth() + 120, stage.designHeight() + 120).fill(BG_BASE[store.get().settings.bg]);
+    bgFill.clear().rect(-80, -80, stage.designWidth() + 160, stage.designHeight() + 160).fill(BG_BASE[store.get().settings.bg]);
     // keep the page background in step with the chosen table
     const unsubStore = store.subscribe(() => {
-        bgFill.clear().rect(-60, -60, stage.designWidth() + 120, stage.designHeight() + 120).fill(BG_BASE[store.get().settings.bg]);
+        bgFill.clear().rect(-80, -80, stage.designWidth() + 160, stage.designHeight() + 160).fill(BG_BASE[store.get().settings.bg]);
     });
     const onVisibilityChange = () => {
         if (dead) return;
@@ -3521,6 +3608,7 @@ export function createLudoScene(app: Application, stage: Stage, opts: SceneOpts)
                 rivalryBanner: null,
                 localReactions: {},
                 nameplateBounds: [],
+                adBannerBound: null,
             });
         },
     };
